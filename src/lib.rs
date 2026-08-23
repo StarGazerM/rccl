@@ -6,13 +6,32 @@ use cuda_device::config::Policy;
 use rccl_macros::radix_policy_chain;
 use std::{error::Error, fmt, sync::Arc};
 
-pub const RADIX_BITS: u32 = 4;
+pub const RADIX_BITS: u32 = 8;
 pub const RADIX_SIZE: usize = 1 << RADIX_BITS;
+const RADIX_PASSES: usize = 32usize.div_ceil(RADIX_BITS as usize);
+const LOOKBACK_PARTIAL: u32 = 1 << 30;
+const LOOKBACK_GLOBAL: u32 = 2 << 30;
+const LOOKBACK_VALUE_MASK: u32 = (1 << 30) - 1;
 const SCAN_ITEMS_PER_THREAD: u32 = 4;
 const SCAN_THREADS: u32 = 256;
 const SCAN_TILE: u32 = SCAN_THREADS * SCAN_ITEMS_PER_THREAD;
 const SCAN_WARPS: usize = (SCAN_THREADS / 32) as usize;
-const MAX_WARPS: usize = 32;
+const fn padded_warps(block_threads: u32) -> usize {
+    let warps = (block_threads / 32) as usize;
+    if warps.is_multiple_of(2) {
+        warps + 1
+    } else {
+        warps
+    }
+}
+
+const fn raking_segment(block_threads: u32) -> usize {
+    (RADIX_SIZE * padded_warps(block_threads)).div_ceil(block_threads as usize)
+}
+
+const fn raking_storage(block_threads: u32) -> usize {
+    block_threads as usize * raking_segment(block_threads)
+}
 
 /// Compile-time tuning vocabulary consumed by the generic radix kernels.
 ///
@@ -51,12 +70,12 @@ impl PolicyConfig {
 radix_policy_chain! {
     pub enum RadixPolicySelection: crate::RadixPolicy {
         namespace: 0x7263_636c_5f72_6478;
-        Sm80 => { min_sm: 80, threads: 256, items: 12, radix_bits: 4, min_blocks: 2, unroll: 4 },
-        Sm86 => { min_sm: 86, threads: 256, items: 12, radix_bits: 4, min_blocks: 2, unroll: 4 },
-        Sm89 => { min_sm: 89, threads: 256, items: 16, radix_bits: 4, min_blocks: 2, unroll: 4 },
-        Sm90 => { min_sm: 90, threads: 384, items: 16, radix_bits: 4, min_blocks: 2, unroll: 4 },
-        Sm100 => { min_sm: 100, threads: 512, items: 16, radix_bits: 4, min_blocks: 1, unroll: 8 },
-        Sm120 => { min_sm: 120, threads: 512, items: 16, radix_bits: 4, min_blocks: 1, unroll: 8 }
+        Sm80 => { min_sm: 80, threads: 256, items: 12, radix_bits: 8, min_blocks: 2, unroll: 16 },
+        Sm86 => { min_sm: 86, threads: 256, items: 12, radix_bits: 8, min_blocks: 2, unroll: 16 },
+        Sm89 => { min_sm: 89, threads: 256, items: 16, radix_bits: 8, min_blocks: 2, unroll: 16 },
+        Sm90 => { min_sm: 90, threads: 384, items: 16, radix_bits: 8, min_blocks: 2, unroll: 16 },
+        Sm100 => { min_sm: 100, threads: 512, items: 16, radix_bits: 8, min_blocks: 1, unroll: 16 },
+        Sm120 => { min_sm: 120, threads: 512, items: 16, radix_bits: 8, min_blocks: 1, unroll: 16 }
     }
 }
 
@@ -94,7 +113,6 @@ pub enum SortError {
     TooManyItems(usize),
     WorkspaceTooSmall { requested: usize, capacity: usize },
     WorkspacePolicyMismatch,
-    ScanHierarchyTooDeep { chunks: u32 },
 }
 
 impl fmt::Display for SortError {
@@ -124,10 +142,6 @@ impl fmt::Display for SortError {
             Self::WorkspacePolicyMismatch => {
                 write!(f, "workspace was built for a different SM policy")
             }
-            Self::ScanHierarchyTooDeep { chunks } => write!(
-                f,
-                "{chunks} histogram chunks exceed the two-level scan limit of {SCAN_TILE}"
-            ),
         }
     }
 }
@@ -152,7 +166,7 @@ mod kernels {
     use super::*;
     use cuda_device::atomic::{AtomicOrdering, BlockAtomicU32, DeviceAtomicU32};
     use cuda_device::cooperative_groups::{block_scan, ops::Sum, this_thread_block};
-    use cuda_device::{SharedArray, kernel, launch_bounds, thread, warp};
+    use cuda_device::{DynamicSharedArray, SharedArray, kernel, launch_bounds, thread, warp};
 
     const FULL_MASK: u32 = u32::MAX;
 
@@ -184,6 +198,98 @@ mod kernels {
         }
     }
 
+    #[kernel]
+    pub unsafe fn reset_words_u32(output: *mut u32, count: u32) {
+        let index = thread::index_1d().get() as u32;
+        if index < count {
+            unsafe { output.add(index as usize).write(0) };
+        }
+    }
+
+    /// One input traversal computes global histograms for all byte passes.
+    /// The result is invariant under the permutations performed by sorting.
+    #[kernel]
+    #[launch_bounds(P::BLOCK_THREADS, P::MIN_BLOCKS_PER_SM)]
+    pub unsafe fn histogram_all_digits_u32<P: RadixPolicy>(
+        input: *const u32,
+        histograms: *mut u32,
+        count: u32,
+        descending: bool,
+    ) where
+        [(); P::ITEMS_PER_THREAD as usize]:,
+    {
+        static mut HISTOGRAMS: SharedArray<u32, { RADIX_PASSES * RADIX_SIZE }> =
+            SharedArray::UNINIT;
+
+        let tid = thread::threadIdx_x();
+        let shared = unsafe { SharedArray::as_raw_mut_ptr(&raw mut HISTOGRAMS) };
+        let mut slot = tid;
+        while slot < (RADIX_PASSES * RADIX_SIZE) as u32 {
+            unsafe { shared.add(slot as usize).write(0) };
+            slot += P::BLOCK_THREADS;
+        }
+        thread::sync_threads();
+
+        let tile = P::BLOCK_THREADS * P::ITEMS_PER_THREAD;
+        let stride = thread::gridDim_x() * tile;
+        let mut base = thread::blockIdx_x() * tile;
+        while base < count {
+            let mut item = 0;
+            #[unroll(P::UNROLL)]
+            while item < P::ITEMS_PER_THREAD {
+                let index = base + item * P::BLOCK_THREADS + tid;
+                let valid = index < count;
+                let key = if valid {
+                    unsafe { input.add(index as usize).read() }
+                } else {
+                    0
+                };
+                if valid {
+                    let mut pass = 0u32;
+                    while pass < RADIX_PASSES as u32 {
+                        let digit = radix_digit(key, pass * RADIX_BITS, descending);
+                        let histogram_slot = pass * RADIX_SIZE as u32 + digit;
+                        let counter = unsafe {
+                            BlockAtomicU32::from_ptr(shared.add(histogram_slot as usize))
+                        };
+                        counter.fetch_add(1, AtomicOrdering::Relaxed);
+                        pass += 1;
+                    }
+                }
+                item += 1;
+            }
+            base += stride;
+        }
+        thread::sync_threads();
+
+        slot = tid;
+        while slot < (RADIX_PASSES * RADIX_SIZE) as u32 {
+            let value = unsafe { shared.add(slot as usize).read() };
+            if value != 0 {
+                let counter = unsafe { DeviceAtomicU32::from_ptr(histograms.add(slot as usize)) };
+                counter.fetch_add(value, AtomicOrdering::Relaxed);
+            }
+            slot += P::BLOCK_THREADS;
+        }
+    }
+
+    #[kernel]
+    pub unsafe fn global_digit_bases(histograms: *const u32, bases: *mut u32) {
+        static mut SCAN_SHARED: SharedArray<u32, SCAN_WARPS> = SharedArray::UNINIT;
+
+        let pass = thread::blockIdx_x();
+        let digit = thread::threadIdx_x();
+        let index = pass * RADIX_SIZE as u32 + digit;
+        let count = unsafe { histograms.add(index as usize).read() };
+        let block = this_thread_block();
+        let inclusive = block_scan::<u32, Sum, SCAN_WARPS>(&block, count, &raw mut SCAN_SHARED);
+        unsafe {
+            bases
+                .add(index as usize)
+                .write(inclusive.wrapping_sub(count))
+        };
+    }
+
     /// Per-CTA 256-bin histogram. Warp match aggregation reduces shared-memory
     /// atomics from one per key to one per distinct digit in a warp.
     #[kernel]
@@ -202,8 +308,10 @@ mod kernels {
 
         let tid = thread::threadIdx_x();
         let block = thread::blockIdx_x();
-        if tid < RADIX_SIZE as u32 {
-            unsafe { HISTOGRAM[tid as usize] = 0 };
+        let mut digit_slot = tid;
+        while digit_slot < RADIX_SIZE as u32 {
+            unsafe { HISTOGRAM[digit_slot as usize] = 0 };
+            digit_slot += P::BLOCK_THREADS;
         }
         thread::sync_threads();
 
@@ -232,13 +340,15 @@ mod kernels {
         }
         thread::sync_threads();
 
-        if tid < RADIX_SIZE as u32 {
-            let output_index = tid * num_blocks + block;
+        digit_slot = tid;
+        while digit_slot < RADIX_SIZE as u32 {
+            let output_index = digit_slot * num_blocks + block;
             unsafe {
                 block_histograms
                     .add(output_index as usize)
-                    .write(HISTOGRAM[tid as usize]);
+                    .write(HISTOGRAM[digit_slot as usize]);
             }
+            digit_slot += P::BLOCK_THREADS;
         }
     }
 
@@ -389,128 +499,235 @@ mod kernels {
         }
     }
 
-    /// Stable block-rank scatter. Each item stripe is ranked in thread order:
-    /// warp match groups publish one count per digit, earlier warp counts form
-    /// the stripe rank, and `DIGIT_PREFIXES` carries totals across stripes.
-    /// Keys are read exactly once and no per-thread local array is required.
+    /// CUB-style stable block-rank scatter. A warp owns a contiguous input
+    /// segment and accumulates one counter per digit. An exclusive scan over
+    /// the digit-major warp counters seeds each warp rank. Keeping keys and
+    /// ranks live across the scan makes this a single global-memory read.
     #[kernel]
     #[launch_bounds(P::BLOCK_THREADS, P::MIN_BLOCKS_PER_SM)]
-    pub unsafe fn scatter_u32<P: RadixPolicy>(
+    pub unsafe fn onesweep_u32<P: RadixPolicy>(
         input: *const u32,
         output: *mut u32,
-        block_offsets: *const u32,
         digit_bases: *const u32,
+        lookback: *mut u32,
+        tile_counter: *mut u32,
         count: u32,
         shift: u32,
         num_blocks: u32,
         descending: bool,
-    ) {
-        static mut WARP_HISTOGRAMS: SharedArray<u32, { MAX_WARPS * RADIX_SIZE }> =
-            SharedArray::UNINIT;
-        static mut DIGIT_PREFIXES: SharedArray<u32, RADIX_SIZE> = SharedArray::UNINIT;
-
+    ) where
+        [(); P::ITEMS_PER_THREAD as usize]:,
+        [(); (P::BLOCK_THREADS / 32) as usize]:,
+    {
         let tid = thread::threadIdx_x();
-        let block = thread::blockIdx_x();
         let warp_id = tid / 32;
         let lane = warp::lane_id();
-        let num_warps = P::BLOCK_THREADS / 32;
         let tile = P::BLOCK_THREADS * P::ITEMS_PER_THREAD;
-        let base = block * tile;
-        let warp_histograms = unsafe { SharedArray::as_raw_mut_ptr(&raw mut WARP_HISTOGRAMS) };
-        let digit_prefixes = unsafe { SharedArray::as_raw_mut_ptr(&raw mut DIGIT_PREFIXES) };
-        let mut slot = tid;
-        let active_warp_slots = num_warps * RADIX_SIZE as u32;
-        while slot < active_warp_slots {
-            unsafe { warp_histograms.add(slot as usize).write(0) };
-            slot += P::BLOCK_THREADS;
+        let padded_warps = padded_warps(P::BLOCK_THREADS) as u32;
+        let segment = raking_segment(P::BLOCK_THREADS) as u32;
+        let rank_words = raking_storage(P::BLOCK_THREADS);
+        let exchange_words = (tile as usize).max(rank_words);
+        let counters = DynamicSharedArray::<u32>::get();
+        let rake_scan = DynamicSharedArray::<u32>::offset(exchange_words * size_of::<u32>())
+            as *mut SharedArray<u32, { (P::BLOCK_THREADS / 32) as usize }>;
+        let global_offsets = DynamicSharedArray::<u32>::offset(
+            (exchange_words + (P::BLOCK_THREADS / 32) as usize) * size_of::<u32>(),
+        );
+        let block_index_shared = unsafe { global_offsets.add(RADIX_SIZE) };
+        if tid == 0 {
+            let counter = unsafe { DeviceAtomicU32::from_ptr(tile_counter) };
+            let block = counter.fetch_add(1, AtomicOrdering::Relaxed);
+            unsafe { block_index_shared.write(block) };
         }
-        if tid < RADIX_SIZE as u32 {
-            unsafe { digit_prefixes.add(tid as usize).write(0) };
+        thread::sync_threads();
+        let block = unsafe { block_index_shared.read() };
+        if block >= num_blocks {
+            return;
+        }
+        let base = block * tile;
+        let mut rake_item = 0;
+        while rake_item < segment {
+            unsafe { counters.add((tid * segment + rake_item) as usize).write(0) };
+            rake_item += 1;
         }
         thread::sync_threads();
 
+        let mut keys = [0u32; P::ITEMS_PER_THREAD as usize];
+        let mut ranks = [0u32; P::ITEMS_PER_THREAD as usize];
+        let warp_base = base + warp_id * 32 * P::ITEMS_PER_THREAD;
         let mut item = 0;
         #[unroll(P::UNROLL)]
         while item < P::ITEMS_PER_THREAD {
-            let index = base + item * P::BLOCK_THREADS + tid;
+            let index = warp_base + item * 32 + lane;
             let valid = index < count;
             let key = if valid {
                 unsafe { input.add(index as usize).read() }
             } else {
                 0
             };
+            keys[item as usize] = key;
             let digit = radix_digit(key, shift, descending);
-            let stripe_prefix = if valid {
-                unsafe { digit_prefixes.add(digit as usize).read() }
+            let valid_mask = warp::ballot_sync(FULL_MASK, valid);
+            let peers = warp::match_any_sync(FULL_MASK, digit) & valid_mask;
+            let counter_slot = digit * padded_warps + warp_id;
+            let counter = unsafe { counters.add(counter_slot as usize) };
+            let prior = if valid {
+                unsafe { counter.read_volatile() }
             } else {
                 0
             };
-            let valid_mask = warp::ballot_sync(FULL_MASK, valid);
-            let peers = warp::match_any_sync(FULL_MASK, digit) & valid_mask;
+            warp::sync_mask(FULL_MASK);
             if valid {
                 let leader = peers.trailing_zeros();
                 if lane == leader {
-                    let counter = unsafe {
-                        warp_histograms.add((warp_id * RADIX_SIZE as u32 + digit) as usize)
+                    unsafe { counter.write_volatile(prior.wrapping_add(peers.count_ones())) };
+                }
+                ranks[item as usize] =
+                    prior.wrapping_add((peers & warp::lanemask_lt()).count_ones());
+            }
+            warp::sync_mask(FULL_MASK);
+            item += 1;
+        }
+        thread::sync_threads();
+
+        let first_counter = tid * segment;
+        let mut thread_total = 0u32;
+        rake_item = 0;
+        while rake_item < segment {
+            thread_total = thread_total
+                .wrapping_add(unsafe { counters.add((first_counter + rake_item) as usize).read() });
+            rake_item += 1;
+        }
+        let cta = this_thread_block();
+        let inclusive = block_scan::<u32, Sum, { (P::BLOCK_THREADS / 32) as usize }>(
+            &cta,
+            thread_total,
+            rake_scan,
+        );
+        let mut thread_prefix = inclusive.wrapping_sub(thread_total);
+        rake_item = 0;
+        while rake_item < segment {
+            let slot = unsafe { counters.add((first_counter + rake_item) as usize) };
+            let value = unsafe { slot.read() };
+            unsafe { slot.write(thread_prefix) };
+            thread_prefix = thread_prefix.wrapping_add(value);
+            rake_item += 1;
+        }
+        thread::sync_threads();
+
+        let tile_items = count.saturating_sub(base).min(tile);
+        let has_bin = tid < RADIX_SIZE as u32;
+        let local_prefix = if has_bin {
+            unsafe { counters.add((tid * padded_warps) as usize).read() }
+        } else {
+            0
+        };
+        let digit_end = if has_bin {
+            if tid + 1 < RADIX_SIZE as u32 {
+                unsafe { counters.add(((tid + 1) * padded_warps) as usize).read() }
+            } else {
+                tile_items
+            }
+        } else {
+            0
+        };
+        let local_count = digit_end.wrapping_sub(local_prefix);
+        if has_bin {
+            let descriptor = unsafe {
+                DeviceAtomicU32::from_ptr(lookback.add((block * RADIX_SIZE as u32 + tid) as usize))
+            };
+            descriptor.store(LOOKBACK_PARTIAL | local_count, AtomicOrdering::Release);
+        }
+        thread::sync_threads();
+
+        item = 0;
+        #[unroll(P::UNROLL)]
+        while item < P::ITEMS_PER_THREAD {
+            let index = warp_base + item * 32 + lane;
+            if index < count {
+                let key = keys[item as usize];
+                let digit = radix_digit(key, shift, descending);
+                let warp_prefix = unsafe {
+                    counters
+                        .add((digit * padded_warps + warp_id) as usize)
+                        .read()
+                };
+                ranks[item as usize] = ranks[item as usize].wrapping_add(warp_prefix);
+            }
+            item += 1;
+        }
+        thread::sync_threads();
+
+        item = 0;
+        #[unroll(P::UNROLL)]
+        while item < P::ITEMS_PER_THREAD {
+            let index = warp_base + item * 32 + lane;
+            if index < count {
+                unsafe {
+                    counters
+                        .add(ranks[item as usize] as usize)
+                        .write(keys[item as usize])
+                };
+            }
+            item += 1;
+        }
+        thread::sync_threads();
+
+        if has_bin {
+            let mut inclusive_count = local_count;
+            if block != 0 {
+                let mut prior_block = block - 1;
+                loop {
+                    let prior_descriptor = unsafe {
+                        DeviceAtomicU32::from_ptr(
+                            lookback.add((prior_block * RADIX_SIZE as u32 + tid) as usize),
+                        )
                     };
-                    unsafe { counter.write(peers.count_ones()) };
+                    let mut value = prior_descriptor.load(AtomicOrdering::Acquire);
+                    while value == 0 {
+                        value = prior_descriptor.load(AtomicOrdering::Acquire);
+                    }
+                    inclusive_count = inclusive_count.wrapping_add(value & LOOKBACK_VALUE_MASK);
+                    if value & LOOKBACK_GLOBAL != 0 || prior_block == 0 {
+                        break;
+                    }
+                    prior_block -= 1;
                 }
             }
-            thread::sync_threads();
 
-            if valid {
-                let mut rank = stripe_prefix;
-                let mut earlier_warp = 0u32;
-                while earlier_warp < warp_id {
-                    rank = rank.wrapping_add(unsafe {
-                        warp_histograms
-                            .add((earlier_warp * RADIX_SIZE as u32 + digit) as usize)
-                            .read()
-                    });
-                    earlier_warp += 1;
-                }
-                rank = rank.wrapping_add((peers & warp::lanemask_lt()).count_ones());
+            let descriptor = unsafe {
+                DeviceAtomicU32::from_ptr(lookback.add((block * RADIX_SIZE as u32 + tid) as usize))
+            };
+            descriptor.store(LOOKBACK_GLOBAL | inclusive_count, AtomicOrdering::Release);
+            let pass = shift / RADIX_BITS;
+            let prior_count = inclusive_count.wrapping_sub(local_count);
+            let global_offset = unsafe {
+                digit_bases
+                    .add((pass * RADIX_SIZE as u32 + tid) as usize)
+                    .read()
+                    .wrapping_add(prior_count)
+                    .wrapping_sub(local_prefix)
+            };
+            unsafe { global_offsets.add(tid as usize).write(global_offset) };
+        }
+        thread::sync_threads();
+
+        item = 0;
+        #[unroll(P::UNROLL)]
+        while item < P::ITEMS_PER_THREAD {
+            let block_rank = tid + item * P::BLOCK_THREADS;
+            if block_rank < tile_items {
+                let key = unsafe { counters.add(block_rank as usize).read() };
+                let digit = radix_digit(key, shift, descending);
                 let global_rank = unsafe {
-                    digit_bases
+                    global_offsets
                         .add(digit as usize)
                         .read()
-                        .wrapping_add(
-                            block_offsets
-                                .add((digit * num_blocks + block) as usize)
-                                .read(),
-                        )
-                        .wrapping_add(rank)
+                        .wrapping_add(block_rank)
                 };
                 unsafe { output.add(global_rank as usize).write(key) };
             }
-
-            if tid < RADIX_SIZE as u32 {
-                let digit = tid;
-                let mut stripe_total = 0u32;
-                let mut warp_index = 0u32;
-                while warp_index < num_warps {
-                    stripe_total = stripe_total.wrapping_add(unsafe {
-                        warp_histograms
-                            .add((warp_index * RADIX_SIZE as u32 + digit) as usize)
-                            .read()
-                    });
-                    warp_index += 1;
-                }
-                let prefix = unsafe { digit_prefixes.add(digit as usize).read() };
-                unsafe {
-                    digit_prefixes
-                        .add(digit as usize)
-                        .write(prefix.wrapping_add(stripe_total));
-                }
-            }
-            thread::sync_threads();
-
-            slot = tid;
-            while slot < active_warp_slots {
-                unsafe { warp_histograms.add(slot as usize).write(0) };
-                slot += P::BLOCK_THREADS;
-            }
-            thread::sync_threads();
+            warp::sync_mask(FULL_MASK);
             item += 1;
         }
     }
@@ -548,14 +765,13 @@ mod kernels {
 
 pub struct U32SortWorkspace {
     scratch: DeviceBuffer<u32>,
-    block_histograms: DeviceBuffer<u32>,
-    block_offsets: DeviceBuffer<u32>,
-    chunk_sums: DeviceBuffer<u32>,
-    digit_bases: DeviceBuffer<u32>,
+    global_histograms: DeviceBuffer<u32>,
+    all_digit_bases: DeviceBuffer<u32>,
+    lookback: DeviceBuffer<u32>,
+    tile_counter: DeviceBuffer<u32>,
     validation: DeviceBuffer<u32>,
     capacity: usize,
     max_blocks: u32,
-    max_chunks: u32,
     policy: RadixPolicySelection,
 }
 
@@ -566,10 +782,10 @@ impl U32SortWorkspace {
 
     pub fn temporary_bytes(&self) -> usize {
         self.scratch.num_bytes()
-            + self.block_histograms.num_bytes()
-            + self.block_offsets.num_bytes()
-            + self.chunk_sums.num_bytes()
-            + self.digit_bases.num_bytes()
+            + self.global_histograms.num_bytes()
+            + self.all_digit_bases.num_bytes()
+            + self.lookback.num_bytes()
+            + self.tile_counter.num_bytes()
             + self.validation.num_bytes()
     }
 }
@@ -578,6 +794,7 @@ pub struct GpuSorter {
     module: kernels::LoadedModule,
     policy: RadixPolicySelection,
     sm: u32,
+    multiprocessors: u32,
 }
 
 impl GpuSorter {
@@ -587,7 +804,13 @@ impl GpuSorter {
         let policy =
             RadixPolicySelection::select(sm).ok_or(SortError::UnsupportedArchitecture(sm))?;
         let module = kernels::load(context)?;
-        Ok(Self { module, policy, sm })
+        let multiprocessors = context.multiprocessor_count()?;
+        Ok(Self {
+            module,
+            policy,
+            sm,
+            multiprocessors,
+        })
     }
 
     pub fn sm(&self) -> u32 {
@@ -610,27 +833,19 @@ impl GpuSorter {
         let count = u32::try_from(capacity).map_err(|_| SortError::TooManyItems(capacity))?;
         let tile = self.policy.config().tile_items();
         let max_blocks = count.div_ceil(tile).max(1);
-        let max_chunks = max_blocks.div_ceil(SCAN_TILE).max(1);
-        if max_chunks > SCAN_TILE {
-            return Err(SortError::ScanHierarchyTooDeep { chunks: max_chunks });
-        }
         let histogram_len = RADIX_SIZE
             .checked_mul(max_blocks as usize)
-            .ok_or(SortError::TooManyItems(capacity))?;
-        let chunk_len = RADIX_SIZE
-            .checked_mul(max_chunks as usize)
             .ok_or(SortError::TooManyItems(capacity))?;
 
         Ok(U32SortWorkspace {
             scratch: DeviceBuffer::zeroed(stream, capacity)?,
-            block_histograms: DeviceBuffer::zeroed(stream, histogram_len)?,
-            block_offsets: DeviceBuffer::zeroed(stream, histogram_len)?,
-            chunk_sums: DeviceBuffer::zeroed(stream, chunk_len)?,
-            digit_bases: DeviceBuffer::zeroed(stream, RADIX_SIZE)?,
+            global_histograms: DeviceBuffer::zeroed(stream, RADIX_PASSES * RADIX_SIZE)?,
+            all_digit_bases: DeviceBuffer::zeroed(stream, RADIX_PASSES * RADIX_SIZE)?,
+            lookback: DeviceBuffer::zeroed(stream, histogram_len)?,
+            tile_counter: DeviceBuffer::zeroed(stream, 1)?,
             validation: DeviceBuffer::zeroed(stream, 1)?,
             capacity,
             max_blocks,
-            max_chunks,
             policy: self.policy,
         })
     }
@@ -713,34 +928,30 @@ impl GpuSorter {
         [(); P::BLOCK_THREADS as usize]:,
         [(); P::MIN_BLOCKS_PER_SM as usize]:,
         [(); P::ITEMS_PER_THREAD as usize]:,
+        [(); (P::BLOCK_THREADS / 32) as usize]:,
     {
         let count = u32::try_from(keys.len()).map_err(|_| SortError::TooManyItems(keys.len()))?;
         let tile = P::BLOCK_THREADS * P::ITEMS_PER_THREAD;
         let num_blocks = count.div_ceil(tile).max(1);
-        let num_chunks = num_blocks.div_ceil(SCAN_TILE).max(1);
         debug_assert!(num_blocks <= workspace.max_blocks);
-        debug_assert!(num_chunks <= workspace.max_chunks);
-        if num_chunks > SCAN_TILE {
-            return Err(SortError::ScanHierarchyTooDeep { chunks: num_chunks });
-        }
 
         let histogram_cfg = LaunchConfig {
-            grid_dim: (num_blocks, 1, 1),
+            grid_dim: (num_blocks.min(self.multiprocessors * 4).max(1), 1, 1),
             block_dim: (P::BLOCK_THREADS, 1, 1),
             shared_mem_bytes: 0,
         };
-        let scan_cfg = LaunchConfig {
-            grid_dim: (num_chunks, RADIX_SIZE as u32, 1),
-            block_dim: (SCAN_THREADS, 1, 1),
-            shared_mem_bytes: 0,
-        };
-        let scan_sums_cfg = LaunchConfig {
-            grid_dim: (1, RADIX_SIZE as u32, 1),
-            block_dim: (SCAN_THREADS, 1, 1),
-            shared_mem_bytes: 0,
+        let scatter_cfg = LaunchConfig {
+            grid_dim: (num_blocks, 1, 1),
+            block_dim: (P::BLOCK_THREADS, 1, 1),
+            shared_mem_bytes: ((raking_storage(P::BLOCK_THREADS)
+                .max((P::BLOCK_THREADS * P::ITEMS_PER_THREAD) as usize)
+                + (P::BLOCK_THREADS / 32) as usize
+                + RADIX_SIZE
+                + 1)
+                * size_of::<u32>()) as u32,
         };
         let bases_cfg = LaunchConfig {
-            grid_dim: (1, 1, 1),
+            grid_dim: (RADIX_PASSES as u32, 1, 1),
             block_dim: (RADIX_SIZE as u32, 1, 1),
             shared_mem_bytes: 0,
         };
@@ -750,60 +961,61 @@ impl GpuSorter {
         let keys_ptr = keys.cu_deviceptr() as *mut u32;
         let scratch_ptr = workspace.scratch.cu_deviceptr() as *mut u32;
 
+        unsafe {
+            self.module.reset_words_u32(
+                stream,
+                LaunchConfig::for_num_elems((RADIX_PASSES * RADIX_SIZE) as u32),
+                workspace.global_histograms.cu_deviceptr() as *mut u32,
+                (RADIX_PASSES * RADIX_SIZE) as u32,
+            )?;
+            self.module.histogram_all_digits_u32::<P>(
+                stream,
+                histogram_cfg,
+                input,
+                workspace.global_histograms.cu_deviceptr() as *mut u32,
+                count,
+                descending,
+            )?;
+            self.module.global_digit_bases(
+                stream,
+                bases_cfg,
+                workspace.global_histograms.cu_deviceptr() as *const u32,
+                workspace.all_digit_bases.cu_deviceptr() as *mut u32,
+            )?;
+        }
+
         let mut shift = 0;
         while shift < 32 {
-            // SAFETY: workspace sizes cover all digit/block products; scatter
-            // destinations are a bijection established by scanned histograms
-            // and stable per-CTA ranks. All allocations outlive synchronization.
+            let descriptor_count = num_blocks * RADIX_SIZE as u32;
+
+            // SAFETY: logical tile IDs are assigned in launch order, every
+            // digit publishes a release-ordered lookback descriptor, and the
+            // rank exchange establishes a unique destination for every key.
             unsafe {
-                self.module.histogram_u32::<P>(
+                self.module.reset_words_u32(
                     stream,
-                    histogram_cfg,
-                    input,
-                    workspace.block_histograms.cu_deviceptr() as *mut u32,
-                    count,
-                    shift,
-                    num_blocks,
-                    descending,
+                    LaunchConfig::for_num_elems(descriptor_count),
+                    workspace.lookback.cu_deviceptr() as *mut u32,
+                    descriptor_count,
                 )?;
-                self.module.scan_block_histograms(
+                self.module.reset_words_u32(
                     stream,
-                    scan_cfg,
-                    workspace.block_histograms.cu_deviceptr() as *const u32,
-                    workspace.block_offsets.cu_deviceptr() as *mut u32,
-                    workspace.chunk_sums.cu_deviceptr() as *mut u32,
-                    num_blocks,
-                    num_chunks,
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (1, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    workspace.tile_counter.cu_deviceptr() as *mut u32,
+                    1,
                 )?;
-                self.module.scan_chunk_sums(
+                self.module.onesweep_u32::<P>(
                     stream,
-                    scan_sums_cfg,
-                    workspace.chunk_sums.cu_deviceptr() as *mut u32,
-                    num_chunks,
-                )?;
-                self.module.add_chunk_prefixes(
-                    stream,
-                    scan_cfg,
-                    workspace.block_offsets.cu_deviceptr() as *mut u32,
-                    workspace.chunk_sums.cu_deviceptr() as *const u32,
-                    num_blocks,
-                    num_chunks,
-                )?;
-                self.module.digit_bases(
-                    stream,
-                    bases_cfg,
-                    workspace.block_histograms.cu_deviceptr() as *const u32,
-                    workspace.block_offsets.cu_deviceptr() as *const u32,
-                    workspace.digit_bases.cu_deviceptr() as *mut u32,
-                    num_blocks,
-                )?;
-                self.module.scatter_u32::<P>(
-                    stream,
-                    histogram_cfg,
+                    scatter_cfg,
                     input,
                     output,
-                    workspace.block_offsets.cu_deviceptr() as *const u32,
-                    workspace.digit_bases.cu_deviceptr() as *const u32,
+                    workspace.all_digit_bases.cu_deviceptr() as *const u32,
+                    workspace.lookback.cu_deviceptr() as *mut u32,
+                    workspace.tile_counter.cu_deviceptr() as *mut u32,
                     count,
                     shift,
                     num_blocks,

@@ -4,10 +4,12 @@ This repository uses NVIDIA Research's `cuda-oxide` compiler backend. Kernel
 bodies are ordinary Rust compiled through MIR to PTX; the sort implementation
 does not call Thrust, CUB, CUDA C++, NVRTC, or a host-side sorting library.
 
-The first executable slice is an out-of-place, stable, eight-pass LSD radix sort
-for `u32` keys. Random construction, per-pass histograms, hierarchical scans,
-stable scatter, and order validation all operate on CUDA allocations. Only GPU
-event timings and one four-byte validation counter reach the CPU.
+The first executable slice is an out-of-place, stable, four-pass LSD radix sort
+for `u32` keys. It uses an all-pass histogram followed by decoupled look-back
+OneSweep passes. Each tile ranks keys in warp order, exchanges them into rank
+order in shared memory, and emits coalesced global stores. Random construction,
+sorting, and order validation all operate on CUDA allocations. Only GPU event
+timings and one four-byte validation counter reach the CPU.
 
 ```bash
 source scripts/oxide-env.sh
@@ -17,8 +19,22 @@ RCCL_BYTES=4GiB RCCL_ITERATIONS=3 cargo oxide run
 ```
 
 `cargo-oxide` 0.2.1 does not forward trailing application arguments. After an
-oxide build, the ordinary Cargo form can also be used when CLI flags are more
-convenient: `cargo run --release -- --elements 1048576 --iterations 1`.
+oxide build, the generated executable accepts normal CLI flags directly:
+`target/release/rccl --elements 1048576 --iterations 1`.
+
+## Measured 4 GiB result
+
+RTX 6000 Ada (`sm_89`), CUDA 12.9, 1,073,741,824 random `u32` keys. Every input
+is generated on the GPU and every result is validated on the GPU.
+
+| implementation | best time | throughput |
+| --- | ---: | ---: |
+| this Rust OneSweep | 55.301 ms | 19.416 Gkey/s |
+| Thrust `sort` reference | 55.212 ms | 19.448 Gkey/s |
+| CUB `DeviceRadixSort` reference | 48.725 ms | 22.037 Gkey/s |
+
+The Rust/Thrust difference is 0.16% on this card. The CUB result remains the
+next optimization target rather than being presented as reached.
 
 ## TMP/policy model
 
@@ -41,6 +57,7 @@ The intended public family is:
 - automatic radix-versus-merge selection matching Thrust's boundary
 - reusable temporary storage, streams, and per-SM generated policies
 
-The current implemented data path is the `u32` key-only radix vertical slice.
-The remaining type transforms, key/value scatter, and merge fallback are kept
-as explicit next implementation stages; they are not claimed complete yet.
+The current implemented data path is the `u32` key-only radix vertical slice,
+including stable ascending/descending order and automatic SM policy selection.
+The remaining primitive transforms, key/value scatter, and merge fallback are
+explicit next stages; the full Thrust surface is not claimed complete yet.
