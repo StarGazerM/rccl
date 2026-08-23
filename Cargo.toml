@@ -1,0 +1,20 @@
+[package]
+name = "rccl"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0 OR MIT"
+description = "Pure-Rust, CUDA-resident parallel primitives built with NVIDIA cuda-oxide"
+
+[workspace]
+members = ["rccl-macros"]
+
+[dependencies]
+cuda-device = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "1f6a0fdd810d94275e1eb4e7e8d1158848092e4b" }
+cuda-host = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "1f6a0fdd810d94275e1eb4e7e8d1158848092e4b" }
+cuda-core = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "1f6a0fdd810d94275e1eb4e7e8d1158848092e4b" }
+rccl-macros = { path = "rccl-macros" }
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+
