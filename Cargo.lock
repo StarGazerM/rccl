@@ -388,16 +388,48 @@ dependencies = [
  "cuda-core",
  "cuda-device",
  "cuda-host",
- "rccl-macros",
+ "rccl-cub",
+ "rccl-thrust",
 ]
 
 [[package]]
-name = "rccl-macros"
+name = "rccl-cub"
 version = "0.1.0"
 dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
+ "cuda-core",
+ "cuda-device",
+ "cuda-host",
+ "rccl-memory",
+]
+
+[[package]]
+name = "rccl-memory"
+version = "0.1.0"
+dependencies = [
+ "cuda-core",
+]
+
+[[package]]
+name = "rccl-renamed-dependency-fixture"
+version = "0.0.0"
+dependencies = [
+ "rccl",
+]
+
+[[package]]
+name = "rccl-thrust"
+version = "0.1.0"
+dependencies = [
+ "cuda-core",
+ "rccl-cub",
+ "rccl-memory",
+]
+
+[[package]]
+name = "rccl-thrust-direct-fixture"
+version = "0.0.0"
+dependencies = [
+ "rccl-thrust",
 ]
 
 [[package]]

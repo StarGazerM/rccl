@@ -1,0 +1,12 @@
+[package]
+name = "rccl-cub"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0 OR MIT"
+description = "Device-wide and cooperative CUDA primitives for RCCL"
+
+[dependencies]
+cuda-device = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "1f6a0fdd810d94275e1eb4e7e8d1158848092e4b" }
+cuda-host = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "1f6a0fdd810d94275e1eb4e7e8d1158848092e4b" }
+cuda-core = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "1f6a0fdd810d94275e1eb4e7e8d1158848092e4b" }
+rccl-memory = { path = "../rccl-memory" }

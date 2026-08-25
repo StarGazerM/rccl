@@ -1,6 +1,8 @@
 use cuda_core::{CudaContext, DeviceBuffer};
-use rccl::{GpuSorter, SortOrder};
 use std::{error::Error, time::Duration};
+
+#[path = "../examples/gpu_support.rs"]
+mod gpu_support;
 
 const DEFAULT_BYTES: usize = 4 * 1024 * 1024 * 1024;
 
@@ -38,7 +40,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         .map(|value| value.parse())
         .transpose()?
         .unwrap_or(3usize);
-    let mut order = SortOrder::Ascending;
+    let mut descending = false;
+    let mut pattern = gpu_support::U32Pattern::Random;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -52,13 +55,23 @@ fn main() -> Result<(), Box<dyn Error>> {
             "--iterations" => {
                 iterations = args.next().ok_or("--iterations needs a value")?.parse()?;
             }
-            "--descending" => order = SortOrder::Descending,
+            "--descending" => descending = true,
+            "--pattern" => {
+                pattern = match args.next().ok_or("--pattern needs a value")?.as_str() {
+                    "random" => gpu_support::U32Pattern::Random,
+                    "uniform" => gpu_support::U32Pattern::Uniform,
+                    "ascending" => gpu_support::U32Pattern::Ascending,
+                    "descending" => gpu_support::U32Pattern::Descending,
+                    "low-entropy" => gpu_support::U32Pattern::LowEntropy,
+                    "alternating" => gpu_support::U32Pattern::Alternating,
+                    value => return Err(format!("unknown pattern `{value}`").into()),
+                };
+            }
             "--help" | "-h" => {
                 println!(
-                    "rccl GPU-resident radix benchmark\n\n\
+                    "rccl public-facade GPU sort benchmark\n\n\
                      Usage: rccl [--bytes 4GiB | --elements N] [--iterations N] [--descending]\n\
-                     Environment: RCCL_BYTES, RCCL_ELEMENTS, RCCL_ITERATIONS\n\
-                     The key array is generated, sorted, and validated on the GPU."
+                     \x20      [--pattern random|uniform|ascending|descending|low-entropy|alternating]"
                 );
                 return Ok(());
             }
@@ -71,65 +84,71 @@ fn main() -> Result<(), Box<dyn Error>> {
     if iterations == 0 {
         return Err("--iterations must be non-zero".into());
     }
-    let elements = bytes / size_of::<u32>();
 
+    let elements = bytes / size_of::<u32>();
     let context = CudaContext::new(0)?;
     let stream = context.default_stream();
-    let sorter = GpuSorter::new(&context)?;
-    let config = sorter.policy_config();
+    let support = gpu_support::GpuSupport::new(&context)?;
+    let exec = rccl::cuda::par(&stream)?;
     let mut keys = DeviceBuffer::<u32>::zeroed(&stream, elements)?;
-    let mut workspace = sorter.allocate_u32_workspace(&stream, elements)?;
 
     println!("GPU: {}", context.device_name()?);
     println!(
-        "policy: {} (sm_{}, {} threads x {} items, {} radix bits)",
-        sorter.policy_name(),
-        sorter.sm(),
-        config.block_threads,
-        config.items_per_thread,
-        config.radix_bits,
-    );
-    println!(
-        "problem: {} u32 keys ({:.3} GiB), device temporary storage {:.3} GiB",
+        "public operation: {} on {} u32 keys ({:.3} GiB)",
+        if descending {
+            "sort_by(Greater)"
+        } else {
+            "sort"
+        },
         elements,
         bytes as f64 / 1024f64.powi(3),
-        workspace.temporary_bytes() as f64 / 1024f64.powi(3),
     );
 
-    // Warm-up compiles/loads the selected specialization and heats caches. The
-    // refill is also a device kernel and is deliberately outside sort timing.
-    sorter.fill_random_u32(&stream, &mut keys, 0x7263_636c)?;
-    sorter.sort_u32(&stream, &mut keys, &mut workspace, order)?;
-    stream.synchronize()?;
+    support.fill_pattern_u32(&stream, &mut keys, 0x7263_636c, pattern)?;
+    if descending {
+        rccl::sort_by(&exec, &mut keys, rccl::Greater)?;
+    } else {
+        rccl::sort(&exec, &mut keys)?;
+    }
 
     let mut best = Duration::MAX;
-    let mut total_ms = 0.0f64;
+    let mut total_ms = 0.0;
     for iteration in 0..iterations {
-        sorter.fill_random_u32(&stream, &mut keys, 0x7263_636c_u64 + iteration as u64 + 1)?;
+        support.fill_pattern_u32(
+            &stream,
+            &mut keys,
+            0x7263_636c_u64 + iteration as u64 + 1,
+            pattern,
+        )?;
         let start = stream.record_event(Some(0))?;
-        sorter.sort_u32(&stream, &mut keys, &mut workspace, order)?;
+        if descending {
+            rccl::sort_by(&exec, &mut keys, rccl::Greater)?;
+        } else {
+            rccl::sort(&exec, &mut keys)?;
+        }
         let end = stream.record_event(Some(0))?;
         let elapsed_ms = start.elapsed_ms(&end)? as f64;
-        let elapsed = Duration::from_secs_f64(elapsed_ms / 1000.0);
-        best = best.min(elapsed);
+        best = best.min(Duration::from_secs_f64(elapsed_ms / 1000.0));
         total_ms += elapsed_ms;
         println!("iteration {iteration}: {elapsed_ms:.3} ms");
     }
 
-    let order_errors = sorter.validate_u32(&stream, &keys, &mut workspace, order)?;
-    if order_errors != 0 {
-        return Err(format!("device validation found {order_errors} adjacent inversions").into());
+    let errors = if descending {
+        support.validate_order(&stream, &keys, rccl::Greater)?
+    } else {
+        support.validate_order(&stream, &keys, rccl::Less)?
+    };
+    if errors != 0 {
+        return Err(format!("GPU validation found {errors} adjacent inversions").into());
     }
 
     let best_s = best.as_secs_f64();
-    let billion_keys_s = elements as f64 / best_s / 1.0e9;
-    let effective_gib_s = bytes as f64 / best_s / 1024f64.powi(3);
-    println!("validation: PASS (device order check; no key readback)");
+    println!("validation: PASS (no key readback)");
     println!(
-        "best: {:.3} ms, {:.3} Gkey/s, {:.3} GiB/s input rate; mean {:.3} ms",
+        "best: {:.3} ms, {:.3} Gkey/s, {:.3} GiB/s; mean {:.3} ms",
         best_s * 1000.0,
-        billion_keys_s,
-        effective_gib_s,
+        elements as f64 / best_s / 1.0e9,
+        bytes as f64 / best_s / 1024f64.powi(3),
         total_ms / iterations as f64,
     );
     Ok(())
