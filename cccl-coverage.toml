@@ -7,8 +7,8 @@ id = "proc-macro-compiler-boundary"
 kind = "compiler-infrastructure"
 owner = "rccl-cub-macros/rccl-thrust-macros"
 status = "implemented"
-entries = ["cub.complete-public-catalog", "thrust.complete-public-catalog", "generated-rust-safety-audit"]
-evidence = ["RCCL_COMPILER_DSL.md", "rccl-cub-macros/src/cub.dsl", "rccl-thrust-macros/src/thrust.dsl", "scripts/test-gpu.sh"]
+entries = ["cub.complete-public-catalog", "cub.semantic-operation-contracts", "thrust.complete-public-catalog", "generated-rust-safety-audit"]
+evidence = ["RCCL_COMPILER_DSL.md", "rccl-cub-macros/src/catalog.rs", "rccl-cub-macros/src/call.rs", "rccl-thrust-macros/src/catalog.rs", "rccl-thrust-macros/src/call.rs", "scripts/test-gpu.sh"]
 
 [[surface]]
 id = "rust-support-values"
@@ -90,7 +90,7 @@ kind = "thrust-public-header"
 owner = "rccl-thrust"
 status = "backend-blocked"
 entries = ["thrust/thrust/sort.h"]
-evidence = ["rccl-thrust-macros/src/thrust.dsl", "RCCL_COMPILER_DSL.md"]
+evidence = ["rccl-thrust-macros/src/catalog.rs", "rccl-thrust-macros/src/call.rs", "RCCL_COMPILER_DSL.md"]
 
 [[surface]]
 id = "thrust-merge"
@@ -98,7 +98,7 @@ kind = "thrust-public-header"
 owner = "rccl-thrust"
 status = "backend-blocked"
 entries = ["thrust/thrust/merge.h"]
-evidence = ["rccl-thrust-macros/src/thrust.dsl", "RCCL_COMPILER_DSL.md"]
+evidence = ["rccl-thrust-macros/src/catalog.rs", "rccl-thrust-macros/src/call.rs", "RCCL_COMPILER_DSL.md"]
 
 [[surface]]
 id = "thrust-support-native"
@@ -149,7 +149,7 @@ kind = "thrust-public-header"
 owner = "rccl-cub/rccl-thrust"
 status = "partial"
 entries = ["thrust/thrust/execution_policy.h", "thrust/thrust/functional.h"]
-evidence = ["rccl-thrust-macros/src/thrust.dsl", "rccl-thrust-macros/src/expand.rs"]
+evidence = ["rccl-thrust-macros/src/catalog.rs", "rccl-thrust-macros/src/expand.rs"]
 
 [[surface]]
 id = "thrust-support-missing-values"
@@ -185,7 +185,7 @@ entries = [
   "thrust/thrust/iterator/transform_output_iterator.h",
   "thrust/thrust/iterator/zip_iterator.h",
 ]
-evidence = ["rccl-thrust-macros/src/thrust.dsl", "rccl-thrust-macros/src/expand.rs", "STRICT_CCCL_API_AUDIT.md"]
+evidence = ["rccl-thrust-macros/src/catalog.rs", "rccl-thrust-macros/src/expand.rs", "STRICT_CCCL_API_AUDIT.md"]
 
 [[surface]]
 id = "thrust-memory-resources"
@@ -250,7 +250,7 @@ kind = "cub-public-header"
 owner = "rccl-cub"
 status = "backend-blocked"
 entries = ["cub/cub/warp/warp_merge_sort.cuh"]
-evidence = ["rccl-cub-macros/src/cub.dsl", "RCCL_COMPILER_DSL.md"]
+evidence = ["rccl-cub-macros/src/catalog.rs", "rccl-cub-macros/src/call.rs", "RCCL_COMPILER_DSL.md"]
 
 [[surface]]
 id = "cub-device-sort-merge"
@@ -262,7 +262,7 @@ entries = [
   "cub/cub/device/device_merge_sort.cuh",
   "cub/cub/device/device_radix_sort.cuh",
 ]
-evidence = ["rccl-cub-macros/src/cub.dsl", "RCCL_COMPILER_DSL.md"]
+evidence = ["rccl-cub-macros/src/catalog.rs", "rccl-cub-macros/src/call.rs", "RCCL_COMPILER_DSL.md"]
 
 [[surface]]
 id = "cub-public-missing"
@@ -342,7 +342,7 @@ entries = [
   "cub/cub/agent/agent_radix_sort_downsweep.cuh",
   "cub/cub/agent/agent_sub_warp_merge_sort.cuh",
 ]
-evidence = ["rccl-cub-macros/src/cub.dsl", "CCCL_THRUST_CUB_COVERAGE_PLAN.md"]
+evidence = ["rccl-cub-macros/src/catalog.rs", "CCCL_THRUST_CUB_COVERAGE_PLAN.md"]
 
 [[surface]]
 id = "cub-agents-missing"

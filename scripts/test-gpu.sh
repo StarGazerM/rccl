@@ -44,11 +44,11 @@ if [[ -e rccl-cub/build.rs || -e rccl-thrust/build.rs ]]; then
   printf '%s\n' 'runtime build scripts may not select targets or generate schedules' >&2
   exit 1
 fi
-if [[ "$(rg -v '^[[:space:]]*//!|^[[:space:]]*$' rccl-cub/src/lib.rs)" != 'rccl_cub_macros::expand_cub!();' ]]; then
+if [[ "$(rg -v '^[[:space:]]*//!|^[[:space:]]*$' rccl-cub/src/lib.rs)" != 'rccl_cub_macros::emit_support!();' ]]; then
   printf '%s\n' 'rccl-cub source must be a zero-input compiler expansion only' >&2
   exit 1
 fi
-if [[ "$(rg -v '^[[:space:]]*//!|^[[:space:]]*$' rccl-thrust/src/lib.rs)" != 'rccl_thrust_macros::expand_thrust!();' ]]; then
+if [[ "$(rg -v '^[[:space:]]*//!|^[[:space:]]*$' rccl-thrust/src/lib.rs)" != 'rccl_thrust_macros::emit_support!();' ]]; then
   printf '%s\n' 'rccl-thrust source must be a zero-input compiler expansion only' >&2
   exit 1
 fi
@@ -105,9 +105,32 @@ for manifest in rccl-cub-macros/Cargo.toml rccl-thrust-macros/Cargo.toml; do
     exit 1
   fi
 done
-if ! rg -q 'syn::parse_str::<ast::CubProgram>' rccl-cub-macros/src/lib.rs \
-  || ! rg -q 'syn::parse_str::<ast::ThrustProgram>' rccl-thrust-macros/src/lib.rs; then
-  printf '%s\n' 'both private DSLs must pass through typed syn ASTs' >&2
+if find rccl-cub-macros/src rccl-thrust-macros/src -type f -name '*.dsl' | rg .; then
+  printf '%s\n' 'RCCL uses shallow Rust call macros, not separate DSL source files' >&2
+  exit 1
+fi
+if ! rg -q 'impl Parse for DeviceReduceCall' rccl-cub-macros/src/call.rs \
+  || ! rg -q 'impl Parse for SortByCall' rccl-thrust-macros/src/call.rs \
+  || ! rg -q 'impl Parse for StableSortByKeyCall' rccl-thrust-macros/src/call.rs \
+  || ! rg -q 'pub\(crate\).*: Expr' rccl-cub-macros/src/call.rs \
+  || ! rg -q 'pub\(crate\).*: Expr' rccl-thrust-macros/src/call.rs; then
+  printf '%s\n' 'operation DSLs must be shallow syn 2 call ASTs retaining Rust expressions' >&2
+  exit 1
+fi
+if [[ "$(rg -c '^#\[proc_macro\]$' rccl-cub-macros/src/lib.rs)" != 1 ]] \
+  || [[ "$(rg -c '^#\[proc_macro\]$' rccl-thrust-macros/src/lib.rs)" != 1 ]] \
+  || ! rg -q '^pub fn emit_support\(' rccl-cub-macros/src/lib.rs \
+  || ! rg -q '^pub fn emit_support\(' rccl-thrust-macros/src/lib.rs; then
+  printf '%s\n' 'unimplemented algorithm macros must remain absent rather than compile as stubs' >&2
+  exit 1
+fi
+if ! rg -q 'pub\(crate\) const PRIMITIVES: &\[Primitive\]' rccl-cub-macros/src/catalog.rs \
+  || ! rg -q 'pub\(crate\) const ALGORITHMS: &\[Algorithm\]' rccl-thrust-macros/src/catalog.rs; then
+  printf '%s\n' 'closed CCCL inventories must be typed Rust compiler catalogs' >&2
+  exit 1
+fi
+if rg -n 'fn (get|write)\(' rccl-cub-macros/src/expand.rs rccl-thrust-macros/src/expand.rs; then
+  printf '%s\n' 'generated range descriptors may not execute device access on the host' >&2
   exit 1
 fi
 if ! rg -q 'generated_rust' rccl-cub-macros/src/expand.rs \

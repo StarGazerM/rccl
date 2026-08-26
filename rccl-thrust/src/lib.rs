@@ -3,4 +3,4 @@
 //! Algorithm functions are emitted only with their proc-macro-owned
 //! cuda-oxide lowering. No unavailable algorithm receives a stub.
 
-rccl_thrust_macros::expand_thrust!();
+rccl_thrust_macros::emit_support!();

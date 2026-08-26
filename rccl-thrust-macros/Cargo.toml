@@ -3,7 +3,7 @@ name = "rccl-thrust-macros"
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0 OR MIT"
-description = "Compile-time Thrust DSL parser and CUB lowering generator for RCCL"
+description = "Shallow Thrust call macros and CUB lowering generator for RCCL"
 
 [lib]
 proc-macro = true

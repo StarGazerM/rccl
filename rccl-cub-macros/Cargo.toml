@@ -3,7 +3,7 @@ name = "rccl-cub-macros"
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0 OR MIT"
-description = "Compile-time CUB DSL parser and cuda-oxide Rust generator for RCCL"
+description = "Shallow CUB call macros and cuda-oxide Rust generator for RCCL"
 
 [lib]
 proc-macro = true

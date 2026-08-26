@@ -7,8 +7,9 @@ template engine.
 The architectural pipeline is:
 
 ```text
-rccl-cub-macros     private CUB DSL -> typed syn 2 AST -> cuda-oxide Rust
-rccl-thrust-macros  private Thrust DSL -> typed syn 2 AST -> CUB lowering
+Rust call-site macro -> operation-specific syn 2 AST -> typed compiler catalog
+rccl-thrust-macros  -> CUB semantic lowering
+rccl-cub-macros     -> cuda-oxide Rust
 
 rccl-memory -> rccl-cub -> rccl-thrust -> rccl
                  runtime values only
@@ -28,9 +29,11 @@ The two complete catalogs now cover:
 - all 19 Thrust iterator headers;
 - the required support values, random engines, and memory-resource families.
 
-Both catalogs are parsed with custom `syn` 2 `Parse` implementations and
-validated for duplicates, missing fields, unknown dependencies, target-row
-drift, selection errors, and CUB dependency cycles.
+The catalogs are typed Rust compiler data and are validated for duplicates,
+unknown dependencies, target-row drift, selection errors, and CUB dependency
+cycles. Separate operation-specific `syn` 2 parsers retain ordinary Rust
+expressions at the shallow user macro boundary and reject missing or duplicate
+semantic fields.
 
 The old handwritten sort, merge, radix, schedule, module-set, and runtime
 loader implementation has been removed. Those algorithms are intentionally
@@ -39,10 +42,10 @@ written. RCCL does not make the source appear runnable with a panic, CPU
 fallback, PTX merge, JIT, symbol lookup, or runtime "compiler unavailable"
 error.
 
-The currently generated runtime surface contains safe CUB range/storage values,
-safe Thrust source/sink adaptors, and `cuda::Execution`, which borrows a stream
-and allocator. It contains no algorithm policy, schedule, type map, module
-family, or cache.
+The currently generated runtime surface contains safe CUB range/storage
+values, safe Thrust range-expression adaptors, and `cuda::Execution`, which
+borrows a stream and allocator. It contains no algorithm policy, schedule,
+type map, module family, or cache.
 
 ## Generated-Rust safety rule
 
@@ -76,7 +79,7 @@ Native Rust vocabulary replaces support-library spelling:
 | `optional`, `expected` | `Option`, `Result` |
 | `device_vector` | `rccl_memory::DeviceBuffer` |
 | function object/comparator | an ordinary copyable Rust closure |
-| iterator facade/categories | source/sink capability traits and zero-copy adaptors |
+| iterator facade/categories | read/write/random-access capability traits and zero-copy adaptors |
 | execution policy | borrowed stream and allocator runtime values only |
 
 There are no compatibility `Less`, `Greater`, `Comparator`, `DeviceSpan`,

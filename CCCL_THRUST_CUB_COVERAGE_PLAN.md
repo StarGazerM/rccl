@@ -84,7 +84,7 @@ Other rules:
 - keep host device pointers non-dereferenceable and lifetime-carrying;
 - lower read-only kernel ranges to `&[T]` and exclusive kernel ranges to
   cuda-oxide's checked mutable/disjoint slice forms where possible;
-- represent fancy iterators as zero-copy indexed sources and sinks, not as
+- represent fancy iterators as zero-copy indexed range expressions, not as
   host `Iterator<Item = &T>` values;
 - map template type computation to proc-macro-emitted generics, traits,
   associated types, const generics, and `Fn` callables;
@@ -98,12 +98,16 @@ Other rules:
 
 ### Compiler DSL contract
 
-The complete contract is in `RCCL_COMPILER_DSL.md`. The private CUB and Thrust
-DSLs are parsed into typed `syn` 2 ASTs inside their proc-macro crates.
+The complete contract is in `RCCL_COMPILER_DSL.md`. The CUB and Thrust DSLs
+are shallow user call-site macros parsed into operation-specific `syn` 2 ASTs.
+Their closed inventories and lowering tables are typed Rust compiler catalogs,
+not separate `.dsl` files and not user-authored syntax.
 Expansion must:
 
-1. expose ordinary Rust function facades rather than public policy or
-   schedule types;
+1. expose every operation requiring TMP, schedule selection, kernel
+   registration, or static shared-storage syntax as a shallow macro such as
+   `sort_by!`, while leaving ordinary Rust support operations as normal types
+   and functions;
 2. pass resolved schedule values as literal const-generic operands and direct
    cuda-oxide compiler attributes;
 3. let Rust monomorphize key, value, callable, and range types without a
@@ -113,9 +117,10 @@ Expansion must:
 5. leave no manifest, schedule, specialization map, or compiler capability
    value in a runtime struct.
 
-Declarative macros may cover repeated local syntax, but the two procedural
-macro crates own DSL parsing, validation, wrapper generation, and all
-compile-time facts. Proc-macro expansion is RCCL's AOT boundary; cuda-oxide
+Declarative macros may cover repeated compiler implementation syntax, but the
+two procedural macro crates own call parsing, typed catalog validation,
+wrapper generation, and all compile-time facts. Proc-macro expansion is
+RCCL's AOT boundary; cuda-oxide
 owns subsequent ordinary compiler lowering. Neither stage may be replaced by
 runtime PTX concatenation, driver JIT, symbol-name lookup, or an ABI argument
 vector assembled by RCCL.
@@ -134,7 +139,7 @@ implementation.
 |---|---|---|---|
 | `cuda::std::span<T>` | Kernel-side `&[T]`, `&mut [T]`, or `DisjointSlice<T>` | Rust + cuda-oxide | native; the removed host `DeviceSpan` hierarchy was not dereferenceable and duplicated the slice vocabulary; public host subranges remain unimplemented until a real consumer justifies `Range` or native launcher support |
 | `cuda::std::array<T, N>` | `[T; N]` | Rust/cuda-oxide | native; add ABI and device-code matrices |
-| `thrust::pair`, `thrust::tuple` | `(A, B)` and native tuples for ordinary products; named `#[repr(C)]` records where field names or external ABI matter | Rust + CUB value types | partial; cuda-core implements `DeviceCopy` for tuples through arity 8 and the macro emits checked two-way zip sources/sinks, but device compilation and higher-arity composition remain |
+| `thrust::pair`, `thrust::tuple` | `(A, B)` and native tuples for ordinary products; named `#[repr(C)]` records where field names or external ABI matter | Rust + CUB value types | partial; cuda-core implements `DeviceCopy` for tuples through arity 8 and the macro emits checked two-way zip range descriptors, but device compilation and higher-arity composition remain |
 | `tuple_size`, `tuple_element`, concepts and type traits | associated types, trait bounds, const generics, and compiler type checking | Rust | native; do not recreate template metafunctions |
 | `optional`, `expected`, variant-like results | `Option<T>`, `Result<T, E>`, and Rust enums | Rust | native; test device lowering for every used shape |
 | CUDA half and bfloat values | canonical `half::f16` / `half::bf16`, which cuda-core already marks `DeviceCopy`; ordering/radix transforms belong to operations, not replacement scalar types | CUB + cuda-core | native scalar types retained; RCCL storage-only wrappers removed; optimized sort coverage remains |
@@ -143,8 +148,8 @@ implementation.
 | `thrust::device_vector` / `vector_base` | `rccl_memory::DeviceBuffer<'stream, T, A>` with Rust `Vec`-like reserve/resize/truncate semantics and a borrowed stream lifetime | memory | partial and usable; iterator/adaptor integration remains |
 | universal and pinned-host vectors | `DeviceBuffer<T, ManagedMemoryResource>` and pinned-host resource/buffer types | memory | resources exist; container aliases and parity tests remain |
 | `device_ptr`, `universal_ptr`, raw pointer casts | unsafe typed device address plus safe lifetime-bearing range/view; raw address only at FFI/kernel internals | memory | replace current universal `cu_deviceptr` escape hatch |
-| `device_reference` and proxy references | no free-standing fake `&T`; indexed source/sink capabilities and adaptor-specific proxy operations | CUB + Thrust | partial; safe bounds-checked `DeviceSource`/`DeviceSink` contracts and slice implementations are generated, while allocation-backed device lowering remains |
-| iterator traits/categories/facade/adaptor | source/sink capability traits plus adaptor structs that compose those traits | CUB + Thrust | partial; constant/counting/discard/subrange/permutation/reverse/stride/tabulate/transform/zip forms and negative host tests are generated, while the cuda-oxide device composition matrix remains |
+| `device_reference` and proxy references | no free-standing fake `&T`; range/read/write capabilities and adaptor-specific device lowering | CUB + Thrust | partial; minimal capability traits cover slices and both cuda-core/allocator-aware device buffers, while generated kernels remain |
+| iterator traits/categories/facade/adaptor | descriptor structs compose range/read/write/random-access capabilities without host execution methods | CUB + Thrust | partial; constant/counting/discard/subrange/permutation/reverse/stride/tabulate/transform/zip forms and semantic host tests are generated, while the cuda-oxide device composition matrix remains |
 | `mdspan`, extents, layouts | typed multidimensional device view with shape, strides, and layout marker; contiguous 1-D case lowers to slice | CUB | missing; cuda-oxide checked 2-D views are reusable backend pieces |
 | functional objects | ordinary `Fn`/`FnMut` bounds plus `Copy` device-callable closures; specialization is emitted by `rccl-thrust-macros` | CUB + Thrust macros | catalogued; algorithm expansion is backend-blocked; no RCCL callable compatibility trait |
 | `complex<T>` | RCCL-owned `#[repr(C)] Complex<T>` or an upstream cuda-core `DeviceCopy` implementation for a standard Rust complex type | CUB value layer | missing |
@@ -152,8 +157,8 @@ implementation.
 | memory construction/destruction and unique allocation | `MaybeUninit<T>`, RAII owners, `Drop`, and explicit stream-ordered destruction/release | memory + Thrust | partial; unique object/array helpers and nontrivial device construction remain |
 | Thrust memory resources and allocators | `DeviceAllocator` values/references plus existing concrete/adaptor resources | memory | strong partial coverage; public mapping and allocator propagation matrix remain |
 | CUB `Uninitialized`, `KeyValuePair`, `DoubleBuffer`, `FutureValue`, `NullType` | `MaybeUninit`, named key/value record, typed two-buffer selector, device scalar/future input, and `()`/enum absence markers | CUB | partial; macro-generated `MaybeUninit` storage, `KeyValue`, and borrowed `DoubleBuffer` are public and tested, while future/device-scalar and absence forms remain |
-| CUB temporary-storage query/execute | typed layout plus borrowed aligned `MaybeUninit<u8>` storage; collective shared storage stays explicit and typed | CUB macros + runtime | safe support value generated; public algorithm forms missing |
-| CUB chained policies and architecture traits | target rows parsed only by `rccl-cub-macros`, then emitted as literal kernel operands | CUB macros | catalogued; no runtime or public policy language |
+| CUB temporary-storage query/execute | checked `Layout` plus a borrow of caller-owned `DeviceBlock` whose recorded size/alignment satisfies it; collective shared storage stays explicit and typed | CUB macros + runtime | safe layout/storage protocol generated; public algorithm request forms missing |
+| CUB chained policies and architecture traits | typed target rows owned only by `rccl-cub-macros`, then emitted as literal kernel operands | CUB macros | catalogued; no runtime or public policy language |
 | CUDA atomics, barriers, warp operations, shared memory, vector loads | reuse canonical `cuda-device` types and intrinsics | cuda-oxide backend | available in part; missing backend operations should be fixed upstream, not re-exported through RCCL paths |
 | status/system errors | opaque Rust error values and `Result` | each owning crate | established; backend choice is private |
 
@@ -171,7 +176,7 @@ PTX, stream, and warp support.
 |---|---|
 | scalar types, sizes, limits, arrays, initialization | Rust primitives, `core::mem`, `core::num`, `[T; N]`, and `MaybeUninit<T>` |
 | traits, concepts, forwarding/move, integer sequences | Rust traits, associated types, const generics, ownership, and compiler checks; no runtime library |
-| span, iterators, mdspan | native kernel slices plus the RCCL device source/sink and multidimensional-view contracts described here |
+| span, iterators, mdspan | native kernel slices plus minimal read/write/random-access range and multidimensional-view contracts |
 | tuple, optional, expected | Rust tuple, `Option`, and `Result`, subject to cuda-oxide device-ABI tests |
 | functional, algorithms, numeric, bit, math, limits | Rust operators/closures and `core` methods; use canonical cuda-device/libdevice intrinsics when GPU semantics differ |
 | atomics, barriers, warp/PTX, access/cache operations | canonical cuda-device APIs; add missing instructions to cuda-oxide rather than cloning intrinsics in RCCL |
@@ -195,8 +200,9 @@ already provide.
   were removed rather than hidden behind a runtime loader.
 - `rccl-thrust` currently exposes only generated `cuda::Execution`, borrowing
   a stream and allocator. Sort and merge are backend-blocked and unexported.
-- No general fancy-range algebra, public device-wide temp-storage protocol, or
-  other public CUB thread/warp/block/device family is present yet.
+- Descriptor-only fancy-range algebra and the checked device temporary-storage
+  value protocol exist; device access lowering and every public CUB
+  thread/warp/block/device algorithm remain absent.
 
 ### Slice and device-range contract
 
@@ -212,26 +218,27 @@ cuda-oxide launcher support.
 
 Ordinary values should use Rust tuples. Zip is different: a zipped output is
 not a Rust tuple of `&mut` references that can be freely copied. It is an
-indexed product of sources/sinks. The core device contract should be shaped
-like:
+indexed product of range descriptors. The public host-side contract is
+deliberately non-operational:
 
 ```rust,ignore
-unsafe trait DeviceInput {
-    type Item: DeviceCopy;
+trait DeviceRange {
     fn len(&self) -> usize;
-    unsafe fn read_unchecked(&self, index: usize) -> Self::Item;
 }
 
-unsafe trait DeviceOutput<T: DeviceCopy> {
-    fn len(&self) -> usize;
-    unsafe fn write_unchecked(&mut self, index: usize, value: T);
+trait ReadRange: DeviceRange {
+    type Item: DeviceCopy;
+}
+
+trait WriteRange: DeviceRange {
+    type Item: DeviceCopy;
 }
 ```
 
-The real traits may split exact-size, random-access, contiguous, and aliasing
-capabilities, but must not expose a writable proxy as a fabricated Rust
-reference. `Zip`, `Transform`, `Permutation`, `Discard`, and
-`TransformOutput` implement the indexed traits and remain zero-copy.
+`RandomAccessRange` and `ContiguousRange` refine it. They contain no host
+`get`/`write` method: the macro compiler lowers each descriptor to concrete
+device operations only after rustc/cuda-oxide has inferred its type. `Zip`,
+`Transform`, `Permutation`, `Discard`, and `TransformOutput` remain zero-copy.
 
 For product arities above cuda-core's current tuple `DeviceCopy` coverage,
 first extend cuda-oxide's tuple implementations. A local `#[repr(C)]` product
@@ -260,9 +267,9 @@ not confuse them with an owning vector container.
 
 | Family | Pinned headers and operation families | Current state | Main dependency |
 |---|---|---|---|
-| Elementwise traversal | `for_each`, `transform`, `tabulate`, `generate`, `sequence` | missing | source/sink algebra + DeviceFor/Transform |
-| Copy and initialization | `copy`, `fill`, `uninitialized_copy`, `uninitialized_fill` | missing | contiguous fast path + general source/sink path |
-| Gather/scatter | `gather`, `scatter` including conditional forms | missing | permutation/index source/sink + bounds contract |
+| Elementwise traversal | `for_each`, `transform`, `tabulate`, `generate`, `sequence` | missing | range-expression algebra + DeviceFor/Transform |
+| Copy and initialization | `copy`, `fill`, `uninitialized_copy`, `uninitialized_fill` | missing | contiguous fast path + general read/write range path |
+| Gather/scatter | `gather`, `scatter` including conditional forms | missing | permutation/index range + bounds contract |
 | Reordering | `reverse`, `shuffle`, `swap`/`swap_ranges` | missing | indexed ranges + random engine |
 | Search and predicates | `find`, `count`, `logical`, `equal`, `mismatch` | missing | transform/reduce/select foundations |
 | Ordered queries | `binary_search`, `extrema` | missing | ordering callables + reduce/search agents |
@@ -418,8 +425,8 @@ host dispatch.
 
 | Phase | Deliverable | Unlocks | Exit evidence |
 |---|---|---|---|
-| 0 | Machine-readable coverage ledger plus two typed proc-macro DSLs, generated-Rust safety audit, and zero-input runtime expansion sites | honest progress, drift checks, and one compile-time owner for every later primitive | every inventory item has an owner/status; runtime crates contain no compile-time metadata; generated code rejects `Arc`, raw pointers, and unsafe; no JIT route exists |
-| 1 | Source/sink traits, callable bounds, product/key-value types, double buffer, offset selection, temp-storage layout; rely on native cuda-oxide slices | all general algorithms and CUB public forms | compile-fail alias/lifetime tests, host/device ABI tests, zero-copy PTX checks |
+| 0 | Machine-readable coverage ledger, typed private catalogs, shallow call parsers, generated-Rust safety audit, and zero-input support expansion sites | honest progress, drift checks, and one compile-time owner for every later primitive | every inventory item has an owner/status; runtime crates contain no compile-time metadata; generated code rejects `Arc`, raw pointers, and unsafe; no JIT route exists |
+| 1 | Read/write/random-access range traits, callable bounds, product/key-value types, double buffer, offset selection, temp-storage layout; rely on native cuda-oxide slices | all general algorithms and CUB public forms | compile-fail alias/lifetime tests, host/device ABI tests, zero-copy PTX checks |
 | 2 | Thrust adaptors: counting, constant, discard, offset, reverse, strided, transform, transform-output, transform-in/out, zip, permutation, shuffle, tabulate-output, retag/capability conversion | fancy-iterator parity for later algorithms | adaptor composition matrix on device, including read/write zip and non-contiguous outputs |
 | 3 | CUB thread then warp then block load/store/exchange/reduce/scan/search/sort/radix/histogram building blocks | reusable implementation base for device-wide algorithms | upstream example/test matrices, exact temp-storage sizes/alignment, PTX synchronization checks |
 | 4 | CUB agents, grid partitioning/lookback, public temp-storage query/resource forms, 32/64-bit offset selection | complete device-wide API contracts | query/execute parity, insufficient-storage errors, large-count boundary tests |

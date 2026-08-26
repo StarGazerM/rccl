@@ -3,4 +3,4 @@
 //! Algorithm families remain absent until their safe cuda-oxide expansion
 //! exists. This crate contains no runtime compiler model.
 
-rccl_cub_macros::expand_cub!();
+rccl_cub_macros::emit_support!();

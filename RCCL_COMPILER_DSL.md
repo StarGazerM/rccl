@@ -1,18 +1,96 @@
-# RCCL compile-time DSL
+# RCCL shallow compile-time DSL
 
-RCCL treats procedural-macro expansion as its AOT boundary:
+RCCL treats procedural-macro expansion as its only project-owned AOT boundary:
 
 ```text
-CCCL semantic family
-    -> rccl-cub-macros typed DSL
-    -> concrete cuda-oxide device Rust
-    -> rccl-thrust-macros typed lowering
-    -> ordinary Rust host facade
+ordinary Rust call tokens
+    -> rccl-thrust-macros `syn` call AST
+    -> typed Thrust semantic selection
+    -> rccl-cub-macros `syn` call AST
+    -> typed CUB schedule/kernel selection
+    -> concrete cuda-oxide Rust
+    -> rustc type checking and monomorphization
 ```
 
-This is not a runtime compilation pipeline. The expanded program contains no
-template registry, specialization descriptor, target-policy object, kernel
-catalog, erased type map, PTX text, or JIT fallback.
+The DSL is shallow and user-call-facing. There is no separate language file,
+parser input file, or runtime compiler manifest. Rust expressions, closures,
+paths, borrows, generic arguments, and inferred types stay Rust syntax; the
+operation macro changes only the meaning and lowering of the call.
+
+## Public call shape
+
+An operation that needs compile-time CUB/Thrust selection is a macro, like
+`println!` is a macro when a normal function call cannot express its required
+compile-time work:
+
+```rust,ignore
+sort_by!(
+    on: &exec,
+    range: &mut keys,
+    compare: |left: &i64, right: &i64| left > right,
+)?;
+
+stable_sort_by_key!(
+    on: &exec,
+    keys: &mut keys,
+    values: &mut values,
+    compare: |left: &i64, right: &i64| left < right,
+)?;
+
+device_reduce!(
+    on: &exec,
+    input: &values,
+    output: &mut result,
+    init: 0_i64,
+    op: |left, right| left + right,
+    temp: auto,
+)?;
+```
+
+These snippets specify the intended syntax; algorithm macros remain absent
+from the public crates until their cuda-oxide lowering and launch path exist.
+There is no compiling stub, compatibility wrapper, runtime error, or CPU
+fallback for an unavailable operation.
+
+`sort_by!` has one mutable range. `stable_sort_by_key!` has separate key and
+value ranges and preserves the relative order of equal keys. The `_by_key`
+suffix therefore denotes a different semantic input shape, not a comparator
+kind. `compare` is an ordinary Rust closure expression; RCCL has no
+`Comparator`, `Less`, or `Greater` object hierarchy.
+
+The macro parser stores fields as `syn::Expr`. It cannot and does not inspect
+the inferred type of those expressions. It emits generic Rust whose bounds
+express the required read/write/random-access capabilities, then rustc checks
+the concrete types and monomorphizes the generated code.
+
+## What is and is not the DSL
+
+The user-facing macro invocation is the DSL. The files
+`rccl-cub-macros/src/catalog.rs` and
+`rccl-thrust-macros/src/catalog.rs` are private typed compiler data, not a
+language:
+
+```text
+CubCall       = operation-specific Rust Expr fields
+CubPrimitive  = Name x Status x Scope x Dependency* x Schedule? x Kernel* x Contract
+Contract      = Capability* x CallableShape x StorageClass
+Schedule      = Name x (Target -> literal tuning row)
+
+ThrustCall    = operation-specific Rust Expr fields
+Algorithm     = Name x Status x Form x CubDependency* x SelectionRule*
+SelectionRule = CompileTimePredicate -> CubPrimitive
+```
+
+Closed CCCL TMP/CRTP policy becomes enum/struct data and direct lowering in
+the macro crate. It does not become a public Rust policy, backend, strategy,
+proof type, trait object, `TypeId`, registry, or cache. Rust traits remain only
+where callers genuinely supply open behavior or capabilities.
+
+The macro crates validate the complete typed catalogs for duplicate names,
+unknown dependencies, dependency cycles, incomplete target schedules,
+duplicate capabilities, illegal storage scope, and invalid selection targets.
+Each CUB primitive contains exactly one semantic contract by construction;
+there is no separately parsed binding table that can drift.
 
 ## Crate boundary
 
@@ -21,208 +99,115 @@ catalog, erased type map, PTX text, or JIT fallback.
        +----------------------+-------------------------+
        |                                                |
 rccl-cub-macros ------------------------------> rccl-thrust-macros
-       | emits CUB device Rust                    | emits Thrust facade Rust
+       | operation parsing/catalog/lowering       | call parsing/CUB selection
        v                                          v
 rccl-memory ----------------> rccl-cub -------> rccl-thrust -------> rccl
                          runtime values only
 ```
 
+The zero-input `emit_support!` calls in the runtime crates are internal crate
+construction macros. They emit the Rust-native support vocabulary and are not
+the operation DSL. Runtime crates cannot restate compiler facts.
+
 The macro crates own every authored compile-time fact:
 
-- the public CCCL-family inventory and dependency graph;
-- support-type mappings and source/sink capabilities;
+- the complete CCCL-family inventory and dependency graph;
+- support-type mappings and range capabilities;
 - thread, warp, block, agent, grid, and device kernel families;
-- type and callable specialization rules;
+- type/callable selection rules;
 - target schedules, launch bounds, tile shapes, unroll factors, shared-memory
   formulas, and fallback selection;
-- Thrust-to-CUB lowering rules;
-- the finite compiler expansion requested by one generated program.
+- Thrust-to-CUB lowering rules; and
+- the concrete source generated for each macro invocation.
 
-The runtime crates may own only values that exist while a program runs:
+Runtime crates own only values that exist while a program runs:
 
-- borrowed contexts and streams;
-- allocation owners, buffers, ranges, lengths, and temporary storage;
-- opaque CUDA module/function handles emitted by cuda-oxide for the expanded
-  program, once cuda-oxide supports the required static generic binding;
-- launch dimensions derived from runtime lengths;
+- borrowed contexts, streams, and allocators;
+- allocation owners, buffers, views, lengths, and temporary storage;
+- launch dimensions derived from runtime lengths; and
 - completion and error values.
 
-In particular, `Execution` is only a borrowed stream plus an allocator. It
-does not contain an `AotKernelSet`, module family, schedule, architecture,
-type map, or specialization cache.
-
-## Two typed DSLs
-
-Both DSLs are private files inside their proc-macro crate. A runtime crate uses
-a zero-input expansion macro, so it cannot restate or override compiler facts.
-The macro parses its private DSL with `syn` 2 into a typed AST, validates the
-whole graph, and emits Rust. Raw token copying is not the compiler model.
-
-### CUB DSL
-
-The CUB DSL declares support mappings, schedules, and primitive families:
-
-```text
-support span {
-    rust: slice;
-    ownership: borrowed;
-    capability: contiguous;
-}
-
-schedule radix_sort {
-    sm80 { block_threads: 256; items_per_thread: 12; min_blocks_per_sm: 2; }
-    sm89 { block_threads: 256; items_per_thread: 16; min_blocks_per_sm: 2; }
-}
-
-primitive device_radix_sort {
-    status: implemented;
-    scope: device;
-    requires: [block_radix_sort, device_scan];
-    schedule: radix_sort;
-    kernels: [histogram, prefix, scatter];
-}
-```
-
-Its typed model is:
-
-```text
-CubProgram = Support* x Schedule* x Primitive*
-Primitive  = Name x Status x Scope x Dependency* x Schedule? x Kernel*
-Schedule   = Name x (Target -> FieldMap)
-Scope      = thread | warp | block | agent | grid | device | iterator
-Status     = planned | implemented | native_rust | backend_blocked
-```
-
-Validation rejects duplicate names, unknown dependencies, dependency cycles,
-missing schedules, incomplete target rows, nonliteral schedule values, and a
-runtime-selection declaration.
-
-### Thrust DSL
-
-The Thrust DSL declares Rust support vocabulary and lowering rules:
-
-```text
-algorithm stable_sort {
-    status: implemented;
-    form: in_place;
-    requires: [device_merge_sort, device_radix_sort];
-    select {
-        natural_radix_key => device_radix_sort;
-        otherwise => device_merge_sort;
-    }
-}
-```
-
-Its typed model is:
-
-```text
-ThrustProgram = Support* x Adaptor* x Algorithm*
-Algorithm     = Name x Status x Form x Dependency* x SelectionRule*
-SelectionRule = CompileTimePredicate -> CubPrimitive
-```
-
-Selection predicates are resolved while emitting Rust. They may become
-ordinary Rust generic bounds or direct monomorphized calls in the expansion,
-but never a runtime enum, match, trait object, `TypeId`, or cache.
+`Execution` is only a borrowed stream plus allocator. It contains no module
+set, schedule, architecture, type map, specialization cache, or compiler
+policy.
 
 ## Expansion contract
 
-For an algorithm call shape `C`, inferred Rust type facts `T`, and compiler
-target `G`, expansion implements the partial function
+For call syntax `C`, rustc-inferred type facts `T`, and compiler target `G`,
+the generated generic program realizes the partial function
 
 ```text
 lower(C, T, G) = (concrete CUB operation, literal schedule, oxide kernel set)
 ```
 
-The result is compiler input, not a Rust value. There is no inverse operation
-that discovers `T` or `G` at runtime.
+The proc macro sees `C` and emits the source that lets rustc determine `T` and
+`G`. RCCL never discovers them at runtime.
 
-The CUB expansion emits:
+The CUB macro layer emits:
 
-1. native support/value/range code required by the selected primitives;
-2. concrete device helpers and cuda-oxide kernel items;
-3. direct literal schedule operands and compiler attributes;
-4. generated typed launch code for the compiler-expanded kernels.
+1. only the support code and device helpers needed by implemented operations;
+2. concrete cuda-oxide kernel items;
+3. literal schedule operands/compiler attributes; and
+4. typed launch code with safe generated arguments.
 
-Before returning tokens, each proc macro parses its own output back into a
-`syn::File` and runs a structural safety audit. Generated algorithm code is
-rejected if it contains `Arc`; raw pointer types, casts, extraction, or raw
-address expressions; `NonNull`/`UnsafeCell`/`ptr`/`transmute` plumbing; unsafe
-blocks, signatures, traits, or impls; FFI blocks, unions, or `static mut`; or
-opaque nested macros and unaudited attributes. The normal generated
-representation is ownership plus borrows, slices, checked disjoint slices,
-`MaybeUninit`, closures, and typed cuda-oxide launch arguments. A genuinely
-unavoidable CUDA FFI operation belongs in a tiny hand-audited backend
-primitive, not in generated algorithm code and not behind a general codegen
-waiver.
+The Thrust layer parses the public algorithm shape and lowers directly to its
+CUB operation. It does not recreate C++ iterator-pair or execution-policy
+scaffolding when a Rust borrow/range already carries the semantics.
 
-The Thrust expansion emits:
+Before returning tokens, each proc macro parses generated output into a
+`syn::File` and runs a structural audit. Generated algorithm code is rejected
+if it contains `Arc`; raw pointer types, casts, extraction, or raw-address
+expressions; `NonNull`/`UnsafeCell`/`ptr`/`transmute`; unsafe blocks,
+signatures, traits, or impls; FFI blocks, unions, `static mut`; opaque nested
+macros; or unaudited attributes. A genuinely unavoidable CUDA FFI action
+belongs in a tiny hand-audited backend primitive, never in generated algorithm
+code.
 
-1. ordinary Rust functions such as `sort`, `sort_by`, and `merge`;
-2. private compile-time lowering code generated from the Thrust DSL;
-3. calls to the generated CUB surface using borrowed ranges and runtime
-   lengths only.
+RCCL performs no PTX concatenation, runtime driver JIT, nvJitLink, manual
+symbol construction, or erased ABI argument-vector assembly. If cuda-oxide
+lacks a required static generic binding, that operation stays unexported.
 
-Generated code must not use `cuda_host::cuda_module` while its generic path
-loads merged PTX at runtime. Until cuda-oxide provides static binding for the
-generic expanded program, the compiler boundary remains an explicit build
-blocker. RCCL does not replace it with a runtime error, PTX loader, JIT link,
-symbol-name assembly, or erased ABI argument vector.
+## Rust-native support mapping
 
-## Rust mappings
+The catalog records semantic mappings; it does not generate compatibility
+wrappers where Rust already carries the contract:
 
-The macro DSL records mappings but does not generate compatibility wrappers
-when native Rust already carries the semantics:
-
-| CCCL concept | Generated Rust contract |
+| CCCL concept | Rust representation |
 |---|---|
-| `span` | kernel `&[T]`, `&mut [T]`, or checked disjoint slice; host allocation borrow |
+| `span` | kernel `&[T]`, `&mut [T]`, or a checked disjoint slice |
 | `array` | `[T; N]` |
-| `pair`, `tuple` | Rust tuples; named `repr(C)` record only for a required ABI |
-| type traits/TMP | Rust bounds, associated types, const generics, macro validation |
+| `pair`, `tuple` | Rust tuples; named records only when field names matter |
+| type traits/TMP | bounds, associated types, const generics, macro semantic checks |
 | `optional`, `expected` | `Option`, `Result` |
 | `device_vector` | `rccl_memory::DeviceBuffer` |
-| iterator facade/categories | sealed source/sink capability traits |
-| fancy iterator | zero-copy indexed source/sink adaptor |
-| comparator/function object | ordinary copyable Rust closure returning `Ordering` or the operation's result |
-| temporary storage query | typed layout plus a borrowed aligned byte range |
+| iterator categories/facade | minimal read/write/random-access range capabilities |
+| fancy iterator | zero-copy range-expression descriptor |
+| comparator/function object | ordinary Rust closure expression |
+| temporary storage query | checked `Layout` and exclusive allocation borrow |
 | execution policy | borrowed stream and allocator runtime values only |
 
-There are no `Less`, `Greater`, `Comparator`, `DeviceCallable`, C++ iterator
-pair, policy, schedule, or legacy module aliases.
+Generated range descriptors contain no host `get`/`write` execution path.
+Construction records shape and closures but never evaluates device closures
+on the host, preventing CPU behavior from masking a missing GPU lowering.
 
-## Non-negotiable rejection rules
+## Rejection and verification
 
-Outside the two macro crates, structural tests reject authored occurrences of:
+Outside the macro crates, structural tests reject authored schedules,
+specialization/dispatch traits, compiler manifests, `TypeId`/`Any`, module
+caches, PTX/JIT paths, manual symbols/ABI vectors, generated `Arc`, raw
+pointers, broad unsafe, and compatibility aliases.
 
-- target schedules or algorithm policy constants;
-- specialization/dispatch traits and proof witnesses;
-- kernel-family or compiler-manifest structs;
-- `TypeId`, `Any`, downcasting, or typed global registries;
-- `Arc<CudaModule>`, module caches, or cross-context kernel caches;
-- runtime target or type selection;
-- PTX strings, PTX bundle merging, driver JIT, nvJitLink, or runtime compiler
-  APIs;
-- manual kernel symbol construction and raw ABI argument vectors;
-- generated `Arc`, raw pointers, broad `unsafe`, or pointer-manufacturing
-  casts;
-- compatibility aliases for deleted RCCL APIs.
+Verification proceeds in these stages:
 
-Tests and examples receive no exception. Test-only kernels and fault-injection
-variants are declared in a macro crate test DSL and expanded by a test macro.
-
-## Verification stages
-
-1. Parse and validate both complete catalogs with `syn` 2.
-2. Snapshot normalized typed ASTs and selected expansions.
-3. Use compile-pass/compile-fail consumers to prove ordinary Rust API and
-   ownership boundaries.
-4. Scan all non-macro Rust sources for forbidden compile-time metadata and all
-   generated binaries for PTX/JIT paths.
-5. Add public examples and focused unit, boundary, randomized, and negative
-   tests for each implemented family.
-6. Seed implementation and launch faults and prove the intended tests fail;
-   inspect for vacuous passes, stale binaries, shared oracles, skipped work,
-   CPU fallbacks, partial-output checks, and swallowed errors.
-7. Run the cuda-oxide compiler gate. A missing static generic binding is
-   reported as a compiler blocker, never converted into a runnable fallback.
+1. Validate both complete typed Rust catalogs.
+2. Parse real shallow call syntax with `syn` 2 and compile-pass/compile-fail
+   consumers once each operation is exported.
+3. Audit generated syntax and ownership/capability boundaries.
+4. Add focused examples, unit tests, GPU reference tests, randomized tests,
+   and negative cases for each implemented family.
+5. Seed parser, lowering, launch, and output faults and prove the intended test
+   fails for the intended reason; inspect for vacuous passes, stale binaries,
+   CPU execution, shared oracles, skipped work, partial-output checks, and
+   swallowed errors.
+6. Run the cuda-oxide compiler/GPU/reference gate. Missing static support is a
+   compiler blocker and never a fallback.

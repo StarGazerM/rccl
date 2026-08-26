@@ -11,7 +11,7 @@ implementations are not retained evidence.
 |---|---|---|
 | A01 | fixed | `rccl-cub-macros` is the only author of CUB support mappings, primitive dependencies, target schedules, kernel families, and specialization facts. |
 | A02 | fixed | `rccl-thrust-macros` is the only author of Thrust support/adaptor mappings and Thrust-to-CUB selection rules. |
-| A03 | fixed | Both private DSLs use custom `syn` 2 typed ASTs and whole-catalog validation. |
+| A03 | fixed | Both user-facing operation DSLs are shallow call-site macros parsed as operation-specific `syn` 2 ASTs; the complete inventories are private typed Rust catalogs, not separate language files. |
 | A04 | fixed | `rccl-cub/src/lib.rs` and `rccl-thrust/src/lib.rs` are zero-input expansion sites; a runtime crate cannot restate compiler facts. |
 | A05 | fixed | `Execution` borrows a stream and allocator only. It owns no module set, policy, type map, target, schedule, registry, or cache. |
 | A06 | fixed | `AotKernelSet`, `TargetSchedule`, build-script schedule generation, `TypeId`/`Any` registries, module caches, and handwritten dispatch traits are deleted. |
@@ -19,6 +19,8 @@ implementations are not retained evidence.
 | A08 | fixed | There are no compatibility `Comparator`, `Less`, `Greater`, `DeviceSpan`, legacy execution, or stable-sort aliases. |
 | A09 | fixed | Old examples, benchmarks, and compile-only fixtures were removed because they could report API coverage without a generated algorithm. |
 | A10 | fixed | The compiler gate does not run a GPU program before a safe proc-macro-generated launch path exists. |
+| A11 | fixed | Every one of the 59 typed CUB catalog entries contains exactly one operation contract declaring its range capabilities, callable shape, and storage class. |
+| A12 | fixed | Closed TMP/CRTP backend policy is lowered by the DSL; generated Rust has no policy/backend/strategy/proof type hierarchy. |
 
 ## Generated Rust safety
 
@@ -34,8 +36,9 @@ Expansion rejects:
 - opaque nested macro calls and unaudited attributes that could generate code
   after the structural pass.
 
-The generated support surface currently uses ownership, borrows, slices,
-`MaybeUninit`, and ordinary `Result`. There is no generator waiver. A future
+The generated support surface currently uses ownership, borrows, minimal
+range-capability traits, checked `Layout`, and ordinary `Result`. There is no
+generator waiver. A future
 CUDA operation that genuinely requires unsafe code must first be isolated as
 a small reviewed backend primitive; generated algorithms call only its safe
 contract.
@@ -52,14 +55,15 @@ cannot silently widen.
 
 | Surface | State | Evidence |
 |---|---|---|
-| complete CUB public catalog | implemented compiler input | `rccl-cub-macros/src/cub.dsl` contains 59 validated public primitives |
-| complete Thrust algorithm catalog | implemented compiler input | `rccl-thrust-macros/src/thrust.dsl` contains all 34 algorithm headers |
-| complete Thrust iterator catalog | implemented compiler input | the same DSL contains all 19 iterator headers |
-| Rust support mappings | partial | CUB expansion emits `KeyValue`, `DoubleBuffer`, `TempStorage`, `DeviceSource`, and `DeviceSink`; Thrust expansion emits checked constant/counting/discard/subrange/reverse/stride/map/map-output/map-in-out/zip/permutation/tabulate adaptors |
+| complete CUB public catalog | implemented compiler input | `rccl-cub-macros/src/catalog.rs` contains 59 validated typed primitives and exactly one semantic contract per primitive |
+| complete Thrust algorithm catalog | implemented compiler input | `rccl-thrust-macros/src/catalog.rs` contains all 34 algorithm headers and typed CUB selections |
+| complete Thrust iterator catalog | implemented compiler input | the same typed catalog contains all 19 iterator/adaptor headers |
+| shallow operation syntax | implemented parser boundary | `call.rs` in both macro crates retains ordinary Rust `Expr` nodes; parser tests cover closures, borrows, paths, duplicate fields, and missing fields |
+| Rust support mappings | partial | CUB expansion emits `KeyValue`, generic `DoubleBuffer`, checked `TempStorageLayout`/`TempStorage`, and minimal range/read/write/random-access/contiguous traits; Thrust expansion emits descriptor-only constant/counting/discard/subrange/reverse/stride/map/map-output/map-in-out/zip/permutation/tabulate adaptors |
 | `cuda::Execution` | implemented runtime value | generated borrowed stream and allocator only |
 | CUB collectives/device algorithms | missing or backend-blocked | old pointer-heavy code deleted; no safe generated kernels yet |
 | Thrust algorithms | backend-blocked | deliberately unexported until their generated CUB lowering exists |
-| generated support tests | implemented | macro output tests ownership, bounds, composition, failure propagation, closure capture, and rejected inputs; the zero-stride test exposed and repaired eager `then_some` evaluation |
+| generated support tests | implemented | macro output tests ownership, extent/bounds composition, capability propagation, invalid layouts, and proves adaptor construction never executes user closures on the host |
 | public algorithm examples/runtime parity | missing | must be rebuilt after each public algorithm exists |
 
 `backend-blocked` never means a runtime `CompilerUnavailable` error. It means
@@ -67,7 +71,7 @@ the function is not exported and cannot be mistaken for a runnable operation.
 
 ## Required implementation order
 
-1. Generate safe source/sink/product/storage vocabulary.
+1. Generate safe read/write/random-access/product/storage vocabulary.
 2. Generate Thrust adaptors and compile-fail ownership tests.
 3. Generate CUB thread, warp, then block primitives without raw-pointer
    algorithm code.
