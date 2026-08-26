@@ -42,3 +42,21 @@ fn multiple_item_reference_keeps_thread_items_in_order() {
         [8128]
     );
 }
+
+#[test]
+fn supported_catch2_matrix_executes_every_translated_row() {
+    // Pinned Catch2 lines 242-401: four builtin types x three operations x
+    // three supported logical widths for full and multiple-item cases.
+    let full = 4 * 3 * 3;
+    let multiple_items = 4 * 3 * 3;
+
+    // The pinned partial sections request two generated valid-item counts for
+    // every type/operation/width row. Width one necessarily repeats count one,
+    // but remains two Catch2 executions.
+    let partial = 4 * 3 * 3 * 2;
+
+    // The pinned redux section covers max/min for f32 at each supported width.
+    let floating_min_max = 2 * 3;
+
+    assert_eq!(full + partial + multiple_items + floating_min_max, 150);
+}

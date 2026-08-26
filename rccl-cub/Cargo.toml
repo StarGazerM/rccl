@@ -22,3 +22,9 @@ name = "warp_reduce"
 path = "examples/warp_reduce.rs"
 test = false
 required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "warp_reduce_catch2"
+path = "examples/warp_reduce_catch2.rs"
+test = false
+required-features = ["cuda-oxide-example"]

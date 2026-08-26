@@ -22,23 +22,43 @@ printf '%s  %s\n' \
   "$test_source" \
   | sha256sum --check --status
 
-example=rccl-cub/examples/warp_reduce.rs
+overview_example=rccl-cub/examples/warp_reduce.rs
+matrix_example=rccl-cub/examples/warp_reduce_catch2.rs
 unit_test=rccl-cub/tests/warp_reduce_upstream.rs
 for required in \
   'rccl_cub::warp_reduce!(32' \
   'rccl_cub::warp_reduce!(16' \
   'rccl_cub::warp_reduce_items!(32' \
   '496, 1520, 2544, 3568'; do
-  if ! rg -q -F "$required" "$example"; then
+  if ! rg -q -F "$required" "$overview_example"; then
     printf '%s\n' "WarpReduce port lost required evidence: $required" >&2
+    exit 1
+  fi
+done
+for required in \
+  'rccl_cub::warp_reduce!($width' \
+  'rccl_cub::warp_reduce_items!($width' \
+  'full_integer_operation!(operation, 1' \
+  'items_integer_operation!(operation, 16' \
+  'items_integer_operation!(operation, 1' \
+  'assert_eq!(executed, 150)' \
+  'u8_matrix' \
+  'u16_matrix' \
+  'i32_matrix' \
+  'i64_matrix' \
+  'f32_min_max'; do
+  if ! rg -q -F "$required" "$matrix_example"; then
+    printf '%s\n' "WarpReduce Catch2 matrix lost required evidence: $required" >&2
     exit 1
   fi
 done
 for required in \
   'pinned_overview_reference_values_are_exact' \
   'partial_reference_excludes_inactive_lanes' \
-  'multiple_item_reference_keeps_thread_items_in_order'; do
-  if ! rg -q -F "$required" "$unit_test"; then
+  'multiple_item_reference_keeps_thread_items_in_order' \
+  'supported_catch2_matrix_executes_every_translated_row' \
+  'warp_reduce_accepts_a_literal_forwarded_by_a_rust_macro'; do
+  if ! rg -q -F "$required" "$unit_test" rccl-cub-macros/src/call.rs; then
     printf '%s\n' "WarpReduce unit-test port lost required evidence: $required" >&2
     exit 1
   fi
@@ -56,17 +76,24 @@ fi
 source scripts/oxide-env.sh
 
 cleanup_sidecars() {
-  rm -f -- warp_reduce.options warp_reduce.target
+  rm -f -- \
+    warp_reduce.options \
+    warp_reduce.target \
+    warp_reduce_catch2.options \
+    warp_reduce_catch2.target
 }
 trap cleanup_sidecars EXIT
 
-cargo oxide build \
-  --features cuda-oxide-example \
-  -- \
-  --release \
-  --package rccl-cub \
-  --example warp_reduce
+for example in warp_reduce warp_reduce_catch2; do
+  cargo oxide build \
+    --features cuda-oxide-example \
+    -- \
+    --release \
+    --package rccl-cub \
+    --example "$example"
+done
 
 ./target/release/examples/warp_reduce
+./target/release/examples/warp_reduce_catch2
 
 printf '%s\n' 'Pinned CCCL WarpReduce Rust port through standard cuda-oxide build: PASS'

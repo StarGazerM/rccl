@@ -8,9 +8,11 @@ This slice is tied to CCCL commit
 - `cub/test/warp/catch2_test_warp_reduce.cu`
   (`25bec1964bd85f8e9b1000af379b636218aebd713c42719cdf23e03b502c5295`).
 
-The runnable Rust port is `examples/warp_reduce.rs`; the ordinary Cargo unit
-target is `tests/warp_reduce_upstream.rs`. The GPU port uses only the public
-operation macros:
+The runnable Rust ports are `examples/warp_reduce.rs` for the documented
+overview and focused cases and `examples/warp_reduce_catch2.rs` for the pinned
+Catch2 matrix. The ordinary Cargo unit target is
+`tests/warp_reduce_upstream.rs`. The GPU ports use only the public operation
+macros:
 
 ```rust,ignore
 let aggregate = rccl_cub::warp_reduce!(
@@ -24,6 +26,8 @@ The first operand is the closed compile-time logical-warp width. The remaining
 operands are ordinary Rust expressions; rustc infers their types and
 monomorphizes the closure. There is no public operator type, algorithm policy,
 temporary-storage type, runtime registry, or device lambda substitute.
+Literal widths forwarded through an ordinary declarative Rust macro are
+accepted as compile-time syntax; runtime width expressions remain rejected.
 
 ## Correspondence
 
@@ -35,7 +39,10 @@ temporary-storage type, runtime registry, or device lambda substitute.
 | partial logical warp with uniform `valid_items` | `partial_sum`; independently folds only the first 13 lanes |
 | logical warp smaller than 32 | `logical_16_max`; checks all eight logical warps |
 | four items per thread | `multiple_items`; `[T; 4]` replaces the C++ fixed-size range |
-| built-in scalar matrix | focused `u8`, `i32`, and `i64` GPU cases exercise narrow, native-32-bit, and two-register exchange |
+| built-in scalar matrix | `warp_reduce_catch2`: all `u8`, `u16`, `i32`, and `i64` sum/max/min rows at supported widths `32`, `16`, and `1` |
+| two generated partial extents | `warp_reduce_catch2`: two executions for every supported builtin type/operation/width row |
+| multiple-items matrix | `warp_reduce_catch2`: all supported builtin type/operation/width rows with `[T; 4]` |
+| floating redux matrix | `warp_reduce_catch2`: exact `f32` max/min comparisons at supported widths |
 
 The host oracle does not call RCCL code. Every GPU output checked here is read
 from a real device buffer, and every logical lane-zero result is compared, not
@@ -45,7 +52,7 @@ everything after that Rust source.
 ## Explicitly not claimed yet
 
 The pinned Catch2 file also covers logical widths `9` and `7`, custom/vector
-records, `half`/`bfloat16`, and a wider combinatorial product. cuda-oxide's safe
+records, and `half`/`bfloat16`. cuda-oxide's safe
 `WarpTile` supports only `1, 2, 4, 8, 16, 32`; CUB implements non-power-of-two
 widths through shared memory. Those cases remain unimplemented until shared
 memory can be owned without emitting `static mut`, raw pointers, or unsafe

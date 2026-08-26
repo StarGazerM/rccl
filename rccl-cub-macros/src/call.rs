@@ -35,17 +35,7 @@ impl Parse for WarpReduceCall {
         }
         let mut expressions = expressions.into_iter();
         let width_expression = expressions.next().expect("validated operand count");
-        let Expr::Lit(ExprLit {
-            lit: Lit::Int(logical_warp_threads),
-            ..
-        }) = width_expression
-        else {
-            return Err(syn::Error::new_spanned(
-                width_expression,
-                "logical warp width must be an integer literal owned by the operation macro",
-            ));
-        };
-        validate_logical_warp_threads(&logical_warp_threads)?;
+        let logical_warp_threads = parse_logical_warp_threads(width_expression)?;
         let input = expressions.next().expect("validated operand count");
         let remaining = expressions.collect::<Vec<_>>();
         let (valid_items, op) = match remaining.as_slice() {
@@ -77,22 +67,30 @@ impl Parse for WarpReduceItemsCall {
         }
         let mut expressions = expressions.into_iter();
         let width_expression = expressions.next().expect("validated operand count");
-        let Expr::Lit(ExprLit {
-            lit: Lit::Int(logical_warp_threads),
-            ..
-        }) = width_expression
-        else {
-            return Err(syn::Error::new_spanned(
-                width_expression,
-                "logical warp width must be an integer literal owned by the operation macro",
-            ));
-        };
-        validate_logical_warp_threads(&logical_warp_threads)?;
+        let logical_warp_threads = parse_logical_warp_threads(width_expression)?;
         Ok(Self {
             logical_warp_threads,
             items: expressions.next().expect("validated operand count"),
             op: expressions.next().expect("validated operand count"),
         })
+    }
+}
+
+fn parse_logical_warp_threads(expression: Expr) -> Result<LitInt> {
+    match expression {
+        Expr::Lit(ExprLit {
+            lit: Lit::Int(width),
+            ..
+        }) => {
+            validate_logical_warp_threads(&width)?;
+            Ok(width)
+        }
+        Expr::Group(group) => parse_logical_warp_threads(*group.expr),
+        Expr::Paren(paren) => parse_logical_warp_threads(*paren.expr),
+        other => Err(syn::Error::new_spanned(
+            other,
+            "logical warp width must be an integer literal owned by the operation macro",
+        )),
     }
 }
 
@@ -258,6 +256,26 @@ mod tests {
         let non_power = syn::parse_str::<WarpReduceCall>("9, value, |left, right| left + right")
             .expect_err("the safe backend must not mask unsupported shared-memory tiles");
         assert!(non_power.to_string().contains("1, 2, 4, 8, 16, and 32"));
+    }
+
+    #[test]
+    fn warp_reduce_accepts_a_literal_forwarded_by_a_rust_macro() {
+        let width = proc_macro2::Group::new(proc_macro2::Delimiter::None, quote::quote!(16));
+        let call = syn::parse2::<WarpReduceCall>(
+            quote::quote!(#width, value, |left, right| left + right),
+        )
+        .expect("an invisible macro-expansion group around a literal is still compile-time syntax");
+        assert_eq!(call.logical_warp_threads.base10_parse::<u32>().unwrap(), 16);
+
+        let parenthesized: WarpReduceItemsCall =
+            syn::parse_quote! { (8), items, |left, right| left + right };
+        assert_eq!(
+            parenthesized
+                .logical_warp_threads
+                .base10_parse::<u32>()
+                .unwrap(),
+            8,
+        );
     }
 
     #[test]

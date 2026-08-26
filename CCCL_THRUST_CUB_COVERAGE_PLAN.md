@@ -370,7 +370,7 @@ uniform_real_distribution.h       xor_combine_engine.h
 | Layer | Exact pinned entry points | Current state |
 |---|---|---|
 | Thread | `thread_load`, `thread_store`, `thread_reduce`, `thread_scan`, `thread_search`, `thread_sort`, `thread_simd`, `thread_operators` | missing as public CUB layer |
-| Warp | `warp_load`, `warp_store`, `warp_exchange`, `warp_reduce`, `warp_reduce_batched`, `warp_scan`, `warp_bitonic_sort`, `warp_merge_sort`, `warp_utils` | catalogued; `warp_reduce` has a safe power-of-two scalar/fixed-array slice with pinned GPU evidence; non-power-of-two, record, segmented, and batched forms remain missing/backend-blocked |
+| Warp | `warp_load`, `warp_store`, `warp_exchange`, `warp_reduce`, `warp_reduce_batched`, `warp_scan`, `warp_bitonic_sort`, `warp_merge_sort`, `warp_utils` | catalogued; `warp_reduce` covers the pinned builtin power-of-two full/partial/fixed-array matrix with 150 GPU executions; non-power-of-two, record, segmented, and batched forms remain missing/backend-blocked |
 | Block data movement | `block_load`, `block_load_to_shared`, `block_store`, `block_exchange`, `block_shuffle` | missing |
 | Block scan/reduce | `block_reduce`, `block_scan`, `block_adjacent_difference`, `block_discontinuity` | missing |
 | Block ordering | `block_merge_sort`, `block_radix_rank`, `block_radix_sort`, `radix_rank_sort_operations` | missing |

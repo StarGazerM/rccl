@@ -47,8 +47,8 @@ unavailable" error.
 
 `WarpReduce` is the first implemented vertical slice. Its macro keeps the
 logical-warp width in the compile-time layer and keeps the reduction operator
-as an ordinary Rust closure. The corresponding pinned CCCL overview and
-focused Catch2 cases run on the GPU through cuda-oxide; see
+as an ordinary Rust closure. The corresponding pinned CCCL overview and the
+150-case supported Catch2 matrix run on the GPU through cuda-oxide; see
 [rccl-cub/CCCL_WARP_REDUCE_PORT.md](rccl-cub/CCCL_WARP_REDUCE_PORT.md).
 
 The handwritten runtime surface contains CUB range/storage values, Thrust
@@ -111,6 +111,6 @@ scripts/test-gpu.sh
 The current gate validates the pinned example/API-test inventory, the two
 compiler catalogs, generated-token safety, the runtime/compiler boundary, the
 absence of RCCL-owned compiler/runtime-TMP code, formatting, warning-free host
-compilation, tests, docs, and the cuda-oxide `WarpReduce` executable. Other
+compilation, tests, docs, and both cuda-oxide `WarpReduce` executables. Other
 algorithms remain absent until they have the same safe generated path and
 upstream-corresponding evidence.

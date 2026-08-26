@@ -151,7 +151,10 @@ mapfile -t rust_examples < <(
   find rccl-cub/examples rccl-thrust/examples examples src/bin tests/fixtures \
     -type f -name '*.rs' 2>/dev/null | sort
 )
-expected_rust_examples=(rccl-cub/examples/warp_reduce.rs)
+expected_rust_examples=(
+  rccl-cub/examples/warp_reduce.rs
+  rccl-cub/examples/warp_reduce_catch2.rs
+)
 if ! diff -u \
   <(printf '%s\n' "${expected_rust_examples[@]}") \
   <(printf '%s\n' "${rust_examples[@]}"); then
