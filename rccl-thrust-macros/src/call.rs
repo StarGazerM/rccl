@@ -11,6 +11,12 @@ use syn::{
     punctuated::Punctuated,
 };
 
+#[derive(Debug, syn_derive::Parse)]
+struct ExpressionList {
+    #[parse(Punctuated::parse_terminated)]
+    expressions: Punctuated<Expr, Token![,]>,
+}
+
 macro_rules! algorithm_call {
     ($name:ident, $operation:literal, $($field:ident),+ $(,)?) => {
         #[derive(Debug)]
@@ -20,7 +26,7 @@ macro_rules! algorithm_call {
 
         impl Parse for $name {
             fn parse(input: ParseStream<'_>) -> Result<Self> {
-                let expressions = Punctuated::<Expr, Token![,]>::parse_terminated(input)?;
+                let ExpressionList { expressions } = input.parse()?;
                 let expected = [$(stringify!($field)),+].len();
                 if expressions.len() != expected {
                     return Err(input.error(format!(

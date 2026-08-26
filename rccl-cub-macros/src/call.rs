@@ -6,10 +6,106 @@
 #![allow(dead_code)]
 
 use syn::{
-    Expr, Result, Token,
+    Expr, ExprLit, Lit, LitInt, Result, Token,
     parse::{Parse, ParseStream},
     punctuated::Punctuated,
 };
+
+#[derive(Debug, syn_derive::Parse)]
+struct ExpressionList {
+    #[parse(Punctuated::parse_terminated)]
+    expressions: Punctuated<Expr, Token![,]>,
+}
+
+#[derive(Debug)]
+pub(crate) struct WarpReduceCall {
+    pub(crate) logical_warp_threads: LitInt,
+    pub(crate) input: Expr,
+    pub(crate) valid_items: Option<Expr>,
+    pub(crate) op: Expr,
+}
+
+impl Parse for WarpReduceCall {
+    fn parse(input: ParseStream<'_>) -> Result<Self> {
+        let ExpressionList { expressions } = input.parse()?;
+        if !matches!(expressions.len(), 3 | 4) {
+            return Err(input.error(
+                "warp_reduce! expects (logical_warp_threads, value, op) or (logical_warp_threads, value, valid_items, op)",
+            ));
+        }
+        let mut expressions = expressions.into_iter();
+        let width_expression = expressions.next().expect("validated operand count");
+        let Expr::Lit(ExprLit {
+            lit: Lit::Int(logical_warp_threads),
+            ..
+        }) = width_expression
+        else {
+            return Err(syn::Error::new_spanned(
+                width_expression,
+                "logical warp width must be an integer literal owned by the operation macro",
+            ));
+        };
+        validate_logical_warp_threads(&logical_warp_threads)?;
+        let input = expressions.next().expect("validated operand count");
+        let remaining = expressions.collect::<Vec<_>>();
+        let (valid_items, op) = match remaining.as_slice() {
+            [op] => (None, op.clone()),
+            [valid_items, op] => (Some(valid_items.clone()), op.clone()),
+            _ => unreachable!("validated operand count"),
+        };
+        Ok(Self {
+            logical_warp_threads,
+            input,
+            valid_items,
+            op,
+        })
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct WarpReduceItemsCall {
+    pub(crate) logical_warp_threads: LitInt,
+    pub(crate) items: Expr,
+    pub(crate) op: Expr,
+}
+
+impl Parse for WarpReduceItemsCall {
+    fn parse(input: ParseStream<'_>) -> Result<Self> {
+        let ExpressionList { expressions } = input.parse()?;
+        if expressions.len() != 3 {
+            return Err(input.error("warp_reduce_items! expects (logical_warp_threads, items, op)"));
+        }
+        let mut expressions = expressions.into_iter();
+        let width_expression = expressions.next().expect("validated operand count");
+        let Expr::Lit(ExprLit {
+            lit: Lit::Int(logical_warp_threads),
+            ..
+        }) = width_expression
+        else {
+            return Err(syn::Error::new_spanned(
+                width_expression,
+                "logical warp width must be an integer literal owned by the operation macro",
+            ));
+        };
+        validate_logical_warp_threads(&logical_warp_threads)?;
+        Ok(Self {
+            logical_warp_threads,
+            items: expressions.next().expect("validated operand count"),
+            op: expressions.next().expect("validated operand count"),
+        })
+    }
+}
+
+fn validate_logical_warp_threads(width: &LitInt) -> Result<()> {
+    let width_value = width.base10_parse::<u32>()?;
+    if !matches!(width_value, 1 | 2 | 4 | 8 | 16 | 32) {
+        return Err(syn::Error::new_spanned(
+            width,
+            "cuda-oxide's safe warp tiles currently support widths 1, 2, 4, 8, 16, and 32",
+        ));
+    }
+    Ok(())
+}
 
 macro_rules! operation_call {
     ($name:ident, $operation:literal, $($field:ident),+ $(,)?) => {
@@ -20,7 +116,7 @@ macro_rules! operation_call {
 
         impl Parse for $name {
             fn parse(input: ParseStream<'_>) -> Result<Self> {
-                let expressions = Punctuated::<Expr, Token![,]>::parse_terminated(input)?;
+                let ExpressionList { expressions } = input.parse()?;
                 let expected = [$(stringify!($field)),+].len();
                 if expressions.len() != expected {
                     return Err(input.error(format!(
@@ -133,6 +229,35 @@ mod tests {
 
     fn tokens(expression: &Expr) -> String {
         expression.to_token_stream().to_string()
+    }
+
+    #[test]
+    fn warp_reduce_preserves_rust_values_closures_and_partial_extent() {
+        let full: WarpReduceCall = syn::parse_quote! { 32, value, |left, right| left + right };
+        assert_eq!(full.logical_warp_threads.base10_parse::<u32>().unwrap(), 32);
+        assert!(full.valid_items.is_none());
+        assert!(matches!(full.op, Expr::Closure(_)));
+
+        let partial: WarpReduceCall =
+            syn::parse_quote! { 16, value, valid_items, |left, right| left.max(right) };
+        assert_eq!(tokens(partial.valid_items.as_ref().unwrap()), "valid_items");
+        assert!(matches!(partial.op, Expr::Closure(_)));
+
+        let items: WarpReduceItemsCall =
+            syn::parse_quote! { 8, thread_items, |left, right| left + right };
+        assert_eq!(tokens(&items.items), "thread_items");
+    }
+
+    #[test]
+    fn warp_reduce_rejects_runtime_and_unsupported_tile_widths() {
+        let runtime =
+            syn::parse_str::<WarpReduceCall>("logical_width, value, |left, right| left + right")
+                .expect_err("tile width belongs to the macro's compile-time input");
+        assert!(runtime.to_string().contains("integer literal"));
+
+        let non_power = syn::parse_str::<WarpReduceCall>("9, value, |left, right| left + right")
+            .expect_err("the safe backend must not mask unsupported shared-memory tiles");
+        assert!(non_power.to_string().contains("1, 2, 4, 8, 16, and 32"));
     }
 
     #[test]

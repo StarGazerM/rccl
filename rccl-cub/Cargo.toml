@@ -5,6 +5,20 @@ edition = "2024"
 license = "Apache-2.0 OR MIT"
 description = "Device-wide and cooperative CUDA primitives for RCCL"
 
+[features]
+cuda-oxide-example = []
+
 [dependencies]
 cuda-core = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "b22efa99e8383e2a349c4a3af60d8aa083973890" }
+cuda-device = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "b22efa99e8383e2a349c4a3af60d8aa083973890" }
+rccl-cub-macros = { path = "../rccl-cub-macros" }
 rccl-memory = { path = "../rccl-memory" }
+
+[dev-dependencies]
+cuda-host = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "b22efa99e8383e2a349c4a3af60d8aa083973890" }
+
+[[example]]
+name = "warp_reduce"
+path = "examples/warp_reduce.rs"
+test = false
+required-features = ["cuda-oxide-example"]

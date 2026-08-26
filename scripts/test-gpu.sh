@@ -23,12 +23,12 @@ fi
 
 package_dependencies() {
   jq -r --arg package "$1" \
-    '.packages[] | select(.name == $package) | .dependencies[] | select(.optional == false) | .name' \
+    '.packages[] | select(.name == $package) | .dependencies[] | select(.optional == false and .kind == null) | .name' \
     <<<"$metadata" | sort | paste -sd ' ' -
 }
 
-if [[ "$(package_dependencies rccl-cub)" != 'cuda-core rccl-memory' ]]; then
-  printf '%s\n' 'rccl-cub support must be ordinary Rust with no proc-macro or host-loader dependency' >&2
+if [[ "$(package_dependencies rccl-cub)" != 'cuda-core cuda-device rccl-cub-macros rccl-memory' ]]; then
+  printf '%s\n' 'rccl-cub must use cuda-device and re-export only implemented operation macros' >&2
   exit 1
 fi
 if [[ "$(package_dependencies rccl-thrust)" != 'cuda-core rccl-cub rccl-memory' ]]; then
@@ -44,15 +44,19 @@ if [[ -e rccl-cub/build.rs || -e rccl-thrust/build.rs ]]; then
   printf '%s\n' 'runtime build scripts may not select targets or generate schedules' >&2
   exit 1
 fi
-if rg -n 'emit_support|rccl_(cub|thrust)_macros::' rccl-cub rccl-thrust --glob '*.rs' --glob 'Cargo.toml'; then
+if rg -n 'emit_support' rccl-cub rccl-thrust --glob '*.rs' --glob 'Cargo.toml'; then
   printf '%s\n' 'ordinary support code must not be emitted by a proc macro' >&2
+  exit 1
+fi
+if ! rg -q '^pub use rccl_cub_macros::\{warp_reduce, warp_reduce_items\};$' rccl-cub/src/lib.rs; then
+  printf '%s\n' 'rccl-cub must re-export exactly the implemented WarpReduce operation macros' >&2
   exit 1
 fi
 
 runtime_roots=(rccl-cub/src rccl-thrust/src src)
 forbidden_runtime='\b(TypeId|Any|Arc|AotKernelSet|TargetSchedule|KernelSet|DispatchEngine|SortConstInvocation|MergeConstInvocation|Comparator|Less|Greater)\b|\bunsafe\b|\*mut|\*const|cuda_module|load_all_ptx|load_module_from_ptx|nvJit|PTX|ptx'
 if rg -n "$forbidden_runtime" "${runtime_roots[@]}" --glob '*.rs'; then
-  printf '%s\n' 'runtime algorithm crates contain compile-time metadata, unsafe ownership, or JIT code' >&2
+  printf '%s\n' 'runtime algorithm crates contain compile-time metadata, unsafe ownership, or backend compiler control' >&2
   exit 1
 fi
 
@@ -80,7 +84,7 @@ for audit_rule in \
   visit_macro \
   visit_path \
   visit_signature \
-  visit_type_bare_fn \
+  visit_type_fn_ptr \
   visit_type_ptr; do
   if ! rg -q "fn $audit_rule" rccl-cub-macros/src/audit.rs; then
     printf '%s\n' "generated-Rust safety audit is missing $audit_rule" >&2
@@ -89,8 +93,9 @@ for audit_rule in \
 done
 
 for manifest in rccl-cub-macros/Cargo.toml rccl-thrust-macros/Cargo.toml; do
-  if ! rg -q '^syn = \{ version = "2", features = \[' "$manifest"; then
-    printf '%s\n' "$manifest must use the typed syn 2 parser" >&2
+  if ! rg -q '^syn = \{ version = "3\.0\.4", features = \[' "$manifest" \
+    || ! rg -q '^syn_derive = "0\.2\.0"$' "$manifest"; then
+    printf '%s\n' "$manifest must use current syn and syn_derive parsers" >&2
     exit 1
   fi
 done
@@ -103,19 +108,24 @@ if ! rg -q 'DeviceReduceSumCall' rccl-cub-macros/src/call.rs \
   || ! rg -q 'DeviceReduceByKeyCall' rccl-cub-macros/src/call.rs \
   || ! rg -q 'SortByCall' rccl-thrust-macros/src/call.rs \
   || ! rg -q 'StableSortByKeyCall' rccl-thrust-macros/src/call.rs \
-  || ! rg -q 'Punctuated::<Expr' rccl-cub-macros/src/call.rs \
-  || ! rg -q 'Punctuated::<Expr' rccl-thrust-macros/src/call.rs \
+  || ! rg -q '#\[derive\(Debug, syn_derive::Parse\)\]' rccl-cub-macros/src/call.rs \
+  || ! rg -q '#\[derive\(Debug, syn_derive::Parse\)\]' rccl-thrust-macros/src/call.rs \
+  || ! rg -q 'Punctuated<Expr, Token!\[,\]>' rccl-cub-macros/src/call.rs \
+  || ! rg -q 'Punctuated<Expr, Token!\[,\]>' rccl-thrust-macros/src/call.rs \
   || ! rg -q 'pub\(crate\).*: Expr' rccl-cub-macros/src/call.rs \
   || ! rg -q 'pub\(crate\).*: Expr' rccl-thrust-macros/src/call.rs; then
-  printf '%s\n' 'operation DSLs must be shallow syn 2 call ASTs retaining Rust expressions' >&2
+  printf '%s\n' 'operation DSLs must be shallow syn 3 call ASTs retaining Rust expressions' >&2
   exit 1
 fi
 if rg -n 'emit_support' rccl-cub-macros/src rccl-thrust-macros/src --glob '*.rs'; then
   printf '%s\n' 'deleted support-generation syntax returned' >&2
   exit 1
 fi
-if rg -n '^#\[proc_macro\]$' rccl-cub-macros/src/lib.rs rccl-thrust-macros/src/lib.rs; then
-  printf '%s\n' 'no operation macro may be exported before its cuda-oxide lowering exists' >&2
+if [[ "$(rg -c '^#\[proc_macro\]$' rccl-cub-macros/src/lib.rs)" != 2 ]] \
+  || ! rg -q '^pub fn warp_reduce\(' rccl-cub-macros/src/lib.rs \
+  || ! rg -q '^pub fn warp_reduce_items\(' rccl-cub-macros/src/lib.rs \
+  || rg -n '^#\[proc_macro\]$' rccl-thrust-macros/src/lib.rs; then
+  printf '%s\n' 'only the two implemented CUB WarpReduce operation macros may be exported' >&2
   exit 1
 fi
 if ! rg -q 'pub\(crate\) const PRIMITIVES: &\[Primitive\]' rccl-cub-macros/src/catalog.rs \
@@ -137,8 +147,15 @@ if ! rg -q 'generated_rust' rccl-cub-macros/src/audit.rs \
   exit 1
 fi
 
-if find examples src/bin tests/fixtures -type f -name '*.rs' 2>/dev/null | rg .; then
-  printf '%s\n' 'stale runtime examples, compatibility fixtures, or GPU binaries survived the compiler rewrite' >&2
+mapfile -t rust_examples < <(
+  find rccl-cub/examples rccl-thrust/examples examples src/bin tests/fixtures \
+    -type f -name '*.rs' 2>/dev/null | sort
+)
+expected_rust_examples=(rccl-cub/examples/warp_reduce.rs)
+if ! diff -u \
+  <(printf '%s\n' "${expected_rust_examples[@]}") \
+  <(printf '%s\n' "${rust_examples[@]}"); then
+  printf '%s\n' 'runtime example set drifted from the registered upstream-corresponding ports' >&2
   exit 1
 fi
 
@@ -149,6 +166,7 @@ RUSTFLAGS='-D warnings' cargo check --workspace --all-targets
 RUSTFLAGS='-D warnings' cargo clippy --workspace --all-targets -- -D warnings
 RUSTFLAGS='-D warnings' cargo test --workspace --no-fail-fast
 RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
+scripts/test-warp-reduce.sh
 
 printf '%s\n' 'RCCL proc-macro compiler and runtime-boundary gate: PASS'
-printf '%s\n' 'GPU execution intentionally not run: generated algorithm launch paths are not implemented yet.'
+printf '%s\n' 'Pinned WarpReduce example/test matrix executed through cuda-oxide.'

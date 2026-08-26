@@ -20,6 +20,7 @@ pub(crate) const TARGETS: &[Target] = &[Target::Sm80, Target::Sm89, Target::Sm90
 pub(crate) enum Status {
     Planned,
     NativeRust,
+    NativeRustPartial,
     BackendBlocked,
 }
 
@@ -229,7 +230,15 @@ macro_rules! primitive {
 pub(crate) const PRIMITIVES: &[Primitive] = &[
     primitive!("thread_load", Planned, Thread, [], None, [], THREAD_READ),
     primitive!("thread_store", Planned, Thread, [], None, [], THREAD_WRITE),
-    primitive!("thread_reduce", Planned, Thread, [], None, [], THREAD_FOLD),
+    primitive!(
+        "thread_reduce",
+        NativeRustPartial,
+        Thread,
+        [],
+        None,
+        [],
+        THREAD_FOLD
+    ),
     primitive!("thread_scan", Planned, Thread, [], None, [], THREAD_FOLD),
     primitive!(
         "thread_search",
@@ -280,7 +289,7 @@ pub(crate) const PRIMITIVES: &[Primitive] = &[
     ),
     primitive!(
         "warp_reduce",
-        Planned,
+        NativeRustPartial,
         Warp,
         ["thread_reduce"],
         None,

@@ -7,7 +7,7 @@ template engine.
 The architectural pipeline is:
 
 ```text
-Rust call-site macro -> operation-specific syn 2 AST -> typed compiler catalog
+Rust call-site macro -> operation-specific syn 3 AST -> typed compiler catalog
 rccl-thrust-macros  -> CUB semantic lowering
 rccl-cub-macros     -> cuda-oxide Rust
 
@@ -15,11 +15,12 @@ rccl-memory -> rccl-cub -> rccl-thrust -> rccl
                  runtime values only
 ```
 
-The proc-macro expansion is RCCL's AOT boundary. All authored target
-schedules, specialization rules, kernel families, and Thrust-to-CUB choices
-live in the two macro crates. Ordinary support types are handwritten Rust in
-the runtime crates; they are not generated merely because their CCCL
-counterparts are templates.
+Proc-macro expansion performs RCCL's compile-time semantic work and emits only
+Rust. All authored schedules, specialization rules, kernel families, and
+Thrust-to-CUB choices live in the two macro crates. Ordinary support types are
+handwritten Rust in the runtime crates; they are not generated merely because
+their CCCL counterparts are templates. cuda-oxide exclusively owns everything
+after the expanded Rust source.
 
 ## Current rewrite state
 
@@ -33,16 +34,22 @@ The compiler catalogs and coverage ledger now cover:
 
 The catalogs are typed Rust compiler data and are validated for duplicates,
 unknown dependencies, target-row drift, selection errors, and CUB dependency
-cycles. Separate operation-specific `syn` 2 parsers retain ordinary Rust
-expressions at the shallow user macro boundary and reject incorrect operand
-counts.
+cycles. Separate operation-specific parsers built with `syn` 3 and
+`syn_derive` retain ordinary Rust expressions at the shallow user macro
+boundary and reject incorrect operand counts.
 
 The old handwritten sort, merge, radix, schedule, module-set, and runtime
 loader implementation has been removed. Those algorithms are intentionally
 not exported while their safe proc-macro-generated cuda-oxide path is being
 written. RCCL does not make the source appear runnable with a panic, CPU
-fallback, PTX merge, JIT, symbol lookup, or runtime "compiler unavailable"
-error.
+fallback, RCCL-authored compiler/loader, symbol lookup, or runtime "compiler
+unavailable" error.
+
+`WarpReduce` is the first implemented vertical slice. Its macro keeps the
+logical-warp width in the compile-time layer and keeps the reduction operator
+as an ordinary Rust closure. The corresponding pinned CCCL overview and
+focused Catch2 cases run on the GPU through cuda-oxide; see
+[rccl-cub/CCCL_WARP_REDUCE_PORT.md](rccl-cub/CCCL_WARP_REDUCE_PORT.md).
 
 The handwritten runtime surface contains CUB range/storage values, Thrust
 range-expression adaptors, and `cuda::Execution`, which borrows a stream and
@@ -103,6 +110,7 @@ scripts/test-gpu.sh
 
 The current gate validates the pinned example/API-test inventory, the two
 compiler catalogs, generated-token safety, the runtime/compiler boundary, the
-absence of JIT/runtime-TMP code, formatting, warning-free host compilation,
-tests, and docs. It deliberately does not run a GPU algorithm before one has a
-safe generated launch path.
+absence of RCCL-owned compiler/runtime-TMP code, formatting, warning-free host
+compilation, tests, docs, and the cuda-oxide `WarpReduce` executable. Other
+algorithms remain absent until they have the same safe generated path and
+upstream-corresponding evidence.

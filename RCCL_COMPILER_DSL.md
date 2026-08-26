@@ -1,6 +1,6 @@
 # RCCL shallow compile-time DSL
 
-RCCL treats procedural-macro expansion as its only project-owned AOT boundary:
+RCCL's project-owned compile-time boundary is procedural-macro expansion:
 
 ```text
 ordinary Rust call tokens
@@ -40,12 +40,18 @@ device_reduce!(
     |left, right| left + right,
     0_i64,
 )?;
+
+let aggregate = warp_reduce!(
+    32,
+    thread_value,
+    |left, right| left + right,
+);
 ```
 
-These snippets specify the intended syntax; algorithm macros remain absent
-from the public crates until their cuda-oxide lowering and launch path exist.
-There is no compiling stub, compatibility wrapper, runtime error, or CPU
-fallback for an unavailable operation.
+`warp_reduce!` is implemented and exported by `rccl-cub`; the other snippets
+still specify intended syntax and remain absent until their cuda-oxide
+lowering and launch path exist. There is no compiling stub, compatibility
+wrapper, runtime error, or CPU fallback for an unavailable operation.
 
 `sort_by!` has one mutable range. `stable_sort_by_key!` has separate key and
 value ranges and preserves the relative order of equal keys. The `_by_key`
@@ -139,12 +145,18 @@ lower(C, T, G) = (concrete CUB operation, literal schedule, oxide kernel set)
 The proc macro sees `C` and emits the source that lets rustc determine `T` and
 `G`. RCCL never discovers them at runtime.
 
-The CUB macro layer emits for an implemented operation:
+For a device-wide operation, the CUB macro layer emits:
 
 1. concrete cuda-oxide kernel items and operation-specific device helpers;
 2. literal schedule operands/compiler attributes;
 3. the selected temporary-storage formula and launch graph; and
 4. typed launch code with safe generated arguments.
+
+For a cooperative device operation used inside a caller-authored kernel, such
+as `warp_reduce!`, it instead emits a safe expression selecting the concrete
+tile implementation. The caller's kernel remains ordinary cuda-oxide Rust;
+the macro owns the closed tile width and operation choice, while rustc owns
+the inferred scalar and closure types.
 
 The Thrust layer parses the public algorithm shape and lowers directly to its
 CUB operation. It does not recreate C++ iterator-pair or execution-policy
@@ -159,9 +171,10 @@ macros; or unaudited attributes. A genuinely unavoidable CUDA FFI action
 belongs in a tiny hand-audited backend primitive, never in generated algorithm
 code.
 
-RCCL performs no PTX concatenation, runtime driver JIT, nvJitLink, manual
-symbol construction, or erased ABI argument-vector assembly. If cuda-oxide
-lacks a required static generic binding, that operation stays unexported.
+RCCL-generated code performs no compiler invocation, compiler configuration,
+manual symbol construction, or erased ABI argument-vector assembly. It emits
+pure Rust; cuda-oxide owns every later compilation decision. If cuda-oxide
+lacks a required Rust/device binding, that operation stays unexported.
 
 ## Rust-native support mapping
 
@@ -190,7 +203,7 @@ on the host, preventing CPU behavior from masking a missing GPU lowering.
 
 Outside the macro crates, structural tests reject authored schedules,
 specialization/dispatch traits, compiler manifests, `TypeId`/`Any`, module
-caches, PTX/JIT paths, manual symbols/ABI vectors, generated `Arc`, raw
+caches, RCCL-owned compiler/loader paths, manual symbols/ABI vectors, generated `Arc`, raw
 pointers, broad unsafe, and compatibility aliases.
 
 Verification proceeds in these stages:

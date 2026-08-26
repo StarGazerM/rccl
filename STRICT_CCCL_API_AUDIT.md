@@ -15,7 +15,7 @@ implementations are not retained evidence.
 | A04 | fixed | `rccl-cub` and `rccl-thrust` contain ordinary Rust runtime values but no target schedule, kernel family, specialization table, or compiler registry. |
 | A05 | fixed | `Execution` borrows a stream and allocator only. It owns no module set, policy, type map, target, schedule, registry, or cache. |
 | A06 | fixed | `AotKernelSet`, `TargetSchedule`, build-script schedule generation, `TypeId`/`Any` registries, module caches, and handwritten dispatch traits are deleted. |
-| A07 | fixed | Runtime PTX merge, driver JIT, nvJitLink, manual symbol lookup, and raw ABI argument-vector paths are absent. |
+| A07 | fixed | RCCL owns no compiler invocation/configuration, manual symbol lookup, or raw ABI argument-vector path; it emits Rust and cuda-oxide owns compilation. |
 | A08 | fixed | There are no compatibility `Comparator`, `Less`, `Greater`, `DeviceSpan`, legacy execution, or stable-sort aliases. |
 | A09 | fixed | Old RCCL examples were removed because they could report API coverage without a generated algorithm. The exact pinned upstream input is independently tracked as 19 programs, 378 embedded example regions, 49 API-test files, and 105 exercised public methods. |
 | A10 | fixed | The compiler gate does not run a GPU program before a safe proc-macro-generated launch path exists. |

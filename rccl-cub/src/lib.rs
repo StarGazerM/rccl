@@ -9,6 +9,146 @@ use core::alloc::{Layout, LayoutError};
 use cuda_core::DeviceCopy;
 use rccl_memory::{DeviceAllocator, DeviceBlock};
 
+pub use rccl_cub_macros::{warp_reduce, warp_reduce_items};
+
+/// Implementation details used by RCCL's operation macros.
+///
+/// This is public only because a proc-macro expansion is compiled in the
+/// caller's crate. It is not a compatibility API.
+#[doc(hidden)]
+pub mod __private {
+    use cuda_device::cooperative_groups::{
+        ThreadGroup, WarpCollective, WarpTile, this_thread_block,
+    };
+
+    /// A scalar that can be exchanged between lanes without exposing a raw
+    /// pointer or a C++-style operator policy.
+    pub trait WarpReduceValue: Copy {
+        fn shuffle_down<const N: u32>(self, tile: &WarpTile<N>, delta: u32) -> Self;
+    }
+
+    impl WarpReduceValue for u8 {
+        #[inline(always)]
+        fn shuffle_down<const N: u32>(self, tile: &WarpTile<N>, delta: u32) -> Self {
+            tile.shfl_down(self as u32, delta) as Self
+        }
+    }
+
+    impl WarpReduceValue for u16 {
+        #[inline(always)]
+        fn shuffle_down<const N: u32>(self, tile: &WarpTile<N>, delta: u32) -> Self {
+            tile.shfl_down(self as u32, delta) as Self
+        }
+    }
+
+    impl WarpReduceValue for u32 {
+        #[inline(always)]
+        fn shuffle_down<const N: u32>(self, tile: &WarpTile<N>, delta: u32) -> Self {
+            tile.shfl_down(self, delta)
+        }
+    }
+
+    impl WarpReduceValue for i8 {
+        #[inline(always)]
+        fn shuffle_down<const N: u32>(self, tile: &WarpTile<N>, delta: u32) -> Self {
+            tile.shfl_down(self as u32, delta) as Self
+        }
+    }
+
+    impl WarpReduceValue for i16 {
+        #[inline(always)]
+        fn shuffle_down<const N: u32>(self, tile: &WarpTile<N>, delta: u32) -> Self {
+            tile.shfl_down(self as u32, delta) as Self
+        }
+    }
+
+    impl WarpReduceValue for i32 {
+        #[inline(always)]
+        fn shuffle_down<const N: u32>(self, tile: &WarpTile<N>, delta: u32) -> Self {
+            tile.shfl_down(self as u32, delta) as Self
+        }
+    }
+
+    #[inline(always)]
+    fn shuffle_u64<const N: u32>(bits: u64, tile: &WarpTile<N>, delta: u32) -> u64 {
+        let low = tile.shfl_down(bits as u32, delta) as u64;
+        let high = tile.shfl_down((bits >> 32) as u32, delta) as u64;
+        low | (high << 32)
+    }
+
+    impl WarpReduceValue for u64 {
+        #[inline(always)]
+        fn shuffle_down<const N: u32>(self, tile: &WarpTile<N>, delta: u32) -> Self {
+            shuffle_u64(self, tile, delta)
+        }
+    }
+
+    impl WarpReduceValue for i64 {
+        #[inline(always)]
+        fn shuffle_down<const N: u32>(self, tile: &WarpTile<N>, delta: u32) -> Self {
+            shuffle_u64(self as u64, tile, delta) as Self
+        }
+    }
+
+    impl WarpReduceValue for f32 {
+        #[inline(always)]
+        fn shuffle_down<const N: u32>(self, tile: &WarpTile<N>, delta: u32) -> Self {
+            tile.shfl_down_f32(self, delta)
+        }
+    }
+
+    impl WarpReduceValue for f64 {
+        #[inline(always)]
+        fn shuffle_down<const N: u32>(self, tile: &WarpTile<N>, delta: u32) -> Self {
+            f64::from_bits(shuffle_u64(self.to_bits(), tile, delta))
+        }
+    }
+
+    /// Reduce one value per lane in a power-of-two logical warp.
+    ///
+    /// Only lane zero is promised to hold the aggregate, matching CUB. The
+    /// down-shuffle tree retains left-to-right operand order, so associative
+    /// non-commutative closures are supported as well.
+    #[inline(always)]
+    pub fn warp_reduce<const N: u32, T, F>(value: T, valid_items: u32, op: F) -> T
+    where
+        T: WarpReduceValue,
+        F: Fn(T, T) -> T + Copy,
+    {
+        let tile = this_thread_block().tiled_partition::<N>();
+        let rank = tile.thread_rank();
+        let mut aggregate = value;
+        let mut offset = 1;
+        while offset < N {
+            let other = aggregate.shuffle_down(&tile, offset);
+            if rank < valid_items && rank + offset < valid_items {
+                aggregate = op(aggregate, other);
+            }
+            offset <<= 1;
+        }
+        aggregate
+    }
+
+    /// Fold a fixed-size per-thread Rust array before the warp-wide phase.
+    #[inline(always)]
+    pub fn warp_reduce_items<const N: u32, T, F, const ITEMS: usize>(values: [T; ITEMS], op: F) -> T
+    where
+        T: WarpReduceValue,
+        F: Fn(T, T) -> T + Copy,
+    {
+        const {
+            assert!(ITEMS > 0, "warp_reduce_items! requires a non-empty array");
+        }
+        let mut thread_aggregate = values[0];
+        let mut item = 1;
+        while item < ITEMS {
+            thread_aggregate = op(thread_aggregate, values[item]);
+            item += 1;
+        }
+        warp_reduce::<N, _, _>(thread_aggregate, N, op)
+    }
+}
+
 /// A key/value product used when field names are semantically useful.
 /// Ordinary products remain Rust tuples.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]

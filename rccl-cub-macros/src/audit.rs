@@ -1,15 +1,28 @@
 use proc_macro2::TokenStream;
+#[cfg(test)]
+use syn::File;
 use syn::{
-    Attribute, Error, ExprCast, ExprMethodCall, ExprRawAddr, ExprUnsafe, File, ItemForeignMod,
+    Attribute, Error, Expr, ExprCast, ExprMethodCall, ExprRawAddr, ExprUnsafe, ItemForeignMod,
     ItemImpl, ItemStatic, ItemTrait, ItemUnion, Macro, Path, Signature, StaticMutability,
-    TypeBareFn, TypePtr,
+    TypeFnPtr, TypePtr,
     visit::{self, Visit},
 };
 
+#[cfg(test)]
 pub(crate) fn generated_rust(tokens: TokenStream) -> syn::Result<TokenStream> {
     let file = syn::parse2::<File>(tokens.clone())?;
     let mut audit = SafetyAudit::default();
     audit.visit_file(&file);
+    match audit.error {
+        Some(error) => Err(error),
+        None => Ok(tokens),
+    }
+}
+
+pub(crate) fn generated_expression(tokens: TokenStream) -> syn::Result<TokenStream> {
+    let expression = syn::parse2::<Expr>(tokens.clone())?;
+    let mut audit = SafetyAudit::default();
+    audit.visit_expr(&expression);
     match audit.error {
         Some(error) => Err(error),
         None => Ok(tokens),
@@ -77,7 +90,7 @@ impl<'ast> Visit<'ast> for SafetyAudit {
     }
 
     fn visit_signature(&mut self, signature: &'ast Signature) {
-        if signature.unsafety.is_some() {
+        if matches!(&signature.safety, syn::Safety::Unsafe(_)) {
             self.reject(
                 signature,
                 "generated RCCL functions and methods may not be unsafe",
@@ -100,11 +113,11 @@ impl<'ast> Visit<'ast> for SafetyAudit {
         visit::visit_item_impl(self, item);
     }
 
-    fn visit_type_bare_fn(&mut self, function: &'ast TypeBareFn) {
+    fn visit_type_fn_ptr(&mut self, function: &'ast TypeFnPtr) {
         if function.unsafety.is_some() {
             self.reject(function, "generated RCCL function types may not be unsafe");
         }
-        visit::visit_type_bare_fn(self, function);
+        visit::visit_type_fn_ptr(self, function);
     }
 
     fn visit_expr_cast(&mut self, expression: &'ast ExprCast) {
@@ -196,6 +209,15 @@ mod tests {
             }
         })
         .expect("borrowed slice code must pass");
+    }
+
+    #[test]
+    fn safe_operation_expression_passes() {
+        generated_expression(quote! {{
+            let value = 7_i32;
+            crate::helper(value, |left, right| left + right)
+        }})
+        .expect("a safe operation expression must pass");
     }
 
     #[test]

@@ -119,11 +119,11 @@ Expansion must:
 
 Declarative macros may cover repeated compiler implementation syntax, but the
 two procedural macro crates own call parsing, typed catalog validation,
-wrapper generation, and all compile-time facts. Proc-macro expansion is
-RCCL's AOT boundary; cuda-oxide
-owns subsequent ordinary compiler lowering. Neither stage may be replaced by
-runtime PTX concatenation, driver JIT, symbol-name lookup, or an ABI argument
-vector assembled by RCCL.
+wrapper generation, and all compile-time facts. Proc-macro expansion owns
+RCCL's compile-time semantic lowering and emits pure Rust; cuda-oxide owns all
+subsequent compilation decisions. RCCL may not invoke or configure a device
+compiler, perform symbol-name lookup, or build an erased ABI argument-vector
+path of its own.
 
 The earlier direct-literal rule remains: do not reintroduce
 `DispatchEngine`, `SortConstInvocation`, `MergeConstInvocation`, or another
@@ -370,7 +370,7 @@ uniform_real_distribution.h       xor_combine_engine.h
 | Layer | Exact pinned entry points | Current state |
 |---|---|---|
 | Thread | `thread_load`, `thread_store`, `thread_reduce`, `thread_scan`, `thread_search`, `thread_sort`, `thread_simd`, `thread_operators` | missing as public CUB layer |
-| Warp | `warp_load`, `warp_store`, `warp_exchange`, `warp_reduce`, `warp_reduce_batched`, `warp_scan`, `warp_bitonic_sort`, `warp_merge_sort`, `warp_utils` | catalogued; safe generated implementations missing/backend-blocked |
+| Warp | `warp_load`, `warp_store`, `warp_exchange`, `warp_reduce`, `warp_reduce_batched`, `warp_scan`, `warp_bitonic_sort`, `warp_merge_sort`, `warp_utils` | catalogued; `warp_reduce` has a safe power-of-two scalar/fixed-array slice with pinned GPU evidence; non-power-of-two, record, segmented, and batched forms remain missing/backend-blocked |
 | Block data movement | `block_load`, `block_load_to_shared`, `block_store`, `block_exchange`, `block_shuffle` | missing |
 | Block scan/reduce | `block_reduce`, `block_scan`, `block_adjacent_difference`, `block_discontinuity` | missing |
 | Block ordering | `block_merge_sort`, `block_radix_rank`, `block_radix_sort`, `radix_rank_sort_operations` | missing |
@@ -426,10 +426,10 @@ host dispatch.
 
 | Phase | Deliverable | Unlocks | Exit evidence |
 |---|---|---|---|
-| 0 | Machine-readable coverage ledger, exact pinned example/API-test inventory, typed private catalogs, shallow call parsers, and generated-algorithm safety audit | honest progress, drift checks, and one compile-time owner for every later primitive | every inventory item has an owner/status; all 19 programs, 378 embedded regions, 49 API tests, and 105 exercised CUB methods are pinned; runtime crates contain no closed compiler metadata; generated code rejects `Arc`, raw pointers, and unsafe; no JIT route exists |
-| 1 | Read/write/random-access range traits, callable bounds, product/key-value types, double buffer, offset selection, temp-storage layout; rely on native cuda-oxide slices | all general algorithms and CUB public forms | compile-fail alias/lifetime tests, host/device ABI tests, zero-copy PTX checks |
+| 0 | Machine-readable coverage ledger, exact pinned example/API-test inventory, typed private catalogs, shallow call parsers, and generated-algorithm safety audit | honest progress, drift checks, and one compile-time owner for every later primitive | every inventory item has an owner/status; all 19 programs, 378 embedded regions, 49 API tests, and 105 exercised CUB methods are pinned; runtime crates contain no closed compiler metadata; generated code rejects `Arc`, raw pointers, and unsafe; no RCCL-owned compiler or loader route exists |
+| 1 | Read/write/random-access range traits, callable bounds, product/key-value types, double buffer, offset selection, temp-storage layout; rely on native cuda-oxide slices | all general algorithms and CUB public forms | compile-fail alias/lifetime tests, host/device ABI tests, and zero-copy ownership checks |
 | 2 | Thrust adaptors: counting, constant, discard, offset, reverse, strided, transform, transform-output, transform-in/out, zip, permutation, shuffle, tabulate-output, retag/capability conversion | fancy-iterator parity for later algorithms | adaptor composition matrix on device, including read/write zip and non-contiguous outputs |
-| 3 | CUB thread then warp then block load/store/exchange/reduce/scan/search/sort/radix/histogram building blocks | reusable implementation base for device-wide algorithms | upstream example/test matrices, exact temp-storage sizes/alignment, PTX synchronization checks |
+| 3 | CUB thread then warp then block load/store/exchange/reduce/scan/search/sort/radix/histogram building blocks | reusable implementation base for device-wide algorithms | upstream example/test matrices, exact temp-storage sizes/alignment, and GPU synchronization stress tests |
 | 4 | CUB agents, grid partitioning/lookback, public temp-storage query/resource forms, 32/64-bit offset selection | complete device-wide API contracts | query/execute parity, insufficient-storage errors, large-count boundary tests |
 | 5 | DeviceFor/Transform/Copy/Memcpy/Find and Thrust traversal, copy, generation, gather/scatter, replace, reverse | broad linear algorithm surface | contiguous and fancy-range differential matrices |
 | 6 | DeviceReduce/Scan/Select/Partition/Histogram/RLE/adjacent difference and corresponding Thrust reductions, scans, logical/query, compaction | analytics and fundamental data-parallel substrate | operation/type/operator/offset/segment matrices plus SM performance gates |
@@ -523,8 +523,8 @@ A row becomes `implemented` only when all of the following hold:
 4. no host scratch or host data path is introduced;
 5. host tests, compile-fail tests, cuda-oxide builds, and runtime tests pass;
 6. randomized differential tests run against the exact pinned CCCL checkout;
-7. PTX/SASS checks cover launch bounds, synchronization, spills/local memory,
-   and specialization count where relevant;
+7. generated Rust audits and GPU runtime tests cover launch bounds,
+   synchronization, ownership, and specialization selection where relevant;
 8. performance compares identical allocation, synchronization, type,
    distribution, size, and stream boundaries;
 9. the aggregate `scripts/test-gpu.sh` gate includes the new consumer, example,
