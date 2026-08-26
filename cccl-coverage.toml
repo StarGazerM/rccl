@@ -1,0 +1,415 @@
+schema = 1
+baseline = "571f2fc3bc53cd710e306ad43d58995c1fe4219f"
+status_values = ["missing", "partial", "implemented", "native-rust", "backend-blocked"]
+
+[[surface]]
+id = "rust-support-values"
+kind = "semantic-support"
+owner = "rust/cuda-oxide"
+status = "native-rust"
+entries = ["libcudacxx.array", "libcudacxx.option", "libcudacxx.expected", "thrust.pair", "thrust.tuple"]
+evidence = ["CCCL_THRUST_CUB_COVERAGE_PLAN.md", "cuda-core DeviceCopy tuple/array implementations"]
+
+[[surface]]
+id = "device-span"
+kind = "semantic-support"
+owner = "rccl-memory"
+status = "partial"
+entries = ["libcudacxx.span", "thrust.contiguous-subrange"]
+evidence = ["rccl-memory/src/lib.rs:DeviceSpan", "rccl-memory/src/lib.rs:DeviceSpanMut", "examples/span-sort.rs"]
+review = "reviews/device-span.md"
+
+[[surface]]
+id = "device-vector"
+kind = "semantic-support"
+owner = "rccl-memory"
+status = "partial"
+entries = ["thrust.device_vector", "thrust.universal_vector", "thrust.universal_host_pinned_vector"]
+evidence = ["rccl-memory/src/lib.rs:DeviceBuffer", "rccl-memory/tests/gpu_contract.rs"]
+
+[[surface]]
+id = "fancy-range-algebra"
+kind = "semantic-support"
+owner = "rccl-cub/rccl-thrust"
+status = "missing"
+entries = ["device.input", "device.output", "device.zip", "device.transform", "device.permutation"]
+evidence = ["CCCL_THRUST_CUB_COVERAGE_PLAN.md"]
+
+[[surface]]
+id = "thrust-algorithms-missing"
+kind = "thrust-public-header"
+owner = "rccl-thrust"
+status = "missing"
+entries = [
+  "thrust/thrust/adjacent_difference.h",
+  "thrust/thrust/binary_search.h",
+  "thrust/thrust/copy.h",
+  "thrust/thrust/count.h",
+  "thrust/thrust/equal.h",
+  "thrust/thrust/extrema.h",
+  "thrust/thrust/fill.h",
+  "thrust/thrust/find.h",
+  "thrust/thrust/for_each.h",
+  "thrust/thrust/gather.h",
+  "thrust/thrust/generate.h",
+  "thrust/thrust/inner_product.h",
+  "thrust/thrust/logical.h",
+  "thrust/thrust/mismatch.h",
+  "thrust/thrust/partition.h",
+  "thrust/thrust/reduce.h",
+  "thrust/thrust/remove.h",
+  "thrust/thrust/replace.h",
+  "thrust/thrust/reverse.h",
+  "thrust/thrust/scan.h",
+  "thrust/thrust/scatter.h",
+  "thrust/thrust/sequence.h",
+  "thrust/thrust/set_operations.h",
+  "thrust/thrust/shuffle.h",
+  "thrust/thrust/swap.h",
+  "thrust/thrust/tabulate.h",
+  "thrust/thrust/transform.h",
+  "thrust/thrust/transform_reduce.h",
+  "thrust/thrust/transform_scan.h",
+  "thrust/thrust/uninitialized_copy.h",
+  "thrust/thrust/uninitialized_fill.h",
+  "thrust/thrust/unique.h",
+]
+evidence = ["CCCL_THRUST_CUB_COVERAGE_PLAN.md"]
+
+[[surface]]
+id = "thrust-sort"
+kind = "thrust-public-header"
+owner = "rccl-thrust"
+status = "partial"
+entries = ["thrust/thrust/sort.h"]
+evidence = ["rccl-thrust/src/algorithm.rs", "STRICT_CCCL_API_AUDIT.md"]
+
+[[surface]]
+id = "thrust-merge"
+kind = "thrust-public-header"
+owner = "rccl-thrust"
+status = "partial"
+entries = ["thrust/thrust/merge.h"]
+evidence = ["rccl-thrust/src/merge.rs", "CCCL_MERGE_COMPATIBILITY.md", "STRICT_CCCL_API_AUDIT.md"]
+
+[[surface]]
+id = "thrust-support-native"
+kind = "thrust-public-header"
+owner = "rust/rccl"
+status = "native-rust"
+entries = [
+  "thrust/thrust/addressof.h",
+  "thrust/thrust/advance.h",
+  "thrust/thrust/distance.h",
+  "thrust/thrust/host_vector.h",
+  "thrust/thrust/pair.h",
+  "thrust/thrust/system_error.h",
+  "thrust/thrust/tuple.h",
+  "thrust/thrust/version.h",
+]
+evidence = ["CCCL_THRUST_CUB_COVERAGE_PLAN.md"]
+
+[[surface]]
+id = "thrust-support-memory"
+kind = "thrust-public-header"
+owner = "rccl-memory/rccl-thrust"
+status = "partial"
+entries = [
+  "thrust/thrust/allocate_unique.h",
+  "thrust/thrust/device_allocator.h",
+  "thrust/thrust/device_delete.h",
+  "thrust/thrust/device_free.h",
+  "thrust/thrust/device_make_unique.h",
+  "thrust/thrust/device_malloc.h",
+  "thrust/thrust/device_malloc_allocator.h",
+  "thrust/thrust/device_new.h",
+  "thrust/thrust/device_new_allocator.h",
+  "thrust/thrust/device_ptr.h",
+  "thrust/thrust/device_reference.h",
+  "thrust/thrust/device_vector.h",
+  "thrust/thrust/memory.h",
+  "thrust/thrust/per_device_resource.h",
+  "thrust/thrust/universal_allocator.h",
+  "thrust/thrust/universal_ptr.h",
+  "thrust/thrust/universal_vector.h",
+]
+evidence = ["rccl-memory/src/lib.rs", "rccl-memory/RMM_PARITY.md", "STRICT_CCCL_API_AUDIT.md"]
+
+[[surface]]
+id = "thrust-support-callables"
+kind = "thrust-public-header"
+owner = "rccl-cub/rccl-thrust"
+status = "partial"
+entries = ["thrust/thrust/execution_policy.h", "thrust/thrust/functional.h"]
+evidence = ["rccl-thrust/src/cuda.rs", "rccl-cub/src/device.rs"]
+
+[[surface]]
+id = "thrust-support-missing-values"
+kind = "thrust-public-header"
+owner = "rccl-thrust"
+status = "missing"
+entries = ["thrust/thrust/complex.h", "thrust/thrust/random.h", "thrust/thrust/zip_function.h"]
+evidence = ["CCCL_THRUST_CUB_COVERAGE_PLAN.md"]
+
+[[surface]]
+id = "thrust-iterators"
+kind = "thrust-public-header"
+owner = "rccl-thrust"
+status = "missing"
+entries = [
+  "thrust/thrust/iterator/constant_iterator.h",
+  "thrust/thrust/iterator/counting_iterator.h",
+  "thrust/thrust/iterator/discard_iterator.h",
+  "thrust/thrust/iterator/iterator_adaptor.h",
+  "thrust/thrust/iterator/iterator_categories.h",
+  "thrust/thrust/iterator/iterator_facade.h",
+  "thrust/thrust/iterator/iterator_traits.h",
+  "thrust/thrust/iterator/iterator_traversal_tags.h",
+  "thrust/thrust/iterator/offset_iterator.h",
+  "thrust/thrust/iterator/permutation_iterator.h",
+  "thrust/thrust/iterator/retag.h",
+  "thrust/thrust/iterator/reverse_iterator.h",
+  "thrust/thrust/iterator/shuffle_iterator.h",
+  "thrust/thrust/iterator/strided_iterator.h",
+  "thrust/thrust/iterator/tabulate_output_iterator.h",
+  "thrust/thrust/iterator/transform_input_output_iterator.h",
+  "thrust/thrust/iterator/transform_iterator.h",
+  "thrust/thrust/iterator/transform_output_iterator.h",
+  "thrust/thrust/iterator/zip_iterator.h",
+]
+evidence = ["CCCL_THRUST_CUB_COVERAGE_PLAN.md"]
+
+[[surface]]
+id = "thrust-memory-resources"
+kind = "thrust-public-header"
+owner = "rccl-memory"
+status = "partial"
+entries = [
+  "thrust/thrust/mr/allocator.h",
+  "thrust/thrust/mr/device_memory_resource.h",
+  "thrust/thrust/mr/disjoint_pool.h",
+  "thrust/thrust/mr/disjoint_sync_pool.h",
+  "thrust/thrust/mr/disjoint_tls_pool.h",
+  "thrust/thrust/mr/fancy_pointer_resource.h",
+  "thrust/thrust/mr/host_memory_resource.h",
+  "thrust/thrust/mr/memory_resource.h",
+  "thrust/thrust/mr/new.h",
+  "thrust/thrust/mr/polymorphic_adaptor.h",
+  "thrust/thrust/mr/pool.h",
+  "thrust/thrust/mr/pool_options.h",
+  "thrust/thrust/mr/sync_pool.h",
+  "thrust/thrust/mr/tls_pool.h",
+  "thrust/thrust/mr/universal_memory_resource.h",
+  "thrust/thrust/mr/validator.h",
+]
+evidence = ["rccl-memory/src", "rccl-memory/RMM_PARITY.md"]
+
+[[surface]]
+id = "thrust-type-traits"
+kind = "thrust-public-header"
+owner = "rust/rccl"
+status = "native-rust"
+entries = [
+  "thrust/thrust/type_traits/integer_sequence.h",
+  "thrust/thrust/type_traits/is_contiguous_iterator.h",
+  "thrust/thrust/type_traits/is_execution_policy.h",
+  "thrust/thrust/type_traits/is_trivially_relocatable.h",
+  "thrust/thrust/type_traits/logical_metafunctions.h",
+  "thrust/thrust/type_traits/unwrap_contiguous_iterator.h",
+]
+evidence = ["CCCL_THRUST_CUB_COVERAGE_PLAN.md"]
+
+[[surface]]
+id = "thrust-random"
+kind = "thrust-public-header"
+owner = "rccl-thrust"
+status = "missing"
+entries = [
+  "thrust/thrust/random/discard_block_engine.h",
+  "thrust/thrust/random/linear_congruential_engine.h",
+  "thrust/thrust/random/linear_feedback_shift_engine.h",
+  "thrust/thrust/random/normal_distribution.h",
+  "thrust/thrust/random/subtract_with_carry_engine.h",
+  "thrust/thrust/random/uniform_int_distribution.h",
+  "thrust/thrust/random/uniform_real_distribution.h",
+  "thrust/thrust/random/xor_combine_engine.h",
+]
+evidence = ["CCCL_THRUST_CUB_COVERAGE_PLAN.md"]
+
+[[surface]]
+id = "cub-warp-merge-sort"
+kind = "cub-public-header"
+owner = "rccl-cub"
+status = "implemented"
+entries = ["cub/cub/warp/warp_merge_sort.cuh"]
+evidence = ["rccl-cub/src/warp_merge_sort.rs", "CCCL_WARP_MERGE_SORT_COMPATIBILITY.md"]
+
+[[surface]]
+id = "cub-device-sort-merge"
+kind = "cub-public-header"
+owner = "rccl-cub"
+status = "partial"
+entries = [
+  "cub/cub/device/device_merge.cuh",
+  "cub/cub/device/device_merge_sort.cuh",
+  "cub/cub/device/device_radix_sort.cuh",
+]
+evidence = ["rccl-cub/src/merge.rs", "rccl-cub/src/comparison.rs", "rccl-cub/src/radix.rs"]
+
+[[surface]]
+id = "cub-public-missing"
+kind = "cub-public-header"
+owner = "rccl-cub"
+status = "missing"
+entries = [
+  "cub/cub/block/block_adjacent_difference.cuh",
+  "cub/cub/block/block_discontinuity.cuh",
+  "cub/cub/block/block_exchange.cuh",
+  "cub/cub/block/block_histogram.cuh",
+  "cub/cub/block/block_load.cuh",
+  "cub/cub/block/block_load_to_shared.cuh",
+  "cub/cub/block/block_merge_sort.cuh",
+  "cub/cub/block/block_radix_rank.cuh",
+  "cub/cub/block/block_radix_sort.cuh",
+  "cub/cub/block/block_raking_layout.cuh",
+  "cub/cub/block/block_reduce.cuh",
+  "cub/cub/block/block_run_length_decode.cuh",
+  "cub/cub/block/block_scan.cuh",
+  "cub/cub/block/block_shuffle.cuh",
+  "cub/cub/block/block_store.cuh",
+  "cub/cub/block/block_topk.cuh",
+  "cub/cub/block/radix_rank_sort_operations.cuh",
+  "cub/cub/device/device_adjacent_difference.cuh",
+  "cub/cub/device/device_batched_topk.cuh",
+  "cub/cub/device/device_copy.cuh",
+  "cub/cub/device/device_find.cuh",
+  "cub/cub/device/device_for.cuh",
+  "cub/cub/device/device_histogram.cuh",
+  "cub/cub/device/device_memcpy.cuh",
+  "cub/cub/device/device_partition.cuh",
+  "cub/cub/device/device_reduce.cuh",
+  "cub/cub/device/device_run_length_encode.cuh",
+  "cub/cub/device/device_scan.cuh",
+  "cub/cub/device/device_segmented_radix_sort.cuh",
+  "cub/cub/device/device_segmented_reduce.cuh",
+  "cub/cub/device/device_segmented_scan.cuh",
+  "cub/cub/device/device_segmented_sort.cuh",
+  "cub/cub/device/device_select.cuh",
+  "cub/cub/device/device_topk.cuh",
+  "cub/cub/device/device_transform.cuh",
+  "cub/cub/iterator/arg_index_input_iterator.cuh",
+  "cub/cub/iterator/cache_modified_input_iterator.cuh",
+  "cub/cub/iterator/cache_modified_output_iterator.cuh",
+  "cub/cub/iterator/tex_obj_input_iterator.cuh",
+  "cub/cub/thread/thread_load.cuh",
+  "cub/cub/thread/thread_operators.cuh",
+  "cub/cub/thread/thread_reduce.cuh",
+  "cub/cub/thread/thread_scan.cuh",
+  "cub/cub/thread/thread_search.cuh",
+  "cub/cub/thread/thread_simd.cuh",
+  "cub/cub/thread/thread_sort.cuh",
+  "cub/cub/thread/thread_store.cuh",
+  "cub/cub/warp/warp_bitonic_sort.cuh",
+  "cub/cub/warp/warp_exchange.cuh",
+  "cub/cub/warp/warp_load.cuh",
+  "cub/cub/warp/warp_reduce.cuh",
+  "cub/cub/warp/warp_reduce_batched.cuh",
+  "cub/cub/warp/warp_scan.cuh",
+  "cub/cub/warp/warp_store.cuh",
+  "cub/cub/warp/warp_utils.cuh",
+]
+evidence = ["CCCL_THRUST_CUB_COVERAGE_PLAN.md"]
+
+[[surface]]
+id = "cub-agents-partial"
+kind = "cub-internal-header"
+owner = "rccl-cub"
+status = "partial"
+entries = [
+  "cub/cub/agent/agent_merge.cuh",
+  "cub/cub/agent/agent_merge_sort.cuh",
+  "cub/cub/agent/agent_radix_sort_histogram.cuh",
+  "cub/cub/agent/agent_radix_sort_onesweep.cuh",
+  "cub/cub/agent/agent_radix_sort_upsweep.cuh",
+  "cub/cub/agent/agent_radix_sort_downsweep.cuh",
+  "cub/cub/agent/agent_sub_warp_merge_sort.cuh",
+]
+evidence = ["rccl-cub/src/merge.rs", "rccl-cub/src/comparison.rs", "rccl-cub/src/radix.rs", "rccl-cub/src/warp_merge_sort.rs"]
+
+[[surface]]
+id = "cub-agents-missing"
+kind = "cub-internal-header"
+owner = "rccl-cub"
+status = "missing"
+entries = [
+  "cub/cub/agent/agent_adjacent_difference.cuh",
+  "cub/cub/agent/agent_batch_memcpy.cuh",
+  "cub/cub/agent/agent_batched_topk.cuh",
+  "cub/cub/agent/agent_batched_topk_cluster.cuh",
+  "cub/cub/agent/agent_find.cuh",
+  "cub/cub/agent/agent_find_bound_sorted_values.cuh",
+  "cub/cub/agent/agent_for.cuh",
+  "cub/cub/agent/agent_histogram.cuh",
+  "cub/cub/agent/agent_reduce.cuh",
+  "cub/cub/agent/agent_reduce_by_key.cuh",
+  "cub/cub/agent/agent_rle.cuh",
+  "cub/cub/agent/agent_scan.cuh",
+  "cub/cub/agent/agent_scan_by_key.cuh",
+  "cub/cub/agent/agent_segmented_radix_sort.cuh",
+  "cub/cub/agent/agent_select_if.cuh",
+  "cub/cub/agent/agent_three_way_partition.cuh",
+  "cub/cub/agent/agent_topk.cuh",
+  "cub/cub/agent/agent_unique_by_key.cuh",
+  "cub/cub/agent/single_pass_scan_operators.cuh",
+]
+evidence = ["CCCL_THRUST_CUB_COVERAGE_PLAN.md"]
+
+[[surface]]
+id = "cub-grid-detail-utilities"
+kind = "cub-internal-header"
+owner = "rccl-cub/cuda-oxide"
+status = "partial"
+entries = [
+  "cub/cub/grid/grid_even_share.cuh",
+  "cub/cub/grid/grid_mapping.cuh",
+  "cub/cub/grid/grid_queue.cuh",
+  "cub/cub/detail/array_utils.cuh",
+  "cub/cub/detail/binary_search_helpers.cuh",
+  "cub/cub/detail/cc_dispatch.cuh",
+  "cub/cub/detail/choose_offset.cuh",
+  "cub/cub/detail/deferred_parameter.cuh",
+  "cub/cub/detail/delay_constructor.cuh",
+  "cub/cub/detail/detect_cuda_runtime.cuh",
+  "cub/cub/detail/device_double_buffer.cuh",
+  "cub/cub/detail/device_memory_resource.cuh",
+  "cub/cub/detail/env_dispatch.cuh",
+  "cub/cub/detail/fast_modulo_division.cuh",
+  "cub/cub/detail/mdspan_utils.cuh",
+  "cub/cub/detail/prefetch.cuh",
+  "cub/cub/detail/rfa.cuh",
+  "cub/cub/detail/segmented_params.cuh",
+  "cub/cub/detail/segmented_scan_helpers.cuh",
+  "cub/cub/detail/strong_load.cuh",
+  "cub/cub/detail/strong_store.cuh",
+  "cub/cub/detail/temporary_storage.cuh",
+  "cub/cub/detail/type_traits.cuh",
+  "cub/cub/detail/uninitialized_copy.cuh",
+  "cub/cub/detail/unsafe_bitcast.cuh",
+  "cub/cub/config.cuh",
+  "cub/cub/cub.cuh",
+  "cub/cub/util_allocator.cuh",
+  "cub/cub/util_arch.cuh",
+  "cub/cub/util_cpp_dialect.cuh",
+  "cub/cub/util_debug.cuh",
+  "cub/cub/util_device.cuh",
+  "cub/cub/util_macro.cuh",
+  "cub/cub/util_math.cuh",
+  "cub/cub/util_namespace.cuh",
+  "cub/cub/util_policy_wrapper_t.cuh",
+  "cub/cub/util_ptx.cuh",
+  "cub/cub/util_temporary_storage.cuh",
+  "cub/cub/util_type.cuh",
+  "cub/cub/util_vsmem.cuh",
+  "cub/cub/version.cuh",
+]
+evidence = ["rccl-cub/src", "rccl-memory/src", "cuda-oxide"]

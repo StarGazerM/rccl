@@ -163,6 +163,7 @@ sort_consumers=(
   examples/resource_sort.rs
   examples/sort-by-key.rs
   examples/sort.rs
+  examples/span-sort.rs
   examples/sorting-aos-vs-soa.rs
 )
 for consumer in "${sort_consumers[@]}"; do

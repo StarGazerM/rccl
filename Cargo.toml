@@ -31,6 +31,12 @@ required-features = ["gpu-examples"]
 test = false
 
 [[bin]]
+name = "rccl-example-span-sort"
+path = "examples/span-sort.rs"
+required-features = ["gpu-examples"]
+test = false
+
+[[bin]]
 name = "rccl-example-resource-sort"
 path = "examples/resource_sort.rs"
 required-features = ["gpu-examples"]

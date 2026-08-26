@@ -45,6 +45,15 @@ stores its last-use stream, frees in stream order on `Drop`, and implements
 `DeviceSlice<T>` / `DeviceSliceMut<T>` for algorithm interoperation. The same
 traits are implemented for `cuda_core::DeviceBuffer<T>`.
 
+`DeviceSlice::subspan` and `DeviceSliceMut::subspan_mut` create checked
+`DeviceSpan` and `DeviceSpanMut` borrows. They offset the CUDA address only
+after validating element bounds and address arithmetic, retain the source's
+context and stream-order checks, and never turn device memory into a
+host-dereferenceable Rust slice. Mutable spans are not cloneable; consuming
+`split_at` is the safe way to obtain two simultaneous disjoint mutable spans.
+Because spans implement the same range traits, RCCL algorithms accept them
+without a separate iterator API.
+
 `DeviceUVector<T, A>` names the uninitialized typed-vector contract and
 `DeviceScalar<T, A>` supplies one-value set/get ownership. The optional
 process-wide compatibility registry lives under `rccl_memory::registry`. Its
@@ -73,12 +82,18 @@ let mut keys = DeviceBuffer::<u32, _>::zeroed_in(
 )?;
 
 rccl::sort(&exec, &mut keys)?;
+
+let middle_len = keys.len() - 256;
+let mut middle = keys.subspan_mut(128, middle_len)?;
+rccl::sort(&exec, &mut middle)?;
 ```
 
 The compilable end-to-end form is
 [`examples/resource_sort.rs`](../examples/resource_sort.rs). The standalone
 private-pool/statistics smoke test is
 [`examples/private_pool.rs`](examples/private_pool.rs).
+The GPU-resident subspan example is
+[`examples/span-sort.rs`](../examples/span-sort.rs).
 
 ## Stream ownership
 

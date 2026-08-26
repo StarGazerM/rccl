@@ -70,8 +70,12 @@ with an explicit comparator. Descending order uses the same operation with
 
 Range parameters implement `rccl::memory::DeviceSlice<T>` or
 `DeviceSliceMut<T>`. Both `cuda_core::DeviceBuffer<T>` and allocator-aware
-`rccl::memory::DeviceBuffer<T, A>` implement those traits. General Thrust-style
-fancy/proxy iterators are not implemented yet.
+`rccl::memory::DeviceBuffer<T, A>` implement those traits. Their `subspan` and
+`subspan_mut` methods create checked, lifetime-bearing device subranges without
+CPU staging; existing sort and merge functions accept those spans directly.
+[`examples/span-sort.rs`](examples/span-sort.rs) sorts only the middle of one
+allocation and validates both its exact output and untouched guards on the
+GPU. General Thrust-style fancy/proxy iterators are not implemented yet.
 
 A custom comparator is a `Copy` Rust value whose concrete type and state are
 monomorphized into the GPU kernels:

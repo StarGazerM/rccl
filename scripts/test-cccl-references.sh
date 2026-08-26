@@ -36,6 +36,8 @@ if [[ "$actual_commit" != "$cccl_commit" ]]; then
   exit 1
 fi
 
+scripts/check-cccl-coverage.sh "$cccl_root"
+
 reference_build_dir="$(mktemp -d "${TMPDIR:-/tmp}/rccl-cccl-reference.XXXXXX")"
 cleanup_reference_build() {
   rm -rf -- "$reference_build_dir"

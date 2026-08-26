@@ -120,6 +120,11 @@ pub enum MemoryError {
     InvalidAlignment {
         requested: usize,
     },
+    DeviceRangeOutOfBounds {
+        offset: usize,
+        len: usize,
+        source_len: usize,
+    },
     SystemMemoryUnsupported {
         device: usize,
     },
@@ -178,6 +183,15 @@ impl fmt::Display for MemoryError {
             Self::InvalidAlignment { requested } => write!(
                 f,
                 "allocation alignment {requested} must be a non-zero power of two"
+            ),
+            Self::DeviceRangeOutOfBounds {
+                offset,
+                len,
+                source_len,
+            } => write!(
+                f,
+                "device subrange [{offset}..{end}) is outside a {source_len}-element range",
+                end = offset.saturating_add(*len),
             ),
             Self::SystemMemoryUnsupported { device } => write!(
                 f,
@@ -1202,6 +1216,22 @@ pub unsafe trait DeviceSlice<T> {
     fn cu_deviceptr(&self) -> sys::CUdeviceptr;
     fn context(&self) -> &Arc<CudaContext>;
 
+    /// Borrow the complete device range as a lifetime-bearing span.
+    fn span(&self) -> DeviceSpan<'_, T>
+    where
+        Self: Sized,
+    {
+        DeviceSpan::new(self)
+    }
+
+    /// Borrow one checked device subrange.
+    fn subspan(&self, offset: usize, len: usize) -> Result<DeviceSpan<'_, T>, MemoryError>
+    where
+        Self: Sized,
+    {
+        DeviceSpan::new(self).subspan(offset, len)
+    }
+
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -1222,7 +1252,238 @@ pub unsafe trait DeviceSlice<T> {
 ///
 /// Mutable access to the implementor must grant exclusive write access to all
 /// `len()` device elements for the submitted operation.
-pub unsafe trait DeviceSliceMut<T>: DeviceSlice<T> {}
+pub unsafe trait DeviceSliceMut<T>: DeviceSlice<T> {
+    /// Exclusively borrow the complete device range as a mutable span.
+    fn span_mut(&mut self) -> DeviceSpanMut<'_, T>
+    where
+        Self: Sized,
+    {
+        DeviceSpanMut::new(self)
+    }
+
+    /// Exclusively borrow one checked device subrange.
+    fn subspan_mut(
+        &mut self,
+        offset: usize,
+        len: usize,
+    ) -> Result<DeviceSpanMut<'_, T>, MemoryError>
+    where
+        Self: Sized,
+    {
+        DeviceSpanMut::new(self).into_subspan(offset, len)
+    }
+}
+
+fn checked_device_subrange<T>(
+    pointer: sys::CUdeviceptr,
+    source_len: usize,
+    offset: usize,
+    len: usize,
+) -> Result<sys::CUdeviceptr, MemoryError> {
+    let end = offset.checked_add(len).ok_or(MemoryError::SizeOverflow)?;
+    if end > source_len {
+        return Err(MemoryError::DeviceRangeOutOfBounds {
+            offset,
+            len,
+            source_len,
+        });
+    }
+    let byte_offset = offset
+        .checked_mul(std::mem::size_of::<T>())
+        .ok_or(MemoryError::SizeOverflow)?;
+    let byte_offset =
+        sys::CUdeviceptr::try_from(byte_offset).map_err(|_| MemoryError::SizeOverflow)?;
+    pointer
+        .checked_add(byte_offset)
+        .ok_or(MemoryError::SizeOverflow)
+}
+
+/// A checked, read-only borrow of a contiguous device range.
+///
+/// Unlike a host `&[T]`, this value is not dereferenceable by the CPU. It
+/// carries the source allocation borrow and delegates context/stream-order
+/// validation to that source. CUB dispatch lowers it to CUDA pointer/length
+/// arguments; cuda-oxide kernels may then receive an ordinary device slice.
+#[derive(Clone, Copy)]
+pub struct DeviceSpan<'a, T> {
+    source: &'a dyn DeviceSlice<T>,
+    pointer: sys::CUdeviceptr,
+    len: usize,
+    _borrow: PhantomData<&'a T>,
+}
+
+impl<T> fmt::Debug for DeviceSpan<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DeviceSpan")
+            .field("ptr", &self.pointer)
+            .field("len", &self.len)
+            .finish()
+    }
+}
+
+impl<'a, T> DeviceSpan<'a, T> {
+    pub fn new<B: DeviceSlice<T>>(source: &'a B) -> Self {
+        Self {
+            pointer: source.cu_deviceptr(),
+            len: source.len(),
+            source,
+            _borrow: PhantomData,
+        }
+    }
+
+    fn from_parts(source: &'a dyn DeviceSlice<T>, pointer: sys::CUdeviceptr, len: usize) -> Self {
+        Self {
+            source,
+            pointer,
+            len,
+            _borrow: PhantomData,
+        }
+    }
+
+    pub fn subspan(self, offset: usize, len: usize) -> Result<Self, MemoryError> {
+        let pointer = checked_device_subrange::<T>(self.pointer, self.len, offset, len)?;
+        Ok(Self::from_parts(self.source, pointer, len))
+    }
+
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub const fn cu_deviceptr(&self) -> sys::CUdeviceptr {
+        self.pointer
+    }
+}
+
+// SAFETY: construction borrows a DeviceSlice source and only admits checked
+// subranges within it. The source remains live and supplies context/ordering.
+unsafe impl<T> DeviceSlice<T> for DeviceSpan<'_, T> {
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn cu_deviceptr(&self) -> sys::CUdeviceptr {
+        self.pointer
+    }
+
+    fn context(&self) -> &Arc<CudaContext> {
+        self.source.context()
+    }
+
+    fn ensure_usable_on(&self, stream: &CudaStream) -> Result<(), MemoryError> {
+        self.source.ensure_usable_on(stream)
+    }
+}
+
+/// A checked, exclusive borrow of a contiguous device range.
+///
+/// This value is intentionally neither `Copy` nor `Clone`. Consuming
+/// [`split_at`](Self::split_at) is the safe way to produce two simultaneous
+/// mutable spans.
+///
+/// ```compile_fail
+/// use rccl_memory::DeviceSliceMut;
+///
+/// fn overlapping<T, B: DeviceSliceMut<T>>(buffer: &mut B) {
+///     let first = buffer.span_mut();
+///     let second = buffer.span_mut();
+///     drop((first, second));
+/// }
+/// ```
+pub struct DeviceSpanMut<'a, T> {
+    source: &'a dyn DeviceSlice<T>,
+    pointer: sys::CUdeviceptr,
+    len: usize,
+    _borrow: PhantomData<&'a mut T>,
+}
+
+impl<T> fmt::Debug for DeviceSpanMut<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DeviceSpanMut")
+            .field("ptr", &self.pointer)
+            .field("len", &self.len)
+            .finish()
+    }
+}
+
+impl<'a, T> DeviceSpanMut<'a, T> {
+    pub fn new<B: DeviceSliceMut<T>>(source: &'a mut B) -> Self {
+        let pointer = source.cu_deviceptr();
+        let len = source.len();
+        let source: &'a dyn DeviceSlice<T> = source;
+        Self::from_parts(source, pointer, len)
+    }
+
+    fn from_parts(source: &'a dyn DeviceSlice<T>, pointer: sys::CUdeviceptr, len: usize) -> Self {
+        Self {
+            source,
+            pointer,
+            len,
+            _borrow: PhantomData,
+        }
+    }
+
+    pub fn into_subspan(self, offset: usize, len: usize) -> Result<Self, MemoryError> {
+        let pointer = checked_device_subrange::<T>(self.pointer, self.len, offset, len)?;
+        Ok(Self::from_parts(self.source, pointer, len))
+    }
+
+    pub fn split_at(self, mid: usize) -> Result<(Self, Self), MemoryError> {
+        let right_pointer = checked_device_subrange::<T>(self.pointer, self.len, mid, 0)?;
+        let right_len = self.len - mid;
+        Ok((
+            Self::from_parts(self.source, self.pointer, mid),
+            Self::from_parts(self.source, right_pointer, right_len),
+        ))
+    }
+
+    pub fn as_read_only(&self) -> DeviceSpan<'_, T> {
+        DeviceSpan::from_parts(self.source, self.pointer, self.len)
+    }
+
+    pub fn into_read_only(self) -> DeviceSpan<'a, T> {
+        DeviceSpan::from_parts(self.source, self.pointer, self.len)
+    }
+
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub const fn cu_deviceptr(&self) -> sys::CUdeviceptr {
+        self.pointer
+    }
+}
+
+// SAFETY: as DeviceSpan, with the additional exclusive source borrow retained
+// by DeviceSpanMut for its complete lifetime.
+unsafe impl<T> DeviceSlice<T> for DeviceSpanMut<'_, T> {
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn cu_deviceptr(&self) -> sys::CUdeviceptr {
+        self.pointer
+    }
+
+    fn context(&self) -> &Arc<CudaContext> {
+        self.source.context()
+    }
+
+    fn ensure_usable_on(&self, stream: &CudaStream) -> Result<(), MemoryError> {
+        self.source.ensure_usable_on(stream)
+    }
+}
+
+// SAFETY: safe constructors require an exclusive source borrow, and split_at
+// consumes that borrow while returning only disjoint subranges.
+unsafe impl<T> DeviceSliceMut<T> for DeviceSpanMut<'_, T> {}
 
 unsafe impl<T> DeviceSlice<T> for cuda_core::DeviceBuffer<T> {
     fn len(&self) -> usize {
@@ -1681,6 +1942,32 @@ unsafe impl<T: DeviceCopy, A: DeviceAllocator> DeviceSliceMut<T> for DeviceScala
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::mem::size_of;
+
+    struct FakeDeviceRange {
+        pointer: sys::CUdeviceptr,
+        len: usize,
+    }
+
+    // SAFETY: tests use only pointer/length arithmetic and never dereference
+    // the synthetic device address or ask for its CUDA context.
+    unsafe impl DeviceSlice<u32> for FakeDeviceRange {
+        fn len(&self) -> usize {
+            self.len
+        }
+
+        fn cu_deviceptr(&self) -> sys::CUdeviceptr {
+            self.pointer
+        }
+
+        fn context(&self) -> &Arc<CudaContext> {
+            panic!("synthetic span tests do not have a CUDA context")
+        }
+    }
+
+    // SAFETY: each test creates at most one exclusive borrow of the synthetic
+    // range, then uses split_at to produce only non-overlapping spans.
+    unsafe impl DeviceSliceMut<u32> for FakeDeviceRange {}
 
     #[test]
     fn typed_layout_uses_element_size_and_alignment() {
@@ -1694,6 +1981,86 @@ mod tests {
         assert!(matches!(
             DeviceBuffer::<u64, CudaMemoryResource>::layout_for(usize::MAX),
             Err(MemoryError::SizeOverflow)
+        ));
+    }
+
+    #[test]
+    fn immutable_subspan_offsets_pointer_and_checks_nested_ranges() {
+        let source = FakeDeviceRange {
+            pointer: 0x1000,
+            len: 16,
+        };
+        let middle = source.subspan(3, 8).expect("valid subspan");
+        assert_eq!(middle.cu_deviceptr(), 0x1000 + 3 * size_of::<u32>() as u64);
+        assert_eq!(middle.len(), 8);
+
+        let nested = middle.subspan(2, 3).expect("valid nested subspan");
+        assert_eq!(nested.cu_deviceptr(), 0x1000 + 5 * size_of::<u32>() as u64);
+        assert_eq!(nested.len(), 3);
+    }
+
+    #[test]
+    fn subspan_rejects_bounds_and_address_overflow() {
+        let source = FakeDeviceRange {
+            pointer: 0x1000,
+            len: 8,
+        };
+        let empty_end = source.subspan(8, 0).expect("empty end subspan");
+        assert_eq!(
+            empty_end.cu_deviceptr(),
+            0x1000 + 8 * size_of::<u32>() as u64
+        );
+        assert!(empty_end.is_empty());
+        assert!(matches!(
+            source.subspan(7, 2),
+            Err(MemoryError::DeviceRangeOutOfBounds {
+                offset: 7,
+                len: 2,
+                source_len: 8,
+            })
+        ));
+        assert!(matches!(
+            source.subspan(usize::MAX, 2),
+            Err(MemoryError::SizeOverflow)
+        ));
+
+        let address_edge = FakeDeviceRange {
+            pointer: sys::CUdeviceptr::MAX - 1,
+            len: 2,
+        };
+        assert!(matches!(
+            address_edge.subspan(1, 1),
+            Err(MemoryError::SizeOverflow)
+        ));
+    }
+
+    #[test]
+    fn mutable_span_split_is_disjoint_and_preserves_element_offsets() {
+        let mut source = FakeDeviceRange {
+            pointer: 0x2000,
+            len: 9,
+        };
+        let span = source.span_mut();
+        let (left, right) = span.split_at(4).expect("valid split point");
+        assert_eq!(left.cu_deviceptr(), 0x2000);
+        assert_eq!(left.len(), 4);
+        assert_eq!(right.cu_deviceptr(), 0x2000 + 4 * size_of::<u32>() as u64);
+        assert_eq!(right.len(), 5);
+    }
+
+    #[test]
+    fn mutable_span_split_rejects_out_of_bounds_midpoint() {
+        let mut source = FakeDeviceRange {
+            pointer: 0x2000,
+            len: 9,
+        };
+        assert!(matches!(
+            source.span_mut().split_at(10),
+            Err(MemoryError::DeviceRangeOutOfBounds {
+                offset: 10,
+                len: 0,
+                source_len: 9,
+            })
         ));
     }
 

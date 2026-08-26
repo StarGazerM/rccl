@@ -183,6 +183,31 @@ mod kernels {
     }
 
     #[kernel]
+    pub unsafe fn validate_iota_u32(values: *const u32, count: u32, errors: *mut u32) {
+        let index = thread::index_1d().get() as u32;
+        if index < count && unsafe { values.add(index as usize).read() } != index {
+            unsafe { DeviceAtomicU32::from_ptr(errors) }.fetch_add(1, AtomicOrdering::Relaxed);
+        }
+    }
+
+    #[kernel]
+    pub unsafe fn validate_zero_outside_u32(
+        values: *const u32,
+        count: u32,
+        begin: u32,
+        end: u32,
+        errors: *mut u32,
+    ) {
+        let index = thread::index_1d().get() as u32;
+        if index < count
+            && (index < begin || index >= end)
+            && unsafe { values.add(index as usize).read() } != 0
+        {
+            unsafe { DeviceAtomicU32::from_ptr(errors) }.fetch_add(1, AtomicOrdering::Relaxed);
+        }
+    }
+
+    #[kernel]
     pub unsafe fn validate_stable_pairs<C, K>(
         comparator: C,
         keys: *const K,
@@ -376,6 +401,65 @@ impl GpuSupport {
                 comparator,
                 keys.cu_deviceptr() as *const K,
                 count,
+                errors.cu_deviceptr() as *mut u32,
+            )?;
+        }
+        Ok(errors.to_host_vec(stream)?[0])
+    }
+
+    pub fn validate_iota_u32<B: DeviceSlice<u32> + ?Sized>(
+        &self,
+        stream: &Arc<CudaStream>,
+        values: &B,
+    ) -> Result<u32, Box<dyn Error>> {
+        values.ensure_usable_on(stream)?;
+        let count = Self::count(values.len())?;
+        if count == 0 {
+            return Ok(0);
+        }
+        let errors = DeviceBuffer::<u32>::zeroed(stream, 1)?;
+        unsafe {
+            self.module.validate_iota_u32(
+                stream,
+                LaunchConfig::for_num_elems(count),
+                values.cu_deviceptr() as *const u32,
+                count,
+                errors.cu_deviceptr() as *mut u32,
+            )?;
+        }
+        Ok(errors.to_host_vec(stream)?[0])
+    }
+
+    pub fn validate_zero_outside_u32<B: DeviceSlice<u32> + ?Sized>(
+        &self,
+        stream: &Arc<CudaStream>,
+        values: &B,
+        begin: usize,
+        end: usize,
+    ) -> Result<u32, Box<dyn Error>> {
+        values.ensure_usable_on(stream)?;
+        if begin > end || end > values.len() {
+            return Err(format!(
+                "validation range [{begin}..{end}) is outside {} elements",
+                values.len()
+            )
+            .into());
+        }
+        let count = Self::count(values.len())?;
+        if count == 0 {
+            return Ok(0);
+        }
+        let begin = u32::try_from(begin)?;
+        let end = u32::try_from(end)?;
+        let errors = DeviceBuffer::<u32>::zeroed(stream, 1)?;
+        unsafe {
+            self.module.validate_zero_outside_u32(
+                stream,
+                LaunchConfig::for_num_elems(count),
+                values.cu_deviceptr() as *const u32,
+                count,
+                begin,
+                end,
                 errors.cu_deviceptr() as *mut u32,
             )?;
         }
