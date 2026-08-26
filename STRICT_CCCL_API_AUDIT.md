@@ -22,13 +22,13 @@ Status vocabulary:
 | ID | Status | Current contract |
 |---|---|---|
 | A01 | fixed | Safe Thrust sort and merge calls always attempt stream synchronization after a path that may have queued work, including when a later launch fails. Borrowed ranges are not accessed after return. |
-| A02 | backend | `Execution` borrows `&Arc<CudaStream>` because that is cuda-core's handle representation. Replacing the `Arc` belongs in cuda-oxide. |
+| A02 | fixed | `Execution<'stream>` borrows `&'stream CudaStream`; resource buffers and CUB workspaces carry the same explicit stream lifetime and do not retain or clone a shared stream pointer. |
 | A03 | fixed | `Execution` is defined only by `rccl-thrust`. It holds the borrowed stream, allocator, and an opaque CUB kernel-context handle; it contains no schedule or algorithm type. |
 | A04 | accepted | CUB owns a context-scoped typed module cache because cuda-oxide does not provide one. The global registry stores weak entries, so the final live CUB handle can release the module. |
 | A05 | fixed | Sort and merge bind once with `par(&stream)` or `par_in(&stream, allocator)`. There is no algorithm-specific execution wrapper. |
 | A06 | fixed | CUB dispatch receives its own context handle, stream, and allocator. It never accepts or imports the Thrust execution policy. |
 | A07 | fixed | Radix, comparison, and merge workspaces allocate through the allocator held by Thrust execution. |
-| A08 | replace | `DeviceComparator` can capture raw device pointers with only a prose lifetime obligation. A future typed device-reference wrapper should encode that state. |
+| A08 | fixed | Ordering customization is an ordinary `Copy + 'static` closure returning `Ordering`; there is no unsafe RCCL callable trait. Dereferencing captured raw pointers still requires an explicit unsafe block, while future range/proxy views should encode device-state lifetimes. |
 | A09 | fixed | Public sort and merge consume typed borrowed device ranges; erased pointer/boolean iterator mappings are gone. |
 | A10 | missing | A safe no-sync policy needs a completion object that retains every borrowed range. An unchecked safe asynchronous alias would be unsound. |
 
@@ -46,7 +46,7 @@ re-exports both public layers. There is no CUB-to-Thrust edge.
 | crate | owns | must not own |
 |---|---|---|
 | `rccl-memory` | stream-ordered resources, buffers, contiguous device-range ownership | CUB or Thrust dispatch |
-| `rccl-cub` | device scalar/comparator vocabulary, cooperative collectives, device-wide kernels and dispatch, target schedule, context module cache | Thrust execution or host facade |
+| `rccl-cub` | device scalar vocabulary, closure lowering, cooperative collectives, device-wide kernels and dispatch, target schedule, context module cache | Thrust execution or host facade |
 | `rccl-thrust` | `Execution`, `par`, `par_in`, safe synchronous host algorithms, compile-time backend specialization | CUB kernel bodies, a duplicate module cache, public schedule language |
 | `rccl` | thin re-exports for Thrust, memory, and CUB | kernels, dispatch engines, another execution type |
 
@@ -55,7 +55,7 @@ Target schedules are private CUB constants generated for one
 There is no runtime GPU probe, policy object, generated strategy type,
 breakpoint table, launch callback, or function-pointer dispatch table.
 
-Rust generics for element, comparator, allocator, and range types are ordinary
+Rust generics for element, ordering closure, allocator, and range types are ordinary
 parametric polymorphism. They are not a schedule/control-flow language.
 
 ## C. Thrust-facing API
@@ -63,8 +63,8 @@ parametric polymorphism. They are not a schedule/control-flow language.
 | ID | Status | Current contract or gap |
 |---|---|---|
 | C01 | fixed | Ordinary root functions provide `sort`, `sort_by`, stable variants, key/value variants, and the four merge operations. |
-| C02 | fixed | Descending convenience names are absent; callers pass `Greater`. |
-| C03 | accepted | Rust cannot overload by arity, so `_with` denotes the key/value comparator form. |
+| C02 | fixed | Descending convenience names and marker types are absent; callers pass `|left, right| right.cmp(left)`. |
+| C03 | accepted | Rust cannot overload by arity, so `_with` denotes the key/value ordering-closure form. |
 | C04 | fixed | Safe operations synchronize like pinned Thrust `par`; only a future explicit no-sync policy may omit that boundary. |
 | C05 | accepted | Rust returns `Result` instead of CUDA status output parameters or C++ exception/termination machinery. |
 | C06 | accepted | A contiguous Rust range replaces `(first, last)` pointer pairs while preserving the same logical range. |
@@ -76,9 +76,9 @@ parametric polymorphism. They are not a schedule/control-flow language.
 
 | ID | Status | Current contract or gap |
 |---|---|---|
-| D01 | fixed | Exact built-in `Less`/`Greater` over `u32` keys reaches the four-pass stable OneSweep radix path. |
-| D02 | fixed | Exact built-in `Less`/`Greater` over `u32` keys and `u32` values reaches the specialized pair path. |
-| D03 | fixed | Custom records and comparators use a typed comparison backend and are not mislabeled as radix. |
+| D01 | fixed | Default natural-ascending sort over `u32` keys reaches the four-pass stable OneSweep radix path. |
+| D02 | fixed | Default natural-ascending sort over `u32` keys and `u32` values reaches the specialized pair path. |
+| D03 | fixed | Explicit closures and custom records use a typed comparison backend and are not mislabeled as radix; opaque closure semantics are never guessed from a type name. |
 | D04 | replace | The comparison fallback performs rank/binary-search merge passes and is a correctness path, not the claimed CUB-radix performance path. |
 | D05 | missing | Full ascending/descending optimized coverage for every CCCL arithmetic, half, and bfloat combination is absent. |
 | D06 | missing | CUB single-tile versus multi-pass selection, large-offset portioning, `DoubleBuffer`, selector, bit-range, and decomposer contracts are absent. |
@@ -91,7 +91,7 @@ parametric polymorphism. They are not a schedule/control-flow language.
 
 | ID | Status | Current contract or gap |
 |---|---|---|
-| E01 | fixed | The retained host functions perform stable key-only and key/value merge with built-in or state-carrying comparators. |
+| E01 | fixed | The retained host functions perform stable key-only and key/value merge with natural ordering or state-carrying Rust closures. |
 | E02 | fixed | CUB owns the asynchronous device-wide dispatch. The hidden entry points are unsafe and state the stream-completion lifetime requirement; Thrust adds the safe synchronization boundary. |
 | E03 | fixed | Normal and wide-record fallback geometry is selected at monomorphization, not through a runtime strategy object. |
 | E04 | missing | Merge accepts contiguous device slices only; counting, discard, transform, zip, permutation, and other proxy iterators remain missing. |
@@ -105,10 +105,10 @@ Pinned CUB distinguishes device-wide host dispatch from in-kernel collectives:
 
 | Pinned primitive | Ordering customization | RCCL state |
 |---|---|---|
-| thread stable odd-even sort | comparator | missing |
-| `WarpBitonicSort` | comparator | missing |
-| `WarpMergeSort` | comparator | implemented and public |
-| `BlockMergeSort` | comparator | missing |
+| thread stable odd-even sort | ordering callable | missing |
+| `WarpBitonicSort` | ordering callable | missing |
+| `WarpMergeSort` | ordering closure | implemented and public |
+| `BlockMergeSort` | ordering callable | missing |
 | `BlockRadixSort` | decomposer and bit range | missing |
 | `DeviceRadixSort` | device-wide host dispatch | private specialized backend only |
 
@@ -125,8 +125,11 @@ and must preserve zero-copy contiguous behavior. Zip/tuple, transform,
 counting, discard, reverse, strided, and permutation views remain missing.
 
 `DeviceSlice::cu_deviceptr` is still the universal low-level interop escape
-hatch. Safe algorithms should eventually consume a more strongly typed device
-view instead of asking implementations for an untyped integer address.
+hatch. The pinned cuda-oxide synchronous generated launcher accepts
+`DeviceBuffer` for slice-shaped arguments but not arbitrary RCCL range types,
+so generic span/resource lowering remains a private pointer/count ABI. Safe
+algorithms should eventually consume a launcher-recognized typed device view
+instead of asking implementations for an untyped integer address.
 
 ## H. Test and example integrity
 
@@ -149,12 +152,19 @@ reference cases. It does not prove full upstream product parity.
 - `Result` replaces CUDA status output parameters and C++ exceptions.
 - Safe functions borrow typed device ranges rather than accepting naked
   pointer/count pairs.
-- `DeviceComparator<K>` is implemented by a concrete `Copy` value rather than
-  C++ callable-object syntax.
+- Ordering customization is an ordinary `Copy + 'static`
+  `Fn(&K, &K) -> Ordering`, including move-capturing closures.
 - Target schedule constants are selected during the CUB build for one explicit
   cargo-oxide architecture.
-- Raw pointers remain confined to unsafe CUDA kernel and hidden asynchronous
-  dispatch boundaries.
+- Mutable raw pointers remain confined to CUDA driver out-parameters, private
+  kernel launch ABIs, atomic destinations, dynamically typed shared/scratch
+  storage, and zero-copy source/sink adapters. Register-array pair handling in
+  `WarpMergeSort` uses ordinary mutable array borrows rather than a nullable
+  pointer.
+- `Arc` is not an execution-policy convention: streams are borrowed, CUDA pool
+  views borrow their source pool, per-stream events have one pool owner, and
+  scoped worker tests share borrows. Remaining `Arc` values retain cuda-core
+  contexts/modules or intentionally shared process-wide registries and caches.
 - Temporary storage and collective shared storage have explicit Rust ownership.
 
 Any additional difference needs a source-backed justification rather than the

@@ -85,7 +85,7 @@ Other rules:
 
 | CCCL support surface | Rust-native representation | Owner | Current state |
 |---|---|---|---|
-| `cuda::std::span<T>` | Kernel-side `&[T]` / checked mutable slice; host-side lifetime-bearing device subrange that lowers to pointer plus length | memory + CUB lowering | missing; `DeviceSlice` only describes whole contiguous allocations |
+| `cuda::std::span<T>` | Kernel-side `&[T]` / checked mutable slice; host-side lifetime-bearing device subrange that lowers to pointer plus length | memory + CUB lowering | partial; checked `DeviceSpan`/`DeviceSpanMut`, subspans, splits, compile-fail aliasing, and public sort coverage exist; generated synchronous typed launch lowering for arbitrary RCCL range implementors remains a cuda-oxide gap |
 | `cuda::std::array<T, N>` | `[T; N]` | Rust/cuda-oxide | native; add ABI and device-code matrices |
 | `thrust::pair`, `thrust::tuple` | `(A, B)` and native tuples for ordinary products; named `#[repr(C)]` records where field names or external ABI matter | Rust + CUB value types | partial; cuda-core implements `DeviceCopy` for tuples through arity 8, but zip/product support is missing |
 | `tuple_size`, `tuple_element`, concepts and type traits | associated types, trait bounds, const generics, and compiler type checking | Rust | native; do not recreate template metafunctions |
@@ -93,13 +93,13 @@ Other rules:
 | CUDA half and bfloat values | canonical `half::f16` / `half::bf16`, which cuda-core already marks `DeviceCopy`; ordering/radix transforms belong to operations, not replacement scalar types | CUB + cuda-core | replace RCCL storage-only wrappers once full scalar sort support lands |
 | CUDA Boolean values | byte-backed `DeviceBool`, because arbitrary copied bytes are not valid Rust `bool` values | CUB | implemented value representation; algorithm matrices remain |
 | `thrust::host_vector` | `Vec<T>` | `std` | native compatibility mapping; not part of the default GPU-resident data path |
-| `thrust::device_vector` / `vector_base` | `rccl_memory::DeviceBuffer<T, A>` with Rust `Vec`-like reserve/resize/truncate semantics and explicit stream ordering | memory | partial and usable; iterator/subrange integration remains |
+| `thrust::device_vector` / `vector_base` | `rccl_memory::DeviceBuffer<'stream, T, A>` with Rust `Vec`-like reserve/resize/truncate semantics and a borrowed stream lifetime | memory | partial and usable; iterator/adaptor integration remains |
 | universal and pinned-host vectors | `DeviceBuffer<T, ManagedMemoryResource>` and pinned-host resource/buffer types | memory | resources exist; container aliases and parity tests remain |
 | `device_ptr`, `universal_ptr`, raw pointer casts | unsafe typed device address plus safe lifetime-bearing range/view; raw address only at FFI/kernel internals | memory | replace current universal `cu_deviceptr` escape hatch |
 | `device_reference` and proxy references | no free-standing fake `&T`; indexed `DeviceInput`/`DeviceOutput` capabilities and adaptor-specific proxy operations | CUB + Thrust | missing |
 | iterator traits/categories/facade/adaptor | sealed capability traits such as random-access input, output, length, and contiguous; adaptor structs compose those traits | CUB + Thrust | missing |
 | `mdspan`, extents, layouts | typed multidimensional device view with shape, strides, and layout marker; contiguous 1-D case lowers to slice | CUB | missing; cuda-oxide checked 2-D views are reusable backend pieces |
-| functional objects | `Fn`/`FnMut` bounds plus `Copy` device-callable closures; zero-sized named operations for stable specialization points | CUB + Thrust | comparator-only subset exists |
+| functional objects | ordinary `Fn`/`FnMut` bounds plus `Copy` device-callable closures; specialization belongs to a default algorithm form or an explicit Rust operation type only when semantics require it | CUB + Thrust | `Fn(&K, &K) -> Ordering` subset exists for sort/merge; no RCCL callable compatibility trait |
 | `complex<T>` | RCCL-owned `#[repr(C)] Complex<T>` or an upstream cuda-core `DeviceCopy` implementation for a standard Rust complex type | CUB value layer | missing |
 | random engines/distributions | small copyable RNG state values with Rust methods; exact pinned sequences tested against Thrust | Thrust | missing |
 | memory construction/destruction and unique allocation | `MaybeUninit<T>`, RAII owners, `Drop`, and explicit stream-ordered destruction/release | memory + Thrust | partial; unique object/array helpers and nontrivial device construction remain |
@@ -154,7 +154,7 @@ memory. The safe Rust mapping needs two layers:
 
 ```text
 host owner/view                     kernel argument
-DeviceBuffer<T, A> --borrow--> DeviceSpan<'a, T> --lower--> &[T]
+DeviceBuffer<'stream, T, A> --borrow--> DeviceSpan<'a, T> --lower--> &[T]
                          \----> DeviceSpanMut<'a, T> ------> checked mutable/disjoint slice
 ```
 
@@ -196,7 +196,7 @@ must not silently become a public ABI convention.
 
 ### Vector contract
 
-Do not add a second `device_vector` owner. `DeviceBuffer<T, A>` is the Rust
+Do not add a second `device_vector` owner. `DeviceBuffer<'stream, T, A>` is the Rust
 container. Complete it as an allocator-aware, stream-ordered vector:
 
 - `len`, `capacity`, `reserve`, `resize`, `truncate`, subranges, and moves;
@@ -220,7 +220,7 @@ not confuse them with an owning vector container.
 | Gather/scatter | `gather`, `scatter` including conditional forms | missing | permutation/index source/sink + bounds contract |
 | Reordering | `reverse`, `shuffle`, `swap`/`swap_ranges` | missing | indexed ranges + random engine |
 | Search and predicates | `find`, `count`, `logical`, `equal`, `mismatch` | missing | transform/reduce/select foundations |
-| Ordered queries | `binary_search`, `extrema` | missing | comparators + reduce/search agents |
+| Ordered queries | `binary_search`, `extrema` | missing | ordering callables + reduce/search agents |
 | Reductions | `reduce`, `inner_product`, `transform_reduce` including reduce-by-key | missing | thread/warp/block/device reduce |
 | Scans/differences | `scan`, `transform_scan`, `adjacent_difference` including scan-by-key | missing | thread/warp/block/device scan |
 | Compaction | `remove`, `unique`, `partition` including copy, stable, by-key, and point/query forms | missing | scan + select/partition agents |

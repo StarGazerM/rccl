@@ -1,18 +1,5 @@
 use cuda_core::{CudaContext, CudaStream, DeviceBuffer, DeviceCopy, LaunchConfig};
-use rccl::DeviceComparator;
-use std::{error::Error, sync::Arc};
-
-#[derive(Clone, Copy)]
-struct MaskedLess {
-    mask: u32,
-}
-
-unsafe impl DeviceComparator<u32> for MaskedLess {
-    #[inline(always)]
-    unsafe fn less(&self, left: &u32, right: &u32) -> bool {
-        (left & self.mask) < (right & self.mask)
-    }
-}
+use std::{cmp::Ordering, error::Error};
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -23,14 +10,9 @@ struct LargeKey {
 
 unsafe impl DeviceCopy for LargeKey {}
 
-#[derive(Clone, Copy)]
-struct LargeKeyLess;
-
-unsafe impl DeviceComparator<LargeKey> for LargeKeyLess {
-    #[inline(always)]
-    unsafe fn less(&self, left: &LargeKey, right: &LargeKey) -> bool {
-        left.key < right.key
-    }
+#[inline(always)]
+fn order_large_key(left: &LargeKey, right: &LargeKey) -> Ordering {
+    left.key.cmp(&right.key)
 }
 
 #[repr(C)]
@@ -42,14 +24,9 @@ struct VirtualSharedKey {
 
 unsafe impl DeviceCopy for VirtualSharedKey {}
 
-#[derive(Clone, Copy)]
-struct VirtualSharedKeyLess;
-
-unsafe impl DeviceComparator<VirtualSharedKey> for VirtualSharedKeyLess {
-    #[inline(always)]
-    unsafe fn less(&self, left: &VirtualSharedKey, right: &VirtualSharedKey) -> bool {
-        left.key < right.key
-    }
+#[inline(always)]
+fn order_virtual_shared_key(left: &VirtualSharedKey, right: &VirtualSharedKey) -> Ordering {
+    left.key.cmp(&right.key)
 }
 
 const FILL_KEYS_FIRST: u32 = 0;
@@ -74,6 +51,7 @@ const EXPECT_PAIR_VALUES: u32 = 0;
 mod fixtures {
     use super::*;
     use cuda_device::{
+        DisjointSlice,
         atomic::{AtomicOrdering, DeviceAtomicU64},
         kernel, thread,
     };
@@ -166,19 +144,15 @@ mod fixtures {
     }
 
     #[kernel]
-    pub unsafe fn fill_u32(pointer: *mut u32, len: u64, pattern: u32) {
+    pub unsafe fn fill_u32(mut output: DisjointSlice<u32>, len: u64, pattern: u32) {
         let index = thread::index_1d().get() as u64;
         if index < len {
-            unsafe {
-                pointer
-                    .add(index as usize)
-                    .write(u32_fixture(index, pattern))
-            };
+            *unsafe { output.get_unchecked_mut(index as usize) } = u32_fixture(index, pattern);
         }
     }
 
     #[kernel]
-    pub unsafe fn fill_pair_keys(pointer: *mut i32, len: u64, second: bool) {
+    pub unsafe fn fill_pair_keys(mut output: DisjointSlice<i32>, len: u64, second: bool) {
         let index = thread::index_1d().get() as u64;
         if index < len {
             let value = if second {
@@ -194,15 +168,15 @@ mod fixtures {
                     _ => 4,
                 }
             };
-            unsafe { pointer.add(index as usize).write(value) };
+            *unsafe { output.get_unchecked_mut(index as usize) } = value;
         }
     }
 
     #[kernel]
-    pub unsafe fn fill_u64_sequence(pointer: *mut u64, len: u64, start: u64) {
+    pub unsafe fn fill_u64_sequence(mut output: DisjointSlice<u64>, len: u64, start: u64) {
         let index = thread::index_1d().get() as u64;
         if index < len {
-            unsafe { pointer.add(index as usize).write(start + index) };
+            *unsafe { output.get_unchecked_mut(index as usize) } = start + index;
         }
     }
 
@@ -226,31 +200,39 @@ mod fixtures {
     }
 
     #[kernel]
-    pub unsafe fn validate_u32(pointer: *const u32, len: u64, pattern: u32, errors: *mut u64) {
+    pub unsafe fn validate_u32(
+        values: &[u32],
+        len: u64,
+        pattern: u32,
+        mut errors: DisjointSlice<u64>,
+    ) {
         let index = thread::index_1d().get() as u64;
-        if index < len
-            && unsafe { pointer.add(index as usize).read() } != expected_u32(index, pattern)
-        {
-            unsafe { DeviceAtomicU64::from_ptr(errors) }.fetch_add(1, AtomicOrdering::Relaxed);
+        if index < len && values[index as usize] != expected_u32(index, pattern) {
+            unsafe { DeviceAtomicU64::from_ptr(errors.as_mut_ptr()) }
+                .fetch_add(1, AtomicOrdering::Relaxed);
         }
     }
 
     #[kernel]
-    pub unsafe fn validate_pair_keys(pointer: *const i32, len: u64, errors: *mut u64) {
+    pub unsafe fn validate_pair_keys(values: &[i32], len: u64, mut errors: DisjointSlice<u64>) {
         let index = thread::index_1d().get() as u64;
-        if index < len && unsafe { pointer.add(index as usize).read() } != expected_pair_key(index)
-        {
-            unsafe { DeviceAtomicU64::from_ptr(errors) }.fetch_add(1, AtomicOrdering::Relaxed);
+        if index < len && values[index as usize] != expected_pair_key(index) {
+            unsafe { DeviceAtomicU64::from_ptr(errors.as_mut_ptr()) }
+                .fetch_add(1, AtomicOrdering::Relaxed);
         }
     }
 
     #[kernel]
-    pub unsafe fn validate_u64(pointer: *const u64, len: u64, pattern: u32, errors: *mut u64) {
+    pub unsafe fn validate_u64(
+        values: &[u64],
+        len: u64,
+        pattern: u32,
+        mut errors: DisjointSlice<u64>,
+    ) {
         let index = thread::index_1d().get() as u64;
-        if index < len
-            && unsafe { pointer.add(index as usize).read() } != expected_u64(index, pattern)
-        {
-            unsafe { DeviceAtomicU64::from_ptr(errors) }.fetch_add(1, AtomicOrdering::Relaxed);
+        if index < len && values[index as usize] != expected_u64(index, pattern) {
+            unsafe { DeviceAtomicU64::from_ptr(errors.as_mut_ptr()) }
+                .fetch_add(1, AtomicOrdering::Relaxed);
         }
     }
 
@@ -284,7 +266,7 @@ fn launch_for(len: usize) -> Result<LaunchConfig, Box<dyn Error>> {
 
 fn fill_u32(
     module: &fixtures::LoadedModule,
-    stream: &Arc<CudaStream>,
+    stream: &CudaStream,
     buffer: &mut DeviceBuffer<u32>,
     pattern: u32,
 ) -> Result<(), Box<dyn Error>> {
@@ -293,7 +275,7 @@ fn fill_u32(
             module.fill_u32(
                 stream,
                 launch_for(buffer.len())?,
-                buffer.cu_deviceptr() as *mut u32,
+                buffer,
                 buffer.len() as u64,
                 pattern,
             )?;
@@ -304,7 +286,7 @@ fn fill_u32(
 
 fn fill_pair_keys(
     module: &fixtures::LoadedModule,
-    stream: &Arc<CudaStream>,
+    stream: &CudaStream,
     buffer: &mut DeviceBuffer<i32>,
     second: bool,
 ) -> Result<(), Box<dyn Error>> {
@@ -312,7 +294,7 @@ fn fill_pair_keys(
         module.fill_pair_keys(
             stream,
             launch_for(buffer.len())?,
-            buffer.cu_deviceptr() as *mut i32,
+            buffer,
             buffer.len() as u64,
             second,
         )?;
@@ -322,7 +304,7 @@ fn fill_pair_keys(
 
 fn fill_u64_sequence(
     module: &fixtures::LoadedModule,
-    stream: &Arc<CudaStream>,
+    stream: &CudaStream,
     buffer: &mut DeviceBuffer<u64>,
     start: u64,
 ) -> Result<(), Box<dyn Error>> {
@@ -330,7 +312,7 @@ fn fill_u64_sequence(
         module.fill_u64_sequence(
             stream,
             launch_for(buffer.len())?,
-            buffer.cu_deviceptr() as *mut u64,
+            buffer,
             buffer.len() as u64,
             start,
         )?;
@@ -340,7 +322,7 @@ fn fill_u64_sequence(
 
 fn fill_record_words<T: DeviceCopy>(
     module: &fixtures::LoadedModule,
-    stream: &Arc<CudaStream>,
+    stream: &CudaStream,
     buffer: &mut DeviceBuffer<T>,
     words_per_record: u32,
     parity: u32,
@@ -359,7 +341,7 @@ fn fill_record_words<T: DeviceCopy>(
 }
 
 fn check_status(
-    stream: &Arc<CudaStream>,
+    stream: &CudaStream,
     status: &DeviceBuffer<u64>,
     label: &str,
 ) -> Result<(), Box<dyn Error>> {
@@ -373,20 +355,20 @@ fn check_status(
 
 fn validate_u32(
     module: &fixtures::LoadedModule,
-    stream: &Arc<CudaStream>,
+    stream: &CudaStream,
     buffer: &DeviceBuffer<u32>,
     pattern: u32,
     label: &str,
 ) -> Result<(), Box<dyn Error>> {
-    let status = DeviceBuffer::<u64>::zeroed(stream, 1)?;
+    let mut status = DeviceBuffer::<u64>::zeroed(stream, 1)?;
     unsafe {
         module.validate_u32(
             stream,
             launch_for(buffer.len())?,
-            buffer.cu_deviceptr() as *const u32,
+            buffer,
             buffer.len() as u64,
             pattern,
-            status.cu_deviceptr() as *mut u64,
+            &mut status,
         )?;
     }
     check_status(stream, &status, label)
@@ -394,17 +376,17 @@ fn validate_u32(
 
 fn validate_pair_keys(
     module: &fixtures::LoadedModule,
-    stream: &Arc<CudaStream>,
+    stream: &CudaStream,
     buffer: &DeviceBuffer<i32>,
 ) -> Result<(), Box<dyn Error>> {
-    let status = DeviceBuffer::<u64>::zeroed(stream, 1)?;
+    let mut status = DeviceBuffer::<u64>::zeroed(stream, 1)?;
     unsafe {
         module.validate_pair_keys(
             stream,
             launch_for(buffer.len())?,
-            buffer.cu_deviceptr() as *const i32,
+            buffer,
             buffer.len() as u64,
-            status.cu_deviceptr() as *mut u64,
+            &mut status,
         )?;
     }
     check_status(stream, &status, "merge_by_key keys")
@@ -412,20 +394,20 @@ fn validate_pair_keys(
 
 fn validate_u64(
     module: &fixtures::LoadedModule,
-    stream: &Arc<CudaStream>,
+    stream: &CudaStream,
     buffer: &DeviceBuffer<u64>,
     pattern: u32,
     label: &str,
 ) -> Result<(), Box<dyn Error>> {
-    let status = DeviceBuffer::<u64>::zeroed(stream, 1)?;
+    let mut status = DeviceBuffer::<u64>::zeroed(stream, 1)?;
     unsafe {
         module.validate_u64(
             stream,
             launch_for(buffer.len())?,
-            buffer.cu_deviceptr() as *const u64,
+            buffer,
             buffer.len() as u64,
             pattern,
-            status.cu_deviceptr() as *mut u64,
+            &mut status,
         )?;
     }
     check_status(stream, &status, label)
@@ -433,7 +415,7 @@ fn validate_u64(
 
 fn validate_record_words<T: DeviceCopy>(
     module: &fixtures::LoadedModule,
-    stream: &Arc<CudaStream>,
+    stream: &CudaStream,
     buffer: &DeviceBuffer<T>,
     words_per_record: u32,
     label: &str,
@@ -454,7 +436,7 @@ fn validate_record_words<T: DeviceCopy>(
 
 fn test_sort_with_shared_execution(
     exec: &rccl::cuda::Execution<'_>,
-    stream: &Arc<CudaStream>,
+    stream: &CudaStream,
     module: &fixtures::LoadedModule,
 ) -> Result<(), Box<dyn Error>> {
     let mut keys = DeviceBuffer::<u32>::zeroed(stream, 4)?;
@@ -471,7 +453,7 @@ fn test_sort_with_shared_execution(
 
 fn test_keys(
     exec: &rccl::cuda::Execution<'_>,
-    stream: &Arc<CudaStream>,
+    stream: &CudaStream,
     module: &fixtures::LoadedModule,
 ) -> Result<(), Box<dyn Error>> {
     let mut first = DeviceBuffer::<u32>::zeroed(stream, 4)?;
@@ -491,7 +473,13 @@ fn test_keys(
 
     fill_u32(module, stream, &mut first, FILL_DESCENDING_FIRST)?;
     fill_u32(module, stream, &mut second, FILL_DESCENDING_SECOND)?;
-    rccl::merge_by(exec, &first, &second, &mut output, rccl::Greater)?;
+    rccl::merge_by(
+        exec,
+        &first,
+        &second,
+        &mut output,
+        |left: &u32, right: &u32| right.cmp(left),
+    )?;
     validate_u32(
         module,
         stream,
@@ -506,20 +494,17 @@ fn test_keys(
 
     fill_u32(module, stream, &mut first, FILL_EVENS)?;
     fill_u32(module, stream, &mut second, FILL_ODDS)?;
-    rccl::merge_by(
-        exec,
-        &first,
-        &second,
-        &mut output,
-        MaskedLess { mask: u32::MAX },
-    )?;
+    rccl::merge_by(exec, &first, &second, &mut output, {
+        let mask = u32::MAX;
+        move |left: &u32, right: &u32| (left & mask).cmp(&(right & mask))
+    })?;
     validate_u32(module, stream, &output, EXPECT_IOTA, "stateful merge_by")?;
     Ok(())
 }
 
 fn test_pairs(
     exec: &rccl::cuda::Execution<'_>,
-    stream: &Arc<CudaStream>,
+    stream: &CudaStream,
     module: &fixtures::LoadedModule,
 ) -> Result<(), Box<dyn Error>> {
     let mut first_keys = DeviceBuffer::<i32>::zeroed(stream, 4)?;
@@ -555,7 +540,7 @@ fn test_pairs(
 
 fn test_fallback(
     exec: &rccl::cuda::Execution<'_>,
-    stream: &Arc<CudaStream>,
+    stream: &CudaStream,
     module: &fixtures::LoadedModule,
 ) -> Result<(), Box<dyn Error>> {
     let mut first = DeviceBuffer::<LargeKey>::zeroed(stream, 3)?;
@@ -563,7 +548,7 @@ fn test_fallback(
     fill_record_words(module, stream, &mut first, 128, 0)?;
     fill_record_words(module, stream, &mut second, 128, 1)?;
     let mut output = DeviceBuffer::<LargeKey>::zeroed(stream, 6)?;
-    rccl::merge_by(exec, &first, &second, &mut output, LargeKeyLess)?;
+    rccl::merge_by(exec, &first, &second, &mut output, order_large_key)?;
     validate_record_words(module, stream, &output, 128, "large-record fallback")?;
 
     // A 64-thread fallback tile still exceeds the portable shared-memory
@@ -574,7 +559,7 @@ fn test_fallback(
     fill_record_words(module, stream, &mut first, 256, 0)?;
     fill_record_words(module, stream, &mut second, 256, 1)?;
     let mut output = DeviceBuffer::<VirtualSharedKey>::zeroed(stream, 4)?;
-    rccl::merge_by(exec, &first, &second, &mut output, VirtualSharedKeyLess)?;
+    rccl::merge_by(exec, &first, &second, &mut output, order_virtual_shared_key)?;
     validate_record_words(module, stream, &output, 256, "virtual-shared fallback")?;
     Ok(())
 }

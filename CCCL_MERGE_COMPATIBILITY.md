@@ -21,10 +21,11 @@ let end = rccl::merge(&exec, &first, &second, &mut output)?;
 
 The contiguous-range facade consists of `merge`, `merge_by`, `merge_by_key`,
 and `merge_by_key_with`. Rust cannot overload by arity, so `_with` denotes the
-key/value operation with an explicit comparator. Descending order passes
-`Greater` to the comparator-taking forms.
+key/value operation with an explicit ordering closure. Descending order passes
+`|left, right| right.cmp(left)` to the closure-taking forms.
 
-`Execution` belongs to `rccl-thrust` and borrows `&Arc<CudaStream>`. `par_in`
+`Execution<'stream>` belongs to `rccl-thrust` and borrows
+`&'stream CudaStream`. `par_in`
 also carries a concrete allocator, including a borrowed allocator handle. It is
 the same value accepted by sort and contains no merge policy, target schedule,
 or strategy type.
@@ -48,8 +49,8 @@ condition with synchronization.
 
 One cargo-oxide target produces one CUB schedule. `rccl-cub/build.rs` validates
 `CUDA_OXIDE_TARGET` and emits literal normal and fallback geometry. Host-only
-Cargo checks deterministically use SM80. Key/value shape and comparator remain
-ordinary Rust generics and are monomorphized at the call site.
+Cargo checks deterministically use SM80. Key/value shape and ordering closure
+remain ordinary Rust generics and are monomorphized at the call site.
 
 There is no public schedule language, runtime architecture probe, breakpoint
 table, policy object, selected-policy wrapper, launch callback, or
@@ -99,7 +100,7 @@ inputs at the final kernel ABI are not a public substitute for that contract.
 `src/bin/cccl-merge-tests.rs` constructs and validates fixtures in CUDA memory.
 It reports exactly three contiguous-range suites:
 
-1. ascending, descending, empty, and stateful-comparator key merges on a
+1. ascending, descending, empty, and state-carrying-closure key merges on a
    non-default stream, including exact output-end values;
 2. stable mixed-type key/value provenance;
 3. 512-byte fallback keys and 1024-byte virtual-shared-memory keys.

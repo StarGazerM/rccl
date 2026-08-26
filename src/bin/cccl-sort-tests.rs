@@ -1,20 +1,8 @@
 use cuda_core::{CudaContext, DeviceBuffer};
-use rccl::DeviceComparator;
 use std::error::Error;
 
 #[path = "../../examples/gpu_support.rs"]
 mod gpu_support;
-
-#[derive(Clone, Copy)]
-struct MaskedU32Less {
-    mask: u32,
-}
-
-unsafe impl DeviceComparator<u32> for MaskedU32Less {
-    unsafe fn less(&self, left: &u32, right: &u32) -> bool {
-        (left & self.mask) < (right & self.mask)
-    }
-}
 
 fn main() -> Result<(), Box<dyn Error>> {
     const COUNT: usize = 1_000_003;
@@ -26,27 +14,29 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut keys = DeviceBuffer::<u32>::zeroed(&stream, COUNT)?;
     support.fill_u32(&stream, &mut keys, 1)?;
     rccl::sort(&exec, &mut keys)?;
-    assert_eq!(support.validate_order(&stream, &keys, rccl::Less)?, 0);
+    assert_eq!(support.validate_order(&stream, &keys, u32::cmp)?, 0);
 
     support.fill_u32(&stream, &mut keys, 2)?;
     rccl::stable_sort(&exec, &mut keys)?;
-    assert_eq!(support.validate_order(&stream, &keys, rccl::Less)?, 0);
+    assert_eq!(support.validate_order(&stream, &keys, u32::cmp)?, 0);
 
     support.fill_u32(&stream, &mut keys, 3)?;
-    rccl::sort_by(&exec, &mut keys, rccl::Greater)?;
-    assert_eq!(support.validate_order(&stream, &keys, rccl::Greater)?, 0);
+    let descending = |left: &u32, right: &u32| right.cmp(left);
+    rccl::sort_by(&exec, &mut keys, descending)?;
+    assert_eq!(support.validate_order(&stream, &keys, descending)?, 0);
 
-    let masked = MaskedU32Less { mask: 0xffff };
+    let mask = 0xffff_u32;
+    let masked = move |left: &u32, right: &u32| (left & mask).cmp(&(right & mask));
     support.fill_u32(&stream, &mut keys, 4)?;
     rccl::stable_sort_by(&exec, &mut keys, masked)?;
-    assert_eq!(support.validate_order(&stream, &keys, masked)?, 0);
+    assert_eq!(support.validate_masked_u32_order(&stream, &keys, mask)?, 0);
 
     let mut values = DeviceBuffer::<u32>::zeroed(&stream, COUNT)?;
     support.fill_low_entropy_u32(&stream, &mut keys, 5)?;
     support.fill_iota_u32(&stream, &mut values)?;
     rccl::sort_by_key(&exec, &mut keys, &mut values)?;
     assert_eq!(
-        support.validate_stable_pairs(&stream, &keys, &values, rccl::Less)?,
+        support.validate_stable_pairs(&stream, &keys, &values, u32::cmp)?,
         0
     );
 
@@ -54,15 +44,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     support.fill_iota_u32(&stream, &mut values)?;
     rccl::stable_sort_by_key(&exec, &mut keys, &mut values)?;
     assert_eq!(
-        support.validate_stable_pairs(&stream, &keys, &values, rccl::Less)?,
+        support.validate_stable_pairs(&stream, &keys, &values, u32::cmp)?,
         0
     );
 
     support.fill_low_entropy_u32(&stream, &mut keys, 7)?;
     support.fill_iota_u32(&stream, &mut values)?;
-    rccl::sort_by_key_with(&exec, &mut keys, &mut values, rccl::Greater)?;
+    rccl::sort_by_key_with(&exec, &mut keys, &mut values, descending)?;
     assert_eq!(
-        support.validate_stable_pairs(&stream, &keys, &values, rccl::Greater)?,
+        support.validate_stable_pairs(&stream, &keys, &values, descending)?,
         0
     );
 
@@ -70,7 +60,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     support.fill_iota_u32(&stream, &mut values)?;
     rccl::stable_sort_by_key_with(&exec, &mut keys, &mut values, masked)?;
     assert_eq!(
-        support.validate_stable_pairs(&stream, &keys, &values, masked)?,
+        support.validate_masked_u32_stable_pairs(&stream, &keys, &values, mask)?,
         0
     );
 

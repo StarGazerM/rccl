@@ -4,39 +4,42 @@ use std::error::Error;
 #[cuda_host::cuda_module]
 mod fixtures {
     use cuda_device::{
+        DisjointSlice,
         atomic::{AtomicOrdering, DeviceAtomicU64},
         kernel, thread,
     };
 
     #[kernel]
-    pub unsafe fn fill_sorted(pointer: *mut u32, len: u64, parity: u32) {
+    pub unsafe fn fill_sorted(mut output: DisjointSlice<u32>, len: u64, parity: u32) {
         let index = thread::index_1d().get() as u64;
         if index < len {
-            unsafe { pointer.add(index as usize).write(index as u32 * 2 + parity) };
+            *unsafe { output.get_unchecked_mut(index as usize) } = index as u32 * 2 + parity;
         }
     }
 
     #[kernel]
-    pub unsafe fn fill_sorted_values(pointer: *mut u64, len: u64, parity: u64) {
+    pub unsafe fn fill_sorted_values(mut output: DisjointSlice<u64>, len: u64, parity: u64) {
         let index = thread::index_1d().get() as u64;
         if index < len {
-            unsafe { pointer.add(index as usize).write(index * 2 + parity) };
+            *unsafe { output.get_unchecked_mut(index as usize) } = index * 2 + parity;
         }
     }
 
     #[kernel]
-    pub unsafe fn validate_iota(pointer: *const u32, len: u64, errors: *mut u64) {
+    pub unsafe fn validate_iota(values: &[u32], len: u64, mut errors: DisjointSlice<u64>) {
         let index = thread::index_1d().get() as u64;
-        if index < len && unsafe { pointer.add(index as usize).read() } != index as u32 {
-            unsafe { DeviceAtomicU64::from_ptr(errors) }.fetch_add(1, AtomicOrdering::Relaxed);
+        if index < len && values[index as usize] != index as u32 {
+            unsafe { DeviceAtomicU64::from_ptr(errors.as_mut_ptr()) }
+                .fetch_add(1, AtomicOrdering::Relaxed);
         }
     }
 
     #[kernel]
-    pub unsafe fn validate_iota_u64(pointer: *const u64, len: u64, errors: *mut u64) {
+    pub unsafe fn validate_iota_u64(values: &[u64], len: u64, mut errors: DisjointSlice<u64>) {
         let index = thread::index_1d().get() as u64;
-        if index < len && unsafe { pointer.add(index as usize).read() } != index {
-            unsafe { DeviceAtomicU64::from_ptr(errors) }.fetch_add(1, AtomicOrdering::Relaxed);
+        if index < len && values[index as usize] != index {
+            unsafe { DeviceAtomicU64::from_ptr(errors.as_mut_ptr()) }
+                .fetch_add(1, AtomicOrdering::Relaxed);
         }
     }
 }
@@ -63,25 +66,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     let stream = context.default_stream();
     let exec = rccl::cuda::par(&stream)?;
     let fixtures = fixtures::load(&context)?;
-    let first = DeviceBuffer::<u32>::zeroed(&stream, count)?;
-    let second = DeviceBuffer::<u32>::zeroed(&stream, count)?;
+    let mut first = DeviceBuffer::<u32>::zeroed(&stream, count)?;
+    let mut second = DeviceBuffer::<u32>::zeroed(&stream, count)?;
     let mut output = DeviceBuffer::<u32>::zeroed(&stream, total)?;
     let launch = LaunchConfig::for_num_elems(u32::try_from(count)?);
     unsafe {
-        fixtures.fill_sorted(
-            &stream,
-            launch,
-            first.cu_deviceptr() as *mut u32,
-            count as u64,
-            0,
-        )?;
-        fixtures.fill_sorted(
-            &stream,
-            launch,
-            second.cu_deviceptr() as *mut u32,
-            count as u64,
-            1,
-        )?;
+        fixtures.fill_sorted(&stream, launch, &mut first, count as u64, 0)?;
+        fixtures.fill_sorted(&stream, launch, &mut second, count as u64, 1)?;
     }
 
     for _ in 0..3 {
@@ -97,14 +88,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         timings.push(start.elapsed_ms(&end)? as f64);
     }
 
-    let errors = DeviceBuffer::<u64>::zeroed(&stream, 1)?;
+    let mut errors = DeviceBuffer::<u64>::zeroed(&stream, 1)?;
     unsafe {
         fixtures.validate_iota(
             &stream,
             LaunchConfig::for_num_elems(u32::try_from(total)?),
-            output.cu_deviceptr() as *const u32,
+            &output,
             total as u64,
-            errors.cu_deviceptr() as *mut u64,
+            &mut errors,
         )?;
     }
     let error_count = errors.to_host_vec(&stream)?[0];
@@ -120,24 +111,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         total as f64 / best / 1.0e6,
     );
 
-    let first_values = DeviceBuffer::<u64>::zeroed(&stream, count)?;
-    let second_values = DeviceBuffer::<u64>::zeroed(&stream, count)?;
+    let mut first_values = DeviceBuffer::<u64>::zeroed(&stream, count)?;
+    let mut second_values = DeviceBuffer::<u64>::zeroed(&stream, count)?;
     let mut output_values = DeviceBuffer::<u64>::zeroed(&stream, total)?;
     unsafe {
-        fixtures.fill_sorted_values(
-            &stream,
-            launch,
-            first_values.cu_deviceptr() as *mut u64,
-            count as u64,
-            0,
-        )?;
-        fixtures.fill_sorted_values(
-            &stream,
-            launch,
-            second_values.cu_deviceptr() as *mut u64,
-            count as u64,
-            1,
-        )?;
+        fixtures.fill_sorted_values(&stream, launch, &mut first_values, count as u64, 0)?;
+        fixtures.fill_sorted_values(&stream, launch, &mut second_values, count as u64, 1)?;
     }
     for _ in 0..3 {
         rccl::merge_by_key(
@@ -167,14 +146,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         end.synchronize()?;
         pair_timings.push(start.elapsed_ms(&end)? as f64);
     }
-    let pair_errors = DeviceBuffer::<u64>::zeroed(&stream, 1)?;
+    let mut pair_errors = DeviceBuffer::<u64>::zeroed(&stream, 1)?;
     unsafe {
         fixtures.validate_iota_u64(
             &stream,
             LaunchConfig::for_num_elems(u32::try_from(total)?),
-            output_values.cu_deviceptr() as *const u64,
+            &output_values,
             total as u64,
-            pair_errors.cu_deviceptr() as *mut u64,
+            &mut pair_errors,
         )?;
     }
     let pair_error_count = pair_errors.to_host_vec(&stream)?[0];

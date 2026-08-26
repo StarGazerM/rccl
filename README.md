@@ -65,39 +65,31 @@ The merge surface contains:
 - `merge_by_key`, `merge_by_key_with`
 
 Rust cannot overload functions by arity, so `_with` denotes the key/value form
-with an explicit comparator. Descending order uses the same operation with
-`Greater`.
+with an explicit ordering closure. Descending order uses the same operation
+with a closure such as `|left, right| right.cmp(left)`.
 
 Range parameters implement `rccl::memory::DeviceSlice<T>` or
 `DeviceSliceMut<T>`. Both `cuda_core::DeviceBuffer<T>` and allocator-aware
-`rccl::memory::DeviceBuffer<T, A>` implement those traits. Their `subspan` and
+`rccl::memory::DeviceBuffer<'stream, T, A>` implement those traits. Their `subspan` and
 `subspan_mut` methods create checked, lifetime-bearing device subranges without
 CPU staging; existing sort and merge functions accept those spans directly.
 [`examples/span-sort.rs`](examples/span-sort.rs) sorts only the middle of one
 allocation and validates both its exact output and untouched guards on the
 GPU. General Thrust-style fancy/proxy iterators are not implemented yet.
 
-A custom comparator is a `Copy` Rust value whose concrete type and state are
-monomorphized into the GPU kernels:
+A custom ordering is an ordinary `Copy + 'static` Rust closure whose concrete
+type and captured state are monomorphized into the GPU kernels:
 
 ```rust
-#[derive(Clone, Copy)]
-struct MaskedOrder {
-    mask: i64,
-}
-
-unsafe impl rccl::DeviceComparator<i64> for MaskedOrder {
-    unsafe fn less(&self, left: &i64, right: &i64) -> bool {
-        (left & self.mask) < (right & self.mask)
-    }
-}
-
-rccl::stable_sort_by(&exec, &mut keys, MaskedOrder { mask: 0xff })?;
+let mask = 0xff_i64;
+rccl::stable_sort_by(&exec, &mut keys, move |left: &i64, right: &i64| {
+    (left & mask).cmp(&(right & mask))
+})?;
 ```
 
-The unsafe implementation promises that `less` is GPU-callable, defines a
-strict weak order, and keeps captured device state valid through stream
-completion.
+There is no RCCL callable trait to implement and no built-in `Less`/`Greater`
+compatibility vocabulary. Unsafe work inside a closure, such as dereferencing
+a captured raw device pointer, remains explicitly unsafe ordinary Rust.
 
 ## Compile-target schedules
 
@@ -113,17 +105,19 @@ explicit architecture.
 
 ## Current sort dispatch
 
-Compile-time specialization selects the backend from the concrete key, value,
-and comparator types:
+Compile-time specialization selects the backend from the call shape and
+concrete key/value types:
 
-| Call shape | Comparator | Current backend |
+| Call shape | Ordering | Current backend |
 |---|---|---|
-| `u32` keys | exact `Less` or `Greater` | four-pass stable OneSweep radix |
-| `u32` keys and `u32` values | exact `Less` or `Greater` | four-pass stable OneSweep radix |
-| other supported key/value shapes | built-in or custom comparator | typed stable rank/merge fallback |
+| default `sort`/`stable_sort` on `u32` keys | natural ascending | four-pass stable OneSweep radix |
+| default key/value sort on `u32`/`u32` | natural ascending | four-pass stable OneSweep radix |
+| any explicit closure, or other supported shapes | closure or natural ascending | typed stable rank/merge fallback |
 
-The optimized boundary is therefore `u32` and `u32/u32`, not every arithmetic
-type supported by Thrust smart sort. The rank/merge fallback is a correctness
+The optimized boundary is therefore default ascending `u32` and `u32/u32`, not
+every arithmetic type supported by Thrust smart sort. An arbitrary Rust
+closure is opaque to specialization and deliberately takes the comparison
+path, including a descending closure. The rank/merge fallback is a correctness
 path, not a CUB-radix-performance claim. `sort` currently uses the stable
 backend, but callers should rely on stability only through `stable_sort`.
 

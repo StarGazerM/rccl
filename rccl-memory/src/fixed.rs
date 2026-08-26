@@ -16,7 +16,6 @@ pub const DEFAULT_BLOCKS_TO_PREALLOCATE: usize = 128;
 #[derive(Debug)]
 struct FixedFreeBlock {
     ptr: sys::CUdeviceptr,
-    ready: Arc<CudaEvent>,
     stream_id: u64,
 }
 
@@ -24,7 +23,7 @@ struct FixedFreeBlock {
 struct FixedState {
     free: Vec<FixedFreeBlock>,
     live: HashMap<sys::CUdeviceptr, usize>,
-    stream_events: HashMap<u64, Arc<CudaEvent>>,
+    stream_events: HashMap<u64, CudaEvent>,
     upstream_chunks: Vec<DeviceBlock>,
 }
 
@@ -116,17 +115,13 @@ impl<U: DeviceAllocator> FixedSizeMemoryResource<U> {
         let layout = Layout::from_size_align(chunk_size, DEVICE_ALLOCATION_ALIGNMENT)?;
         let chunk = self.upstream.allocate(layout, stream)?;
         let stream_id = stream_id(stream)?;
-        let ready = match record_ready(state, stream, stream_id) {
-            Ok(event) => event,
-            Err(error) => {
-                let _ = unsafe { self.upstream.deallocate(chunk, stream) };
-                return Err(error);
-            }
-        };
+        if let Err(error) = record_ready(state, stream, stream_id) {
+            let _ = unsafe { self.upstream.deallocate(chunk, stream) };
+            return Err(error);
+        }
         for index in 0..self.blocks_per_chunk {
             state.free.push(FixedFreeBlock {
                 ptr: chunk.cu_deviceptr() + (index * self.block_size) as sys::CUdeviceptr,
-                ready: ready.clone(),
                 stream_id,
             });
         }
@@ -164,7 +159,11 @@ unsafe impl<U: DeviceAllocator> DeviceAllocator for FixedSizeMemoryResource<U> {
         }
         let free = state.free.pop().expect("pool was grown above");
         if free.stream_id != stream_id {
-            stream.wait(&free.ready)?;
+            let ready = state
+                .stream_events
+                .get(&free.stream_id)
+                .expect("every free block stream has a recorded event");
+            stream.wait(ready)?;
         }
         state.live.insert(free.ptr, layout.size());
         Ok(unsafe {
@@ -183,7 +182,7 @@ unsafe impl<U: DeviceAllocator> DeviceAllocator for FixedSizeMemoryResource<U> {
         }
         let stream_id = stream_id(stream)?;
         let mut state = self.state.lock().expect("fixed-size pool poisoned");
-        let ready = record_ready(&mut state, stream, stream_id)?;
+        record_ready(&mut state, stream, stream_id)?;
         let Some(expected_size) = state.live.remove(&block.cu_deviceptr()) else {
             return Err(MemoryError::UnknownAllocation {
                 ptr: block.cu_deviceptr(),
@@ -198,7 +197,6 @@ unsafe impl<U: DeviceAllocator> DeviceAllocator for FixedSizeMemoryResource<U> {
         }
         state.free.push(FixedFreeBlock {
             ptr: block.cu_deviceptr(),
-            ready,
             stream_id,
         });
         Ok(())
@@ -209,9 +207,12 @@ impl<U: DeviceAllocator> Drop for FixedSizeMemoryResource<U> {
     fn drop(&mut self) {
         let context = self.upstream.context().clone();
         let stream = context.default_stream();
-        let state = self.state.get_mut().expect("fixed-size pool poisoned");
-        for free in &state.free {
-            context.record_err(free.ready.synchronize());
+        let state = self
+            .state
+            .get_mut()
+            .unwrap_or_else(|poison| poison.into_inner());
+        for event in state.stream_events.values() {
+            context.record_err(event.synchronize());
         }
         for chunk in state.upstream_chunks.drain(..) {
             match unsafe { self.upstream.deallocate(chunk, &stream) } {
@@ -368,12 +369,13 @@ fn record_ready(
     state: &mut FixedState,
     stream: &CudaStream,
     stream_id: u64,
-) -> Result<Arc<CudaEvent>, MemoryError> {
+) -> Result<(), MemoryError> {
     if let Some(event) = state.stream_events.get(&stream_id) {
         unsafe { sys::cuEventRecord(event.cu_event(), stream.cu_stream()).result()? };
-        return Ok(event.clone());
+        return Ok(());
     }
-    let event = Arc::new(stream.record_event(None)?);
-    state.stream_events.insert(stream_id, event.clone());
-    Ok(event)
+    state
+        .stream_events
+        .insert(stream_id, stream.record_event(None)?);
+    Ok(())
 }

@@ -9,10 +9,15 @@ mod gpu_support;
 )]
 #[cuda_host::cuda_module]
 mod kernels {
-    use cuda_device::{kernel, thread};
+    use cuda_device::{DisjointSlice, kernel, thread};
 
     #[kernel]
-    pub unsafe fn bucket_bounds(keys: *const u32, count: u64, bucket: u32, bounds: *mut u64) {
+    pub unsafe fn bucket_bounds(
+        keys: &[u32],
+        count: u64,
+        bucket: u32,
+        mut bounds: DisjointSlice<u64>,
+    ) {
         if thread::index_1d().get() != 0 {
             return;
         }
@@ -21,7 +26,7 @@ mod kernels {
         while len != 0 {
             let step = len / 2;
             let middle = first + step;
-            if unsafe { keys.add(middle as usize).read() } < bucket {
+            if keys[middle as usize] < bucket {
                 first = middle + 1;
                 len -= step + 1;
             } else {
@@ -33,17 +38,15 @@ mod kernels {
         while len != 0 {
             let step = len / 2;
             let middle = first + step;
-            if unsafe { keys.add(middle as usize).read() } <= bucket {
+            if keys[middle as usize] <= bucket {
                 first = middle + 1;
                 len -= step + 1;
             } else {
                 len = step;
             }
         }
-        unsafe {
-            bounds.write(lower);
-            bounds.add(1).write(first);
-        }
+        *unsafe { bounds.get_unchecked_mut(0) } = lower;
+        *unsafe { bounds.get_unchecked_mut(1) } = first;
     }
 }
 
@@ -56,7 +59,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let module = kernels::load(&context)?;
     let mut bucket_indices = DeviceBuffer::<u32>::zeroed(&stream, COUNT)?;
     let mut point_ids = DeviceBuffer::<u32>::zeroed(&stream, COUNT)?;
-    let bounds = DeviceBuffer::<u64>::zeroed(&stream, 2)?;
+    let mut bounds = DeviceBuffer::<u64>::zeroed(&stream, 2)?;
 
     // The low-entropy generator assigns every device-resident point id to one
     // of sixteen buckets; no point or bucket array is constructed on the CPU.
@@ -64,7 +67,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     support.fill_iota_u32(&stream, &mut point_ids)?;
     rccl::stable_sort_by_key(&exec, &mut bucket_indices, &mut point_ids)?;
     assert_eq!(
-        support.validate_stable_u32_pairs(&stream, &bucket_indices, &point_ids, rccl::Less,)?,
+        support.validate_stable_u32_pairs(&stream, &bucket_indices, &point_ids, u32::cmp)?,
         0
     );
     unsafe {
@@ -75,10 +78,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 block_dim: (1, 1, 1),
                 shared_mem_bytes: 0,
             },
-            bucket_indices.cu_deviceptr() as *const u32,
+            &bucket_indices,
             COUNT as u64,
             7,
-            bounds.cu_deviceptr() as *mut u64,
+            &mut bounds,
         )?;
     }
     let bounds = bounds.to_host_vec(&stream)?;

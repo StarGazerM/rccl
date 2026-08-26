@@ -16,7 +16,7 @@ mod warp_merge_sort;
 
 #[doc(hidden)]
 pub use context::{KernelContext, KernelContextError};
-pub use device::{BFloat16, DeviceBool, DeviceComparator, F16, Greater, Less};
+pub use device::{BFloat16, DeviceBool, F16};
 pub use warp_merge_sort::{
     WarpMergeSort, WarpMergeSortConfig, WarpMergeSortTempStorage,
     warp_merge_sort_temp_storage_align, warp_merge_sort_temp_storage_bytes,

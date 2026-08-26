@@ -43,12 +43,13 @@ explicit names:
 | `StableSort(keys, comp, valid)` | `stable_sort_partial_without_sentinel(keys, comp, valid)` |
 | the six key/value overloads | the corresponding `*_pairs*` methods |
 
-`DeviceComparator<K>` remains a value trait independent of geometry. It can be
-zero-sized or carry scalar/device-pointer state and is monomorphized into the
-calling kernel. `WarpMergeSortConfig` exposes only specialization facts:
+Ordering is an ordinary `Copy + 'static` `Fn(&K, &K) -> Ordering`. The closure
+can be zero-sized or carry scalar state and is monomorphized into the calling
+kernel; RCCL defines no callable compatibility trait. `WarpMergeSortConfig`
+exposes only specialization facts:
 key/value types, items per thread, logical warp size, tile size, and exact
 temporary-storage size/alignment. This separation avoids making users
-implement cuda-oxide policy traits and avoids conflating a runtime comparator
+implement cuda-oxide policy traits and avoids conflating a runtime ordering
 value with a compile-time tile policy.
 
 The storage token encodes key type, value type, items per thread, and logical

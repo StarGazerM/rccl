@@ -21,34 +21,24 @@ const ITEMS_PER_WARP: usize = LOGICAL_WARP_THREADS * ITEMS_PER_THREAD;
 mod kernels {
     use super::*;
     use cuda_device::{
+        DisjointSlice,
         atomic::{AtomicOrdering, DeviceAtomicU32},
         kernel, thread,
     };
     use rccl::cub::WarpMergeSort;
 
-    #[derive(Clone, Copy)]
-    struct I32Less;
-
-    unsafe impl rccl::DeviceComparator<i32> for I32Less {
-        unsafe fn less(&self, left: &i32, right: &i32) -> bool {
-            left < right
-        }
-    }
-
     #[kernel]
-    pub unsafe fn fill(data: *mut i32, count: u32) {
+    pub unsafe fn fill(mut data: DisjointSlice<i32>, count: u32) {
         let index = thread::index_1d().get() as u32;
         if index < count {
             let within_warp = index as usize % ITEMS_PER_WARP;
-            unsafe {
-                data.add(index as usize)
-                    .write((ITEMS_PER_WARP - 1 - within_warp) as i32)
-            };
+            *unsafe { data.get_unchecked_mut(index as usize) } =
+                (ITEMS_PER_WARP - 1 - within_warp) as i32;
         }
     }
 
     #[kernel]
-    pub unsafe fn example(data: *mut i32) {
+    pub unsafe fn example(mut data: DisjointSlice<i32>) {
         let thread_id = thread::threadIdx_x() as usize;
         let warp_id = thread_id / LOGICAL_WARP_THREADS;
         let linear_tid = thread_id % LOGICAL_WARP_THREADS;
@@ -68,30 +58,31 @@ mod kernels {
         let warp_sort = WarpMergeSort::<i32, ITEMS_PER_THREAD, LOGICAL_WARP_THREADS>::new(storage);
 
         let thread_offset = warp_id * ITEMS_PER_WARP + linear_tid * ITEMS_PER_THREAD;
-        let mut keys = [unsafe { data.add(thread_offset).read() }; ITEMS_PER_THREAD];
+        let mut keys = [*unsafe { data.get_unchecked_mut(thread_offset) }; ITEMS_PER_THREAD];
         let mut item = 0usize;
         while item < ITEMS_PER_THREAD {
-            keys[item] = unsafe { data.add(thread_offset + item).read() };
+            keys[item] = *unsafe { data.get_unchecked_mut(thread_offset + item) };
             item += 1;
         }
 
-        unsafe { warp_sort.sort(&mut keys, I32Less) };
+        unsafe { warp_sort.sort(&mut keys, i32::cmp) };
 
         let mut item = 0usize;
         while item < ITEMS_PER_THREAD {
-            unsafe { data.add(thread_offset + item).write(keys[item]) };
+            *unsafe { data.get_unchecked_mut(thread_offset + item) } = keys[item];
             item += 1;
         }
     }
 
     #[kernel]
-    pub unsafe fn validate(data: *const i32, count: u32, errors: *mut u32) {
+    pub unsafe fn validate(data: &[i32], count: u32, mut errors: DisjointSlice<u32>) {
         let index = thread::index_1d().get() as u32;
         if index < count && !(index as usize).is_multiple_of(ITEMS_PER_WARP) {
-            let previous = unsafe { data.add(index as usize - 1).read() };
-            let current = unsafe { data.add(index as usize).read() };
+            let previous = data[index as usize - 1];
+            let current = data[index as usize];
             if previous > current {
-                unsafe { DeviceAtomicU32::from_ptr(errors) }.fetch_add(1, AtomicOrdering::Relaxed);
+                unsafe { DeviceAtomicU32::from_ptr(errors.as_mut_ptr()) }
+                    .fetch_add(1, AtomicOrdering::Relaxed);
             }
         }
     }
@@ -102,14 +93,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     let stream = context.default_stream();
     let module = kernels::load(&context)?;
     let count = THREADS_PER_BLOCK * ITEMS_PER_THREAD;
-    let data = DeviceBuffer::<i32>::zeroed(&stream, count)?;
-    let errors = DeviceBuffer::<u32>::zeroed(&stream, 1)?;
+    let mut data = DeviceBuffer::<i32>::zeroed(&stream, count)?;
+    let mut errors = DeviceBuffer::<u32>::zeroed(&stream, 1)?;
 
     unsafe {
         module.fill(
             &stream,
             LaunchConfig::for_num_elems(count as u32),
-            data.cu_deviceptr() as *mut i32,
+            &mut data,
             count as u32,
         )?;
         module.example(
@@ -119,14 +110,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                 block_dim: (THREADS_PER_BLOCK as u32, 1, 1),
                 shared_mem_bytes: 0,
             },
-            data.cu_deviceptr() as *mut i32,
+            &mut data,
         )?;
         module.validate(
             &stream,
             LaunchConfig::for_num_elems(count as u32),
-            data.cu_deviceptr() as *const i32,
+            &data,
             count as u32,
-            errors.cu_deviceptr() as *mut u32,
+            &mut errors,
         )?;
     }
     assert_eq!(errors.to_host_vec(&stream)?[0], 0);

@@ -1,50 +1,115 @@
-//! Device-callable scalar and comparator vocabulary owned by the CUB layer.
+//! Device-callable scalar vocabulary owned by the CUB layer.
 
 use cuda_core::DeviceCopy;
 
-/// A typed, state-carrying comparator compiled into RCCL kernels.
+/// Private typed CUDA ABI view for a contiguous read-only device range.
 ///
-/// # Safety
-///
-/// `less` must be GPU-callable and define a strict weak ordering. The value
-/// must have the same bit-valid representation on host and device and must not
-/// contain host references. Captured device addresses must remain live until
-/// the operation completes.
-pub unsafe trait DeviceComparator<K: DeviceCopy>: Copy + 'static {
-    /// Return whether `left` precedes `right`.
-    ///
-    /// # Safety
-    ///
-    /// This method executes in device code. Implementations must uphold the
-    /// trait-level representation, lifetime, and strict-weak-order contract.
-    unsafe fn less(&self, left: &K, right: &K) -> bool;
+/// This is intentionally a device-side scalar rather than a public host
+/// capability. Host code may construct it only inside an unsafe enqueue
+/// boundary whose caller retains the real allocation borrow until completion.
+#[repr(C)]
+pub(crate) struct DeviceRange<T> {
+    pointer: *const T,
+    len: u64,
 }
 
-/// Canonical ascending comparator.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Less;
+impl<T> Copy for DeviceRange<T> {}
 
-unsafe impl<K> DeviceComparator<K> for Less
-where
-    K: DeviceCopy + PartialOrd + 'static,
-{
-    #[inline(always)]
-    unsafe fn less(&self, left: &K, right: &K) -> bool {
-        left < right
+impl<T> Clone for DeviceRange<T> {
+    fn clone(&self) -> Self {
+        *self
     }
 }
 
-/// Canonical descending comparator.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Greater;
+unsafe impl<T> DeviceCopy for DeviceRange<T> {}
 
-unsafe impl<K> DeviceComparator<K> for Greater
-where
-    K: DeviceCopy + PartialOrd + 'static,
-{
+impl<T> DeviceRange<T> {
+    /// # Safety
+    ///
+    /// `pointer` must cover `len` initialized device values for the complete
+    /// kernel operation that receives this private ABI value.
+    pub(crate) const unsafe fn from_raw_parts(pointer: *const T, len: usize) -> Self {
+        Self {
+            pointer,
+            len: len as u64,
+        }
+    }
+
+    pub(crate) const fn as_ptr(self) -> *const T {
+        self.pointer
+    }
+
+    /// # Safety
+    ///
+    /// `index` must be less than `len()`.
     #[inline(always)]
-    unsafe fn less(&self, left: &K, right: &K) -> bool {
-        left > right
+    pub(crate) unsafe fn read(self, index: u64) -> T {
+        unsafe { self.pointer.add(index as usize).read() }
+    }
+}
+
+/// Private typed CUDA ABI view for a contiguous writable device range.
+#[repr(C)]
+pub(crate) struct DeviceRangeMut<T> {
+    pointer: *mut T,
+    len: u64,
+}
+
+impl<T> Copy for DeviceRangeMut<T> {}
+
+impl<T> Clone for DeviceRangeMut<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+unsafe impl<T> DeviceCopy for DeviceRangeMut<T> {}
+
+impl<T> DeviceRangeMut<T> {
+    pub(crate) const fn empty() -> Self {
+        Self {
+            pointer: core::ptr::null_mut(),
+            len: 0,
+        }
+    }
+
+    /// # Safety
+    ///
+    /// `pointer` must cover `len` device values with exclusive write authority
+    /// for the complete kernel operation that receives this ABI value.
+    pub(crate) const unsafe fn from_raw_parts(pointer: *mut T, len: usize) -> Self {
+        Self {
+            pointer,
+            len: len as u64,
+        }
+    }
+
+    pub(crate) const fn len(self) -> u64 {
+        self.len
+    }
+
+    pub(crate) const fn as_mut_ptr(self) -> *mut T {
+        self.pointer
+    }
+
+    pub(crate) const fn as_read_only(self) -> DeviceRange<T> {
+        DeviceRange {
+            pointer: self.pointer,
+            len: self.len,
+        }
+    }
+
+    pub(crate) fn same_start(self, other: Self) -> bool {
+        self.pointer == other.pointer
+    }
+
+    /// # Safety
+    ///
+    /// `index` must be less than `len()` and no other thread may access that
+    /// element incompatibly during this operation.
+    #[inline(always)]
+    pub(crate) unsafe fn write(self, index: u64, value: T) {
+        unsafe { self.pointer.add(index as usize).write(value) };
     }
 }
 

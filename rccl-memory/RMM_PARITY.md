@@ -19,7 +19,7 @@ machines without a CUDA device can still run `cargo test`.
 | `cuda_memory_resource` | `CudaMemoryResource` | implemented | allocation, zero-byte, alignment, wrong-context tests |
 | `managed_memory_resource` | `ManagedMemoryResource` | implemented | host/device visibility and teardown tests |
 | `cuda_async_memory_resource` | `CudaAsyncMemoryResource` | implemented | same/cross-stream reuse tests |
-| `cuda_async_view_memory_resource` | `CudaPoolViewMemoryResource` | implemented | shared-handle identity, source lifetime, and allocation tests |
+| `cuda_async_view_memory_resource` | `CudaPoolViewMemoryResource<'pool>` | implemented | borrowed-handle identity, source lifetime, and allocation tests |
 | `cuda_async_managed_memory_resource` | none | missing | managed native-pool tests |
 | `cuda_memory_resource` with fabric | none | missing | fabric handle tests on supported hardware |
 | CUDA private pool | `CudaPoolMemoryResource` | implemented | configuration, stats, trim, max-size tests |
@@ -46,12 +46,12 @@ machines without a CUDA device can still run `cargo test`.
 
 | RMM container contract | Rust status |
 | --- | --- |
-| `device_buffer` byte ownership, copy/move, reserve, resize, shrink | typed `DeviceBuffer<T, A>` stores its allocator handle and has deep copy and capacity operations; byte-erased facade missing |
+| `device_buffer` byte ownership, copy/move, reserve, resize, shrink | typed `DeviceBuffer<'stream, T, A>` borrows its stream, stores its allocator handle, and has deep copy and capacity operations; byte-erased facade missing |
 | allocator lifetime and dispatch | `A`, `&'pool A`, `Rc<A>`, and `Arc<A>` handles use static dispatch; compile-fail coverage prevents a borrowed pool from being destroyed first |
-| `device_uvector<T>` uninitialized typed vector | implemented as `DeviceUVector<T, A>`; broader parity tests pending |
-| `device_scalar<T>` set/get and stream ordering | implemented as `DeviceScalar<T, A>`; broader parity tests pending |
+| `device_uvector<T>` uninitialized typed vector | implemented as `DeviceUVector<'stream, T, A>`; broader parity tests pending |
+| `device_scalar<T>` set/get and stream ordering | implemented as `DeviceScalar<'stream, T, A>`; broader parity tests pending |
 | destruction after active-device change | context is retained; automated multi-device coverage missing |
-| explicit stream transitions | implemented by `DeviceBuffer::transition_to` |
+| explicit stream transitions | intentionally replaced by compile-time fixed stream affinity; cross-stream use is rejected instead of mutating buffer state |
 | RCCL/CCCL zero-copy input traits | `DeviceSlice` and `DeviceSliceMut` implemented; broader CCCL traits pending |
 
 ## Test gates

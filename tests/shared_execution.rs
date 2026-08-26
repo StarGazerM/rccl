@@ -22,11 +22,17 @@ fn sort_and_merge_share_the_thrust_execution_type() {
     {
     }
 
+    type Buffer<'stream> =
+        rccl::memory::DeviceBuffer<'stream, u32, rccl::memory::CudaAsyncMemoryResource>;
+    fn instantiate<'stream>(_: core::marker::PhantomData<&'stream ()>) {
+        let _ = one_execution_compiles_for_sort_and_merge::<
+            rccl::memory::CudaAsyncMemoryResource,
+            Buffer<'stream>,
+            Buffer<'stream>,
+            Buffer<'stream>,
+        >;
+    }
+
     let _ = accepts::<rccl::memory::CudaAsyncMemoryResource>;
-    let _ = one_execution_compiles_for_sort_and_merge::<
-        rccl::memory::CudaAsyncMemoryResource,
-        rccl::memory::DeviceBuffer<u32, rccl::memory::CudaAsyncMemoryResource>,
-        rccl::memory::DeviceBuffer<u32, rccl::memory::CudaAsyncMemoryResource>,
-        rccl::memory::DeviceBuffer<u32, rccl::memory::CudaAsyncMemoryResource>,
-    >;
+    let _ = instantiate;
 }

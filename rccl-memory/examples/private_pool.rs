@@ -15,7 +15,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let tracked = TrackingMemoryResource::new(&pool);
 
     let input = [3u32, 1, 4, 1, 5, 9];
-    let buffer = DeviceBuffer::from_host_in(&tracked, stream.clone(), &input)?;
+    let buffer = DeviceBuffer::from_host_in(&tracked, &stream, &input)?;
     assert_eq!(buffer.to_host_vec()?, input);
     drop(buffer);
     stream.synchronize()?;

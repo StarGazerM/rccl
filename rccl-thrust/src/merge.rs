@@ -2,7 +2,6 @@
 
 use crate::cuda::{Execution, finish_synchronous};
 use cuda_core::DeviceCopy;
-use rccl_cub::DeviceComparator;
 use rccl_cub::dispatch::{
     merge::{self as cub_merge, MergeError},
     schedule::{
@@ -48,16 +47,16 @@ where
     finish_synchronous(exec.stream(), operation)
 }
 
-/// Stably merge two device ranges using a state-carrying comparator.
+/// Stably merge two device ranges using a ordering closure.
 pub fn merge_by<C, K, A1, A2, O, A>(
     exec: &Execution<'_, A>,
     first: &A1,
     second: &A2,
     output: &mut O,
-    comparator: C,
+    order: C,
 ) -> Result<usize, MergeError>
 where
-    C: DeviceComparator<K>,
+    C: Fn(&K, &K) -> std::cmp::Ordering + Copy + 'static,
     K: DeviceCopy + 'static,
     A1: DeviceSlice<K> + ?Sized,
     A2: DeviceSlice<K> + ?Sized,
@@ -83,7 +82,7 @@ where
             first,
             second,
             output,
-            comparator,
+            order,
         )
     };
     finish_synchronous(exec.stream(), operation)
@@ -140,7 +139,7 @@ where
     finish_synchronous(exec.stream(), operation)
 }
 
-/// Stably merge two key/value device ranges using a state-carrying comparator.
+/// Stably merge two key/value device ranges using a ordering closure.
 #[expect(
     clippy::too_many_arguments,
     reason = "key-value merge keeps four independently borrowed input ranges explicit"
@@ -153,10 +152,10 @@ pub fn merge_by_key_with<C, K, V, K1, V1, K2, V2, KO, VO, A>(
     second_values: &V2,
     output_keys: &mut KO,
     output_values: &mut VO,
-    comparator: C,
+    order: C,
 ) -> Result<(usize, usize), MergeError>
 where
-    C: DeviceComparator<K>,
+    C: Fn(&K, &K) -> std::cmp::Ordering + Copy + 'static,
     K: DeviceCopy + 'static,
     V: DeviceCopy + 'static,
     K1: DeviceSlice<K> + ?Sized,
@@ -193,7 +192,7 @@ where
             second_values,
             output_keys,
             output_values,
-            comparator,
+            order,
         )
     };
     finish_synchronous(exec.stream(), operation)

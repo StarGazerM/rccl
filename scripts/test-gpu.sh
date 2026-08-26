@@ -178,6 +178,18 @@ if rg -n "$forbidden_sort_api" "${sort_consumers[@]}"; then
   exit 1
 fi
 
+if rg -n '\b(DeviceComparator|KernelComparator|RawDeviceComparator|TypedComparator)\b|\bcomparator\b|struct (Less|Greater)\b' \
+  --glob '*.rs' rccl-cub rccl-thrust src tests examples; then
+  printf '%s\n' 'a removed comparator abstraction or compatibility marker survived' >&2
+  exit 1
+fi
+
+if rg -n 'Arc<CudaStream>|&Arc<CudaStream>|Arc<CudaEvent>|Arc<CudaPoolMemoryResource>' --glob '*.rs' \
+  rccl-cub rccl-memory rccl-thrust src tests examples; then
+  printf '%s\n' 'streams, pool events, and CUDA pool views must use direct ownership or borrows rather than Arc' >&2
+  exit 1
+fi
+
 forbidden_sort_lowering='struct CompiledSortSchedule|struct U32RadixKernelSet|struct PolicyConfig|enum SortOrder|descending: bool|fn __radix_config\(|const __RADIX_CONFIG|const __MERGE_BLOCK_THREADS|FA: Fn|FD: Fn|\.compute_capability\(\)'
 if rg -n "$forbidden_sort_lowering" rccl-cub/src/radix.rs rccl-thrust/src/algorithm.rs rccl-cub/build.rs; then
   printf '%s\n' 'sort lowering retained a descriptor, runtime architecture selector, or runtime order' >&2

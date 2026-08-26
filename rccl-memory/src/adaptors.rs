@@ -211,7 +211,7 @@ impl<U: DeviceAllocator> PrefetchMemoryResource<U> {
         self.concurrent_managed_access
     }
 
-    fn prefetch(&self, block: DeviceBlock, stream: &CudaStream) -> Result<(), MemoryError> {
+    fn prefetch(&self, block: &DeviceBlock, stream: &CudaStream) -> Result<(), MemoryError> {
         if block.size() == 0
             || !self.concurrent_managed_access
             || !self.upstream.properties().prefetchable
@@ -247,7 +247,7 @@ unsafe impl<U: DeviceAllocator> DeviceAllocator for PrefetchMemoryResource<U> {
 
     fn allocate(&self, layout: Layout, stream: &CudaStream) -> Result<DeviceBlock, MemoryError> {
         let block = self.upstream.allocate(layout, stream)?;
-        if let Err(error) = self.prefetch(block, stream) {
+        if let Err(error) = self.prefetch(&block, stream) {
             let _ = unsafe { self.upstream.deallocate(block, stream) };
             return Err(error);
         }
@@ -338,7 +338,7 @@ impl<U: DeviceAllocator, W: Write> LoggingMemoryResource<U, W> {
         Ok(())
     }
 
-    fn log(&self, action: &str, block: DeviceBlock, stream: &CudaStream) {
+    fn log(&self, action: &str, block: &DeviceBlock, stream: &CudaStream) {
         let micros = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -394,13 +394,13 @@ unsafe impl<U: DeviceAllocator, W: Write> DeviceAllocator for LoggingMemoryResou
     fn allocate(&self, layout: Layout, stream: &CudaStream) -> Result<DeviceBlock, MemoryError> {
         match self.upstream.allocate(layout, stream) {
             Ok(block) => {
-                self.log("allocate", block, stream);
+                self.log("allocate", &block, stream);
                 Ok(block)
             }
             Err(error) => {
                 let failed =
                     unsafe { DeviceBlock::from_raw_parts(0, layout.size(), layout.align()) };
-                self.log("allocate failure", failed, stream);
+                self.log("allocate failure", &failed, stream);
                 Err(error)
             }
         }
@@ -411,12 +411,12 @@ unsafe impl<U: DeviceAllocator, W: Write> DeviceAllocator for LoggingMemoryResou
         block: DeviceBlock,
         stream: &CudaStream,
     ) -> Result<(), MemoryError> {
-        self.log("free", block, stream);
+        self.log("free", &block, stream);
         unsafe { self.upstream.deallocate(block, stream) }
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
 struct AlignedAllocation {
     upstream: DeviceBlock,
     returned_size: usize,
@@ -524,16 +524,16 @@ unsafe impl<U: DeviceAllocator> DeviceAllocator for AlignedMemoryResource<U> {
             let _ = unsafe { self.upstream.deallocate(upstream_block, stream) };
             return Err(MemoryError::SizeOverflow);
         };
-        let allocation = AlignedAllocation {
-            upstream: upstream_block,
-            returned_size: layout.size(),
-        };
         let mut adjusted = self.adjusted.lock().expect("aligned resource poisoned");
         if adjusted.contains_key(&aligned_ptr) {
             drop(adjusted);
             let _ = unsafe { self.upstream.deallocate(upstream_block, stream) };
             return Err(MemoryError::UnknownAllocation { ptr: aligned_ptr });
         }
+        let allocation = AlignedAllocation {
+            upstream: upstream_block,
+            returned_size: layout.size(),
+        };
         adjusted.insert(aligned_ptr, allocation);
         Ok(unsafe { DeviceBlock::from_raw_parts(aligned_ptr, layout.size(), alignment) })
     }
@@ -550,22 +550,12 @@ unsafe impl<U: DeviceAllocator> DeviceAllocator for AlignedMemoryResource<U> {
             .remove(&block.cu_deviceptr());
         if let Some(allocation) = allocation {
             if allocation.returned_size != block.size() {
-                self.adjusted
-                    .lock()
-                    .expect("aligned resource poisoned")
-                    .insert(block.cu_deviceptr(), allocation);
                 return Err(MemoryError::AllocationSizeMismatch {
                     expected: allocation.returned_size,
                     actual: block.size(),
                 });
             }
-            if let Err(error) = unsafe { self.upstream.deallocate(allocation.upstream, stream) } {
-                self.adjusted
-                    .lock()
-                    .expect("aligned resource poisoned")
-                    .insert(block.cu_deviceptr(), allocation);
-                return Err(error);
-            }
+            unsafe { self.upstream.deallocate(allocation.upstream, stream)? };
             return Ok(());
         }
         unsafe { self.upstream.deallocate(block, stream) }
@@ -669,8 +659,9 @@ unsafe impl<U: DeviceAllocator> DeviceAllocator for LimitingMemoryResource<U> {
         block: DeviceBlock,
         stream: &CudaStream,
     ) -> Result<(), MemoryError> {
+        let size = block.size();
         unsafe { self.upstream.deallocate(block, stream)? };
-        self.allocated.fetch_sub(block.size(), Ordering::AcqRel);
+        self.allocated.fetch_sub(size, Ordering::AcqRel);
         Ok(())
     }
 }
@@ -851,13 +842,14 @@ unsafe impl<U: DeviceAllocator> DeviceAllocator for StatisticsMemoryResource<U> 
         block: DeviceBlock,
         stream: &CudaStream,
     ) -> Result<(), MemoryError> {
+        let size = block.size();
         unsafe { self.upstream.deallocate(block, stream)? };
         let mut counters = self.counters.lock().expect("statistics resource poisoned");
         let current = counters
             .last_mut()
             .expect("root counter scope always exists");
-        current.bytes.subtract(block.size());
-        if block.size() > 0 {
+        current.bytes.subtract(size);
+        if size > 0 {
             current.allocations.subtract(1);
         }
         Ok(())

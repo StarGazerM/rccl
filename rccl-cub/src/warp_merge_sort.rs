@@ -5,14 +5,13 @@
 //! arrays, then performs the same shared-memory Merge Path rounds as CUB's
 //! `WarpMergeSort`.
 
-use crate::DeviceComparator;
-use core::marker::PhantomData;
+use core::{cmp::Ordering, marker::PhantomData};
 use cuda_core::DeviceCopy;
 
 /// Compile-time description exposed by a [`WarpMergeSort`] specialization.
 ///
-/// Comparator behavior deliberately is not part of this trait: as in CUB, the
-/// comparator is a value supplied to each sort call, while tile geometry and
+/// Ordering behavior deliberately is not part of this trait: the closure is
+/// supplied to each sort call, while tile geometry and
 /// temporary-storage layout belong to the specialization.
 pub trait WarpMergeSortConfig {
     type Key: DeviceCopy;
@@ -137,12 +136,12 @@ where
     unsafe fn sort_impl<C, const PAIRS: bool, const CLAMPED: bool, const HAS_OOB: bool>(
         &self,
         keys: &mut [K; ITEMS_PER_THREAD],
-        values: *mut V,
-        comparator: C,
+        values: &mut [V; ITEMS_PER_THREAD],
+        order: C,
         valid_items: u32,
         oob_default: K,
     ) where
-        C: DeviceComparator<K>,
+        C: Fn(&K, &K) -> Ordering + Copy + 'static,
     {
         let tile_items = (ITEMS_PER_THREAD * LOGICAL_WARP_THREADS) as u32;
         let valid_items = valid_items.min(tile_items);
@@ -151,13 +150,13 @@ where
             let thread_begin = self.linear_tid * ITEMS_PER_THREAD as u32;
             if thread_begin < valid_items {
                 let mut maximum = keys[0];
-                if HAS_OOB && unsafe { comparator.less(&maximum, &oob_default) } {
+                if HAS_OOB && order(&maximum, &oob_default).is_lt() {
                     maximum = oob_default;
                 }
                 let mut item = 1usize;
                 while item < ITEMS_PER_THREAD {
                     if thread_begin + (item as u32) < valid_items {
-                        if unsafe { comparator.less(&maximum, &keys[item]) } {
+                        if order(&maximum, &keys[item]).is_lt() {
                             maximum = keys[item];
                         }
                     } else {
@@ -165,30 +164,24 @@ where
                     }
                     item += 1;
                 }
-                unsafe {
-                    stable_odd_even_sort::<K, V, C, ITEMS_PER_THREAD, PAIRS>(
-                        keys, values, comparator,
-                    )
-                };
+                stable_odd_even_sort::<K, V, C, ITEMS_PER_THREAD, PAIRS>(keys, values, order);
             }
         } else {
-            unsafe {
-                stable_odd_even_sort::<K, V, C, ITEMS_PER_THREAD, PAIRS>(keys, values, comparator)
-            };
+            stable_odd_even_sort::<K, V, C, ITEMS_PER_THREAD, PAIRS>(keys, values, order);
         }
 
-        unsafe { self.merge_rounds::<C, PAIRS, CLAMPED>(keys, values, comparator, valid_items) };
+        unsafe { self.merge_rounds::<C, PAIRS, CLAMPED>(keys, values, order, valid_items) };
     }
 
     #[inline(always)]
     unsafe fn merge_rounds<C, const PAIRS: bool, const CLAMPED: bool>(
         &self,
         keys: &mut [K; ITEMS_PER_THREAD],
-        values: *mut V,
-        comparator: C,
+        values: &mut [V; ITEMS_PER_THREAD],
+        order: C,
         valid_items: u32,
     ) where
-        C: DeviceComparator<K>,
+        C: Fn(&K, &K) -> Ordering + Copy + 'static,
     {
         let keys_shared = self.storage as *mut K;
         let mut target_threads = 2u32;
@@ -251,7 +244,7 @@ where
                     keys1_count,
                     keys2_count,
                     diagonal,
-                    comparator,
+                    order,
                 )
             };
             let keys1_local = keys1_begin + partition;
@@ -266,7 +259,7 @@ where
                     keys2_end - keys2_local,
                     keys,
                     &mut indices,
-                    comparator,
+                    order,
                 )
             };
 
@@ -281,18 +274,15 @@ where
                                 (ITEMS_PER_THREAD as u32 * self.linear_tid + value_item as u32)
                                     as usize,
                             )
-                            .write(values.add(value_item).read())
+                            .write(values[value_item])
                     };
                     value_item += 1;
                 }
                 cuda_device::warp::sync_mask(self.member_mask);
                 let mut output_item = 0usize;
                 while output_item < ITEMS_PER_THREAD {
-                    unsafe {
-                        values
-                            .add(output_item)
-                            .write(items_shared.add(indices[output_item] as usize).read())
-                    };
+                    values[output_item] =
+                        unsafe { items_shared.add(indices[output_item] as usize).read() };
                     output_item += 1;
                 }
             }
@@ -331,17 +321,18 @@ where
     /// # Safety
     ///
     /// Every lane in the logical warp must call this operation convergently
-    /// with storage assigned to that warp and the same comparator state.
+    /// with storage assigned to that warp and the same order state.
     #[inline(always)]
-    pub unsafe fn sort<C>(&self, keys: &mut [K; ITEMS_PER_THREAD], comparator: C)
+    pub unsafe fn sort<C>(&self, keys: &mut [K; ITEMS_PER_THREAD], order: C)
     where
-        C: DeviceComparator<K>,
+        C: Fn(&K, &K) -> Ordering + Copy + 'static,
     {
+        let mut no_values = [(); ITEMS_PER_THREAD];
         unsafe {
             self.sort_impl::<C, false, false, false>(
                 keys,
-                core::ptr::null_mut(),
-                comparator,
+                &mut no_values,
+                order,
                 (ITEMS_PER_THREAD * LOGICAL_WARP_THREADS) as u32,
                 keys[0],
             )
@@ -353,13 +344,13 @@ where
     /// # Safety
     ///
     /// Every lane in the logical warp must call this operation convergently
-    /// with storage assigned to that warp and the same comparator state.
+    /// with storage assigned to that warp and the same order state.
     #[inline(always)]
-    pub unsafe fn stable_sort<C>(&self, keys: &mut [K; ITEMS_PER_THREAD], comparator: C)
+    pub unsafe fn stable_sort<C>(&self, keys: &mut [K; ITEMS_PER_THREAD], order: C)
     where
-        C: DeviceComparator<K>,
+        C: Fn(&K, &K) -> Ordering + Copy + 'static,
     {
-        unsafe { self.sort(keys, comparator) };
+        unsafe { self.sort(keys, order) };
     }
 
     /// Sort the valid tile prefix with an out-of-bounds default, matching the
@@ -368,24 +359,25 @@ where
     ///
     /// # Safety
     ///
-    /// Every lane must call convergently with the same comparator,
+    /// Every lane must call convergently with the same order,
     /// `valid_items`, and sentinel. `valid_items` must not exceed the tile size,
     /// and the temporary storage must belong to this logical warp.
     #[inline(always)]
     pub unsafe fn sort_partial<C>(
         &self,
         keys: &mut [K; ITEMS_PER_THREAD],
-        comparator: C,
+        order: C,
         valid_items: u32,
         oob_default: K,
     ) where
-        C: DeviceComparator<K>,
+        C: Fn(&K, &K) -> Ordering + Copy + 'static,
     {
+        let mut no_values = [(); ITEMS_PER_THREAD];
         unsafe {
             self.sort_impl::<C, false, true, true>(
                 keys,
-                core::ptr::null_mut(),
-                comparator,
+                &mut no_values,
+                order,
                 valid_items,
                 oob_default,
             )
@@ -396,20 +388,20 @@ where
     ///
     /// # Safety
     ///
-    /// Every lane must call convergently with the same comparator,
+    /// Every lane must call convergently with the same order,
     /// `valid_items`, and sentinel. `valid_items` must not exceed the tile size,
     /// and the temporary storage must belong to this logical warp.
     #[inline(always)]
     pub unsafe fn stable_sort_partial<C>(
         &self,
         keys: &mut [K; ITEMS_PER_THREAD],
-        comparator: C,
+        order: C,
         valid_items: u32,
         oob_default: K,
     ) where
-        C: DeviceComparator<K>,
+        C: Fn(&K, &K) -> Ordering + Copy + 'static,
     {
-        unsafe { self.sort_partial(keys, comparator, valid_items, oob_default) };
+        unsafe { self.sort_partial(keys, order, valid_items, oob_default) };
     }
 
     /// Sort a valid prefix without requiring a sentinel. This maps to the CUB
@@ -417,23 +409,24 @@ where
     ///
     /// # Safety
     ///
-    /// Every lane must call convergently with the same comparator and
+    /// Every lane must call convergently with the same order and
     /// `valid_items`. `valid_items` must not exceed the tile size, and the
     /// temporary storage must belong to this logical warp.
     #[inline(always)]
     pub unsafe fn sort_partial_without_sentinel<C>(
         &self,
         keys: &mut [K; ITEMS_PER_THREAD],
-        comparator: C,
+        order: C,
         valid_items: u32,
     ) where
-        C: DeviceComparator<K>,
+        C: Fn(&K, &K) -> Ordering + Copy + 'static,
     {
+        let mut no_values = [(); ITEMS_PER_THREAD];
         unsafe {
             self.sort_impl::<C, false, true, false>(
                 keys,
-                core::ptr::null_mut(),
-                comparator,
+                &mut no_values,
+                order,
                 valid_items,
                 keys[0],
             )
@@ -444,19 +437,19 @@ where
     ///
     /// # Safety
     ///
-    /// Every lane must call convergently with the same comparator and
+    /// Every lane must call convergently with the same order and
     /// `valid_items`. `valid_items` must not exceed the tile size, and the
     /// temporary storage must belong to this logical warp.
     #[inline(always)]
     pub unsafe fn stable_sort_partial_without_sentinel<C>(
         &self,
         keys: &mut [K; ITEMS_PER_THREAD],
-        comparator: C,
+        order: C,
         valid_items: u32,
     ) where
-        C: DeviceComparator<K>,
+        C: Fn(&K, &K) -> Ordering + Copy + 'static,
     {
-        unsafe { self.sort_partial_without_sentinel(keys, comparator, valid_items) };
+        unsafe { self.sort_partial_without_sentinel(keys, order, valid_items) };
     }
 }
 
@@ -471,21 +464,21 @@ where
     /// # Safety
     ///
     /// Every lane in the logical warp must call this operation convergently
-    /// with storage assigned to that warp and the same comparator state.
+    /// with storage assigned to that warp and the same order state.
     #[inline(always)]
     pub unsafe fn sort_pairs<C>(
         &self,
         keys: &mut [K; ITEMS_PER_THREAD],
         values: &mut [V; ITEMS_PER_THREAD],
-        comparator: C,
+        order: C,
     ) where
-        C: DeviceComparator<K>,
+        C: Fn(&K, &K) -> Ordering + Copy + 'static,
     {
         unsafe {
             self.sort_impl::<C, true, false, false>(
                 keys,
-                values.as_mut_ptr(),
-                comparator,
+                values,
+                order,
                 (ITEMS_PER_THREAD * LOGICAL_WARP_THREADS) as u32,
                 keys[0],
             )
@@ -497,24 +490,24 @@ where
     /// # Safety
     ///
     /// Every lane in the logical warp must call this operation convergently
-    /// with storage assigned to that warp and the same comparator state.
+    /// with storage assigned to that warp and the same order state.
     #[inline(always)]
     pub unsafe fn stable_sort_pairs<C>(
         &self,
         keys: &mut [K; ITEMS_PER_THREAD],
         values: &mut [V; ITEMS_PER_THREAD],
-        comparator: C,
+        order: C,
     ) where
-        C: DeviceComparator<K>,
+        C: Fn(&K, &K) -> Ordering + Copy + 'static,
     {
-        unsafe { self.sort_pairs(keys, values, comparator) };
+        unsafe { self.sort_pairs(keys, values, order) };
     }
 
     /// Sort the valid key/value prefix with an out-of-bounds key.
     ///
     /// # Safety
     ///
-    /// Every lane must call convergently with the same comparator,
+    /// Every lane must call convergently with the same order,
     /// `valid_items`, and sentinel. `valid_items` must not exceed the tile size,
     /// and the temporary storage must belong to this logical warp.
     #[inline(always)]
@@ -522,20 +515,14 @@ where
         &self,
         keys: &mut [K; ITEMS_PER_THREAD],
         values: &mut [V; ITEMS_PER_THREAD],
-        comparator: C,
+        order: C,
         valid_items: u32,
         oob_default: K,
     ) where
-        C: DeviceComparator<K>,
+        C: Fn(&K, &K) -> Ordering + Copy + 'static,
     {
         unsafe {
-            self.sort_impl::<C, true, true, true>(
-                keys,
-                values.as_mut_ptr(),
-                comparator,
-                valid_items,
-                oob_default,
-            )
+            self.sort_impl::<C, true, true, true>(keys, values, order, valid_items, oob_default)
         };
     }
 
@@ -543,7 +530,7 @@ where
     ///
     /// # Safety
     ///
-    /// Every lane must call convergently with the same comparator,
+    /// Every lane must call convergently with the same order,
     /// `valid_items`, and sentinel. `valid_items` must not exceed the tile size,
     /// and the temporary storage must belong to this logical warp.
     #[inline(always)]
@@ -551,20 +538,20 @@ where
         &self,
         keys: &mut [K; ITEMS_PER_THREAD],
         values: &mut [V; ITEMS_PER_THREAD],
-        comparator: C,
+        order: C,
         valid_items: u32,
         oob_default: K,
     ) where
-        C: DeviceComparator<K>,
+        C: Fn(&K, &K) -> Ordering + Copy + 'static,
     {
-        unsafe { self.sort_pairs_partial(keys, values, comparator, valid_items, oob_default) };
+        unsafe { self.sort_pairs_partial(keys, values, order, valid_items, oob_default) };
     }
 
     /// Sort a valid key/value prefix without requiring a sentinel.
     ///
     /// # Safety
     ///
-    /// Every lane must call convergently with the same comparator and
+    /// Every lane must call convergently with the same order and
     /// `valid_items`. `valid_items` must not exceed the tile size, and the
     /// temporary storage must belong to this logical warp.
     #[inline(always)]
@@ -572,19 +559,13 @@ where
         &self,
         keys: &mut [K; ITEMS_PER_THREAD],
         values: &mut [V; ITEMS_PER_THREAD],
-        comparator: C,
+        order: C,
         valid_items: u32,
     ) where
-        C: DeviceComparator<K>,
+        C: Fn(&K, &K) -> Ordering + Copy + 'static,
     {
         unsafe {
-            self.sort_impl::<C, true, true, false>(
-                keys,
-                values.as_mut_ptr(),
-                comparator,
-                valid_items,
-                keys[0],
-            )
+            self.sort_impl::<C, true, true, false>(keys, values, order, valid_items, keys[0])
         };
     }
 
@@ -592,7 +573,7 @@ where
     ///
     /// # Safety
     ///
-    /// Every lane must call convergently with the same comparator and
+    /// Every lane must call convergently with the same order and
     /// `valid_items`. `valid_items` must not exceed the tile size, and the
     /// temporary storage must belong to this logical warp.
     #[inline(always)]
@@ -600,33 +581,33 @@ where
         &self,
         keys: &mut [K; ITEMS_PER_THREAD],
         values: &mut [V; ITEMS_PER_THREAD],
-        comparator: C,
+        order: C,
         valid_items: u32,
     ) where
-        C: DeviceComparator<K>,
+        C: Fn(&K, &K) -> Ordering + Copy + 'static,
     {
-        unsafe { self.sort_pairs_partial_without_sentinel(keys, values, comparator, valid_items) };
+        unsafe { self.sort_pairs_partial_without_sentinel(keys, values, order, valid_items) };
     }
 }
 
 #[inline(always)]
-unsafe fn stable_odd_even_sort<K, V, C, const ITEMS_PER_THREAD: usize, const PAIRS: bool>(
+fn stable_odd_even_sort<K, V, C, const ITEMS_PER_THREAD: usize, const PAIRS: bool>(
     keys: &mut [K; ITEMS_PER_THREAD],
-    values: *mut V,
-    comparator: C,
+    values: &mut [V; ITEMS_PER_THREAD],
+    order: C,
 ) where
     K: DeviceCopy,
     V: DeviceCopy,
-    C: DeviceComparator<K>,
+    C: Fn(&K, &K) -> Ordering + Copy + 'static,
 {
     let mut pass = 0usize;
     while pass < ITEMS_PER_THREAD {
         let mut item = pass & 1;
         while item + 1 < ITEMS_PER_THREAD {
-            if unsafe { comparator.less(&keys[item + 1], &keys[item]) } {
+            if order(&keys[item + 1], &keys[item]).is_lt() {
                 keys.swap(item, item + 1);
                 if PAIRS {
-                    unsafe { core::ptr::swap(values.add(item), values.add(item + 1)) };
+                    values.swap(item, item + 1);
                 }
             }
             item += 2;
@@ -642,11 +623,11 @@ unsafe fn merge_path<K, C>(
     keys1_count: u32,
     keys2_count: u32,
     diagonal: u32,
-    comparator: C,
+    order: C,
 ) -> u32
 where
     K: DeviceCopy,
-    C: DeviceComparator<K>,
+    C: Fn(&K, &K) -> Ordering + Copy + 'static,
 {
     let mut begin = diagonal.saturating_sub(keys2_count);
     let mut end = diagonal.min(keys1_count);
@@ -654,7 +635,7 @@ where
         let middle = begin + (end - begin) / 2;
         let key1 = unsafe { keys1.add(middle as usize).read() };
         let key2 = unsafe { keys2.add((diagonal - 1 - middle) as usize).read() };
-        if unsafe { comparator.less(&key2, &key1) } {
+        if order(&key2, &key1).is_lt() {
             end = middle;
         } else {
             begin = middle + 1;
@@ -676,10 +657,10 @@ unsafe fn serial_merge<K, C, const ITEMS_PER_THREAD: usize>(
     keys2_count: u32,
     output: &mut [K; ITEMS_PER_THREAD],
     indices: &mut [u32; ITEMS_PER_THREAD],
-    comparator: C,
+    order: C,
 ) where
     K: DeviceCopy,
-    C: DeviceComparator<K>,
+    C: Fn(&K, &K) -> Ordering + Copy + 'static,
 {
     let keys1_end = keys1_begin + keys1_count;
     let keys2_end = keys2_begin + keys2_count;
@@ -696,8 +677,8 @@ unsafe fn serial_merge<K, C, const ITEMS_PER_THREAD: usize>(
 
     let mut item = 0usize;
     while item < ITEMS_PER_THREAD {
-        let take_second = keys2_begin < keys2_end
-            && (keys1_begin >= keys1_end || unsafe { comparator.less(&key2, &key1) });
+        let take_second =
+            keys2_begin < keys2_end && (keys1_begin >= keys1_end || order(&key2, &key1).is_lt());
         if take_second {
             output[item] = key2;
             indices[item] = keys2_begin;

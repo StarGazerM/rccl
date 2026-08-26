@@ -9,46 +9,44 @@ mod gpu_support;
 )]
 #[cuda_host::cuda_module]
 mod kernels {
-    use cuda_device::{kernel, thread};
+    use cuda_device::{DisjointSlice, kernel, thread};
 
     #[kernel]
     pub unsafe fn find_non_trivial_runs(
-        keys: *const u32,
+        keys: &[u32],
         count: u64,
-        offsets: *mut u64,
-        lengths: *mut u64,
-        run_count: *mut u64,
+        mut offsets: DisjointSlice<u64>,
+        mut lengths: DisjointSlice<u64>,
+        mut run_count: DisjointSlice<u64>,
     ) {
         if thread::index_1d().get() != 0 {
             return;
         }
         if count == 0 {
-            unsafe { run_count.write(0) };
+            *unsafe { run_count.get_unchecked_mut(0) } = 0;
             return;
         }
         let mut runs = 0u64;
         let mut begin = 0u64;
-        let mut previous = unsafe { keys.read() };
+        let mut previous = keys[0];
         let mut index = 1u64;
         while index <= count {
-            let boundary = index == count || unsafe { keys.add(index as usize).read() } != previous;
+            let boundary = index == count || keys[index as usize] != previous;
             if boundary {
                 let length = index - begin;
                 if length > 1 {
-                    unsafe {
-                        offsets.add(runs as usize).write(begin);
-                        lengths.add(runs as usize).write(length);
-                    }
+                    *unsafe { offsets.get_unchecked_mut(runs as usize) } = begin;
+                    *unsafe { lengths.get_unchecked_mut(runs as usize) } = length;
                     runs += 1;
                 }
                 if index != count {
                     begin = index;
-                    previous = unsafe { keys.add(index as usize).read() };
+                    previous = keys[index as usize];
                 }
             }
             index += 1;
         }
-        unsafe { run_count.write(runs) };
+        *unsafe { run_count.get_unchecked_mut(0) } = runs;
     }
 }
 
@@ -60,9 +58,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let exec = rccl::cuda::par(&stream)?;
     let module = kernels::load(&context)?;
     let mut keys = DeviceBuffer::<u32>::zeroed(&stream, COUNT)?;
-    let offsets = DeviceBuffer::<u64>::zeroed(&stream, COUNT)?;
-    let lengths = DeviceBuffer::<u64>::zeroed(&stream, COUNT)?;
-    let run_count = DeviceBuffer::<u64>::zeroed(&stream, 1)?;
+    let mut offsets = DeviceBuffer::<u64>::zeroed(&stream, COUNT)?;
+    let mut lengths = DeviceBuffer::<u64>::zeroed(&stream, COUNT)?;
+    let mut run_count = DeviceBuffer::<u64>::zeroed(&stream, 1)?;
     support.fill_low_entropy_u32(&stream, &mut keys, 0x4e4f_4e54_5256_5255)?;
     rccl::sort(&exec, &mut keys)?;
     unsafe {
@@ -73,11 +71,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                 block_dim: (1, 1, 1),
                 shared_mem_bytes: 0,
             },
-            keys.cu_deviceptr() as *const u32,
+            &keys,
             COUNT as u64,
-            offsets.cu_deviceptr() as *mut u64,
-            lengths.cu_deviceptr() as *mut u64,
-            run_count.cu_deviceptr() as *mut u64,
+            &mut offsets,
+            &mut lengths,
+            &mut run_count,
         )?;
     }
     let run_count = run_count.to_host_vec(&stream)?[0];

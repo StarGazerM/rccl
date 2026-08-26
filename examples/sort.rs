@@ -15,7 +15,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     support.fill_u32(&stream, &mut keys, 123_456)?;
     sort(&exec, &mut keys)?;
 
-    assert_eq!(support.validate_order(&stream, &keys, rccl::Less)?, 0);
+    assert_eq!(support.validate_order(&stream, &keys, u32::cmp)?, 0);
     println!("generic GPU sort example: PASS");
     Ok(())
 }

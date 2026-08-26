@@ -11,9 +11,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut records = DeviceBuffer::<gpu_support::I32Triple>::zeroed(&stream, 1_000_003)?;
 
     support.fill_i32_triples(&stream, &mut records, 0x4c45_5849_434f_4752)?;
-    rccl::stable_sort_by(&exec, &mut records, gpu_support::I32TripleLess)?;
+    rccl::stable_sort_by(&exec, &mut records, gpu_support::order_i32_triple)?;
     assert_eq!(
-        support.validate_order(&stream, &records, gpu_support::I32TripleLess)?,
+        support.validate_order(&stream, &records, gpu_support::order_i32_triple)?,
         0
     );
     println!("lexicographical record sort through the public facade: PASS");

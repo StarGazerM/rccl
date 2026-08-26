@@ -2,14 +2,15 @@
 
 use cuda_core::{CudaStream, DriverError, LaunchConfig};
 use rccl_memory::{
-    CudaAsyncMemoryResource, DeviceAllocator, DeviceBuffer as ResourceBuffer, DeviceSliceMut,
-    MemoryError,
+    CudaAsyncMemoryResource, DeviceAllocator, DeviceBuffer as ResourceBuffer, DeviceSlice,
+    DeviceSliceMut, MemoryError,
 };
-use std::{error::Error, fmt, sync::Arc};
+use std::{error::Error, fmt, marker::PhantomData, sync::Arc};
 
 #[doc(hidden)]
 pub mod sort_abi {
     use super::*;
+    use crate::device::{DeviceRange, DeviceRangeMut};
 
     const RADIX_BITS: u32 = 8;
     const RADIX_SIZE: usize = 1 << RADIX_BITS;
@@ -137,11 +138,14 @@ pub mod sort_abi {
         // host handle; a nongeneric helper here leaves that handle without a
         // corresponding embedded entry.
         #[kernel]
-        pub unsafe fn reset_words_u32<const BLOCK_THREADS: u32>(output: *mut u32, count: u32) {
+        pub unsafe fn reset_words_u32<const BLOCK_THREADS: u32>(
+            output: DeviceRangeMut<u32>,
+            count: u32,
+        ) {
             let _ = BLOCK_THREADS;
             let index = thread::index_1d().get() as u32;
             if index < count {
-                unsafe { output.add(index as usize).write(0) };
+                unsafe { output.write(index as u64, 0) };
             }
         }
 
@@ -155,8 +159,8 @@ pub mod sort_abi {
             const UNROLL: u32,
             const DESCENDING: bool,
         >(
-            input: *const u32,
-            histograms: *mut u32,
+            input: DeviceRange<u32>,
+            histograms: DeviceRangeMut<u32>,
             count: u32,
         ) {
             ::cuda_device::thread::__launch_bounds_config::<BLOCK_THREADS, MIN_BLOCKS_PER_SM>();
@@ -182,7 +186,7 @@ pub mod sort_abi {
                     let index = base + item * BLOCK_THREADS + tid;
                     let valid = index < count;
                     let key = if valid {
-                        unsafe { input.add(index as usize).read() }
+                        unsafe { input.read(index as u64) }
                     } else {
                         0
                     };
@@ -208,8 +212,9 @@ pub mod sort_abi {
             while slot < (RADIX_PASSES * RADIX_SIZE) as u32 {
                 let value = unsafe { shared.add(slot as usize).read() };
                 if value != 0 {
-                    let counter =
-                        unsafe { DeviceAtomicU32::from_ptr(histograms.add(slot as usize)) };
+                    let counter = unsafe {
+                        DeviceAtomicU32::from_ptr(histograms.as_mut_ptr().add(slot as usize))
+                    };
                     counter.fetch_add(value, AtomicOrdering::Relaxed);
                 }
                 slot += BLOCK_THREADS;
@@ -220,8 +225,8 @@ pub mod sort_abi {
         // helper on the selected block geometry so its entry is embedded.
         #[kernel]
         pub unsafe fn global_digit_bases<const BLOCK_THREADS: u32>(
-            histograms: *const u32,
-            bases: *mut u32,
+            histograms: DeviceRange<u32>,
+            bases: DeviceRangeMut<u32>,
         ) {
             let _ = BLOCK_THREADS;
             static mut SCAN_SHARED: SharedArray<u32, SCAN_WARPS> = SharedArray::UNINIT;
@@ -229,14 +234,10 @@ pub mod sort_abi {
             let pass = thread::blockIdx_x();
             let digit = thread::threadIdx_x();
             let index = pass * RADIX_SIZE as u32 + digit;
-            let count = unsafe { histograms.add(index as usize).read() };
+            let count = unsafe { histograms.read(index as u64) };
             let block = this_thread_block();
             let inclusive = block_scan::<u32, Sum, SCAN_WARPS>(&block, count, &raw mut SCAN_SHARED);
-            unsafe {
-                bases
-                    .add(index as usize)
-                    .write(inclusive.wrapping_sub(count))
-            };
+            unsafe { bases.write(index as u64, inclusive.wrapping_sub(count)) };
         }
 
         /// CUB-style stable block-rank scatter. A warp owns a contiguous input
@@ -253,11 +254,11 @@ pub mod sort_abi {
             const UNROLL: u32,
             const DESCENDING: bool,
         >(
-            input: *const u32,
-            output: *mut u32,
-            digit_bases: *const u32,
-            lookback: *mut u32,
-            tile_counter: *mut u32,
+            input: DeviceRange<u32>,
+            output: DeviceRangeMut<u32>,
+            digit_bases: DeviceRange<u32>,
+            lookback: DeviceRangeMut<u32>,
+            tile_counter: DeviceRangeMut<u32>,
             count: u32,
             shift: u32,
             num_blocks: u32,
@@ -279,7 +280,7 @@ pub mod sort_abi {
             );
             let block_index_shared = unsafe { global_offsets.add(RADIX_SIZE) };
             if tid == 0 {
-                let counter = unsafe { DeviceAtomicU32::from_ptr(tile_counter) };
+                let counter = unsafe { DeviceAtomicU32::from_ptr(tile_counter.as_mut_ptr()) };
                 let block = counter.fetch_add(1, AtomicOrdering::Relaxed);
                 unsafe { block_index_shared.write(block) };
             }
@@ -305,7 +306,7 @@ pub mod sort_abi {
                 let index = warp_base + item * 32 + lane;
                 let valid = index < count;
                 let key = if valid {
-                    unsafe { input.add(index as usize).read() }
+                    unsafe { input.read(index as u64) }
                 } else {
                     0
                 };
@@ -376,7 +377,9 @@ pub mod sort_abi {
             if has_bin {
                 let descriptor = unsafe {
                     DeviceAtomicU32::from_ptr(
-                        lookback.add((block * RADIX_SIZE as u32 + tid) as usize),
+                        lookback
+                            .as_mut_ptr()
+                            .add((block * RADIX_SIZE as u32 + tid) as usize),
                     )
                 };
                 descriptor.store(LOOKBACK_PARTIAL | local_count, AtomicOrdering::Release);
@@ -423,7 +426,9 @@ pub mod sort_abi {
                     loop {
                         let prior_descriptor = unsafe {
                             DeviceAtomicU32::from_ptr(
-                                lookback.add((prior_block * RADIX_SIZE as u32 + tid) as usize),
+                                lookback
+                                    .as_mut_ptr()
+                                    .add((prior_block * RADIX_SIZE as u32 + tid) as usize),
                             )
                         };
                         let mut value = prior_descriptor.load(AtomicOrdering::Acquire);
@@ -440,7 +445,9 @@ pub mod sort_abi {
 
                 let descriptor = unsafe {
                     DeviceAtomicU32::from_ptr(
-                        lookback.add((block * RADIX_SIZE as u32 + tid) as usize),
+                        lookback
+                            .as_mut_ptr()
+                            .add((block * RADIX_SIZE as u32 + tid) as usize),
                     )
                 };
                 descriptor.store(LOOKBACK_GLOBAL | inclusive_count, AtomicOrdering::Release);
@@ -448,8 +455,7 @@ pub mod sort_abi {
                 let prior_count = inclusive_count.wrapping_sub(local_count);
                 let global_offset = unsafe {
                     digit_bases
-                        .add((pass * RADIX_SIZE as u32 + tid) as usize)
-                        .read()
+                        .read((pass * RADIX_SIZE as u32 + tid) as u64)
                         .wrapping_add(prior_count)
                         .wrapping_sub(local_prefix)
                 };
@@ -470,7 +476,7 @@ pub mod sort_abi {
                             .read()
                             .wrapping_add(block_rank)
                     };
-                    unsafe { output.add(global_rank as usize).write(key) };
+                    unsafe { output.write(global_rank as u64, key) };
                 }
                 warp::sync_mask(FULL_MASK);
                 item += 1;
@@ -490,13 +496,13 @@ pub mod sort_abi {
             const UNROLL: u32,
             const DESCENDING: bool,
         >(
-            input_keys: *const u32,
-            input_values: *const u32,
-            output_keys: *mut u32,
-            output_values: *mut u32,
-            digit_bases: *const u32,
-            lookback: *mut u32,
-            tile_counter: *mut u32,
+            input_keys: DeviceRange<u32>,
+            input_values: DeviceRange<u32>,
+            output_keys: DeviceRangeMut<u32>,
+            output_values: DeviceRangeMut<u32>,
+            digit_bases: DeviceRange<u32>,
+            lookback: DeviceRangeMut<u32>,
+            tile_counter: DeviceRangeMut<u32>,
             count: u32,
             shift: u32,
             num_blocks: u32,
@@ -519,7 +525,7 @@ pub mod sort_abi {
             );
             let block_index_shared = unsafe { global_offsets.add(RADIX_SIZE) };
             if tid == 0 {
-                let counter = unsafe { DeviceAtomicU32::from_ptr(tile_counter) };
+                let counter = unsafe { DeviceAtomicU32::from_ptr(tile_counter.as_mut_ptr()) };
                 let block = counter.fetch_add(1, AtomicOrdering::Relaxed);
                 unsafe { block_index_shared.write(block) };
             }
@@ -546,12 +552,12 @@ pub mod sort_abi {
                 let index = warp_base + item * 32 + lane;
                 let valid = index < count;
                 let key = if valid {
-                    unsafe { input_keys.add(index as usize).read() }
+                    unsafe { input_keys.read(index as u64) }
                 } else {
                     0
                 };
                 let value = if valid {
-                    unsafe { input_values.add(index as usize).read() }
+                    unsafe { input_values.read(index as u64) }
                 } else {
                     0
                 };
@@ -623,7 +629,9 @@ pub mod sort_abi {
             if has_bin {
                 let descriptor = unsafe {
                     DeviceAtomicU32::from_ptr(
-                        lookback.add((block * RADIX_SIZE as u32 + tid) as usize),
+                        lookback
+                            .as_mut_ptr()
+                            .add((block * RADIX_SIZE as u32 + tid) as usize),
                     )
                 };
                 descriptor.store(LOOKBACK_PARTIAL | local_count, AtomicOrdering::Release);
@@ -666,7 +674,9 @@ pub mod sort_abi {
                     loop {
                         let prior_descriptor = unsafe {
                             DeviceAtomicU32::from_ptr(
-                                lookback.add((prior_block * RADIX_SIZE as u32 + tid) as usize),
+                                lookback
+                                    .as_mut_ptr()
+                                    .add((prior_block * RADIX_SIZE as u32 + tid) as usize),
                             )
                         };
                         let mut value = prior_descriptor.load(AtomicOrdering::Acquire);
@@ -683,7 +693,9 @@ pub mod sort_abi {
 
                 let descriptor = unsafe {
                     DeviceAtomicU32::from_ptr(
-                        lookback.add((block * RADIX_SIZE as u32 + tid) as usize),
+                        lookback
+                            .as_mut_ptr()
+                            .add((block * RADIX_SIZE as u32 + tid) as usize),
                     )
                 };
                 descriptor.store(LOOKBACK_GLOBAL | inclusive_count, AtomicOrdering::Release);
@@ -691,8 +703,7 @@ pub mod sort_abi {
                 let prior_count = inclusive_count.wrapping_sub(local_count);
                 let global_offset = unsafe {
                     digit_bases
-                        .add((pass * RADIX_SIZE as u32 + tid) as usize)
-                        .read()
+                        .read((pass * RADIX_SIZE as u32 + tid) as u64)
                         .wrapping_add(prior_count)
                         .wrapping_sub(local_prefix)
                 };
@@ -715,8 +726,8 @@ pub mod sort_abi {
                             .wrapping_add(block_rank)
                     };
                     unsafe {
-                        output_keys.add(global_rank as usize).write(key);
-                        output_values.add(global_rank as usize).write(value);
+                        output_keys.write(global_rank as u64, key);
+                        output_values.write(global_rank as u64, value);
                     }
                 }
                 warp::sync_mask(FULL_MASK);
@@ -725,77 +736,116 @@ pub mod sort_abi {
         }
     }
 
-    /// Allocator-erased device pointers consumed by radix dispatch.
+    /// Affine borrowed workspace capability consumed by one radix dispatch.
     #[doc(hidden)]
-    #[derive(Clone, Copy)]
-    pub struct U32RadixWorkspaceView {
-        scratch: *mut u32,
-        global_histograms: *mut u32,
-        all_digit_bases: *mut u32,
-        lookback: *mut u32,
-        tile_counter: *mut u32,
+    pub struct U32RadixWorkspaceView<'workspace> {
+        scratch: DeviceRangeMut<u32>,
+        global_histograms: DeviceRangeMut<u32>,
+        all_digit_bases: DeviceRangeMut<u32>,
+        lookback: DeviceRangeMut<u32>,
+        tile_counter: DeviceRangeMut<u32>,
         max_blocks: u32,
+        _borrow: PhantomData<&'workspace mut U32SortWorkspaceMarker>,
     }
 
-    /// Allocator-erased key/value storage consumed by radix dispatch.
+    /// Affine borrowed key/value workspace consumed by one radix dispatch.
     #[doc(hidden)]
-    #[derive(Clone, Copy)]
-    pub struct U32PairRadixWorkspaceView {
-        radix: U32RadixWorkspaceView,
-        value_scratch: *mut u32,
+    pub struct U32PairRadixWorkspaceView<'workspace> {
+        radix: U32RadixWorkspaceView<'workspace>,
+        value_scratch: DeviceRangeMut<u32>,
+        _value_borrow: PhantomData<&'workspace mut u32>,
     }
 
+    enum U32SortWorkspaceMarker {}
+
     #[doc(hidden)]
-    pub struct U32SortWorkspace<A: DeviceAllocator + Clone = CudaAsyncMemoryResource> {
-        scratch: ResourceBuffer<u32, A>,
-        global_histograms: ResourceBuffer<u32, A>,
-        all_digit_bases: ResourceBuffer<u32, A>,
-        lookback: ResourceBuffer<u32, A>,
-        tile_counter: ResourceBuffer<u32, A>,
+    pub struct U32SortWorkspace<'stream, A: DeviceAllocator + Clone = CudaAsyncMemoryResource> {
+        scratch: ResourceBuffer<'stream, u32, A>,
+        global_histograms: ResourceBuffer<'stream, u32, A>,
+        all_digit_bases: ResourceBuffer<'stream, u32, A>,
+        lookback: ResourceBuffer<'stream, u32, A>,
+        tile_counter: ResourceBuffer<'stream, u32, A>,
         capacity: usize,
         max_blocks: u32,
     }
 
-    impl<A: DeviceAllocator + Clone> U32SortWorkspace<A> {
-        fn launch_view(&self) -> U32RadixWorkspaceView {
+    impl<A: DeviceAllocator + Clone> U32SortWorkspace<'_, A> {
+        fn launch_view(&mut self) -> U32RadixWorkspaceView<'_> {
             U32RadixWorkspaceView {
-                scratch: self.scratch.cu_deviceptr() as *mut u32,
-                global_histograms: self.global_histograms.cu_deviceptr() as *mut u32,
-                all_digit_bases: self.all_digit_bases.cu_deviceptr() as *mut u32,
-                lookback: self.lookback.cu_deviceptr() as *mut u32,
-                tile_counter: self.tile_counter.cu_deviceptr() as *mut u32,
+                // SAFETY: each range is bounded by its owning allocation, and
+                // the returned affine view cannot outlive this mutable borrow.
+                scratch: unsafe {
+                    DeviceRangeMut::from_raw_parts(
+                        self.scratch.cu_deviceptr() as *mut u32,
+                        self.scratch.len(),
+                    )
+                },
+                global_histograms: unsafe {
+                    DeviceRangeMut::from_raw_parts(
+                        self.global_histograms.cu_deviceptr() as *mut u32,
+                        self.global_histograms.len(),
+                    )
+                },
+                all_digit_bases: unsafe {
+                    DeviceRangeMut::from_raw_parts(
+                        self.all_digit_bases.cu_deviceptr() as *mut u32,
+                        self.all_digit_bases.len(),
+                    )
+                },
+                lookback: unsafe {
+                    DeviceRangeMut::from_raw_parts(
+                        self.lookback.cu_deviceptr() as *mut u32,
+                        self.lookback.len(),
+                    )
+                },
+                tile_counter: unsafe {
+                    DeviceRangeMut::from_raw_parts(
+                        self.tile_counter.cu_deviceptr() as *mut u32,
+                        self.tile_counter.len(),
+                    )
+                },
                 max_blocks: self.max_blocks,
+                _borrow: PhantomData,
             }
         }
 
-        fn transition_to(&mut self, stream: &Arc<CudaStream>) -> Result<(), MemoryError> {
-            self.scratch.transition_to(stream.clone())?;
-            self.global_histograms.transition_to(stream.clone())?;
-            self.all_digit_bases.transition_to(stream.clone())?;
-            self.lookback.transition_to(stream.clone())?;
-            self.tile_counter.transition_to(stream.clone())
+        fn ensure_usable_on(&self, stream: &CudaStream) -> Result<(), MemoryError> {
+            self.scratch.ensure_usable_on(stream)?;
+            self.global_histograms.ensure_usable_on(stream)?;
+            self.all_digit_bases.ensure_usable_on(stream)?;
+            self.lookback.ensure_usable_on(stream)?;
+            self.tile_counter.ensure_usable_on(stream)
         }
     }
 
     /// Reusable storage for stable `sort_by_key` on `u32` keys and values.
     #[doc(hidden)]
-    pub struct U32PairSortWorkspace<A: DeviceAllocator + Clone = CudaAsyncMemoryResource> {
-        radix: U32SortWorkspace<A>,
-        value_scratch: ResourceBuffer<u32, A>,
+    pub struct U32PairSortWorkspace<'stream, A: DeviceAllocator + Clone = CudaAsyncMemoryResource> {
+        radix: U32SortWorkspace<'stream, A>,
+        value_scratch: ResourceBuffer<'stream, u32, A>,
         capacity: usize,
     }
 
-    impl<A: DeviceAllocator + Clone> U32PairSortWorkspace<A> {
-        fn launch_view(&self) -> U32PairRadixWorkspaceView {
+    impl<A: DeviceAllocator + Clone> U32PairSortWorkspace<'_, A> {
+        fn launch_view(&mut self) -> U32PairRadixWorkspaceView<'_> {
+            // SAFETY: the range is bounded by its owning allocation, and the
+            // affine view retains this exclusive borrow until dispatch ends.
+            let value_scratch = unsafe {
+                DeviceRangeMut::from_raw_parts(
+                    self.value_scratch.cu_deviceptr() as *mut u32,
+                    self.value_scratch.len(),
+                )
+            };
             U32PairRadixWorkspaceView {
                 radix: self.radix.launch_view(),
-                value_scratch: self.value_scratch.cu_deviceptr() as *mut u32,
+                value_scratch,
+                _value_borrow: PhantomData,
             }
         }
 
-        fn transition_to(&mut self, stream: &Arc<CudaStream>) -> Result<(), MemoryError> {
-            self.radix.transition_to(stream)?;
-            self.value_scratch.transition_to(stream.clone())
+        fn ensure_usable_on(&self, stream: &CudaStream) -> Result<(), MemoryError> {
+            self.radix.ensure_usable_on(stream)?;
+            self.value_scratch.ensure_usable_on(stream)
         }
     }
 
@@ -812,7 +862,7 @@ pub mod sort_abi {
     impl RadixLauncher<'_> {
         #[doc(hidden)]
         #[inline(always)]
-        pub fn __sort_u32_with<
+        pub unsafe fn __sort_u32_with<
             const BLOCK_THREADS: u32,
             const ITEMS_PER_THREAD: u32,
             const ITEMS_PER_THREAD_USIZE: usize,
@@ -822,11 +872,11 @@ pub mod sort_abi {
             const DESCENDING: bool,
         >(
             &self,
-            stream: &Arc<CudaStream>,
-            keys_ptr: *mut u32,
-            keys_len: usize,
-            workspace: U32RadixWorkspaceView,
+            stream: &CudaStream,
+            keys: DeviceRangeMut<u32>,
+            workspace: U32RadixWorkspaceView<'_>,
         ) -> Result<(), SortError> {
+            let keys_len = keys.len() as usize;
             let count = u32::try_from(keys_len).map_err(|_| SortError::TooManyItems(keys_len))?;
             let tile = BLOCK_THREADS * ITEMS_PER_THREAD;
             let num_blocks = count.div_ceil(tile).max(1);
@@ -852,9 +902,9 @@ pub mod sort_abi {
                 block_dim: (RADIX_SIZE as u32, 1, 1),
                 shared_mem_bytes: 0,
             };
-            let mut input = keys_ptr as *const u32;
+            let mut input = keys.as_read_only();
             let mut output = workspace.scratch;
-            let scratch_ptr = workspace.scratch;
+            let scratch = workspace.scratch;
 
             unsafe {
                 self.module.reset_words_u32::<BLOCK_THREADS>(
@@ -879,7 +929,7 @@ pub mod sort_abi {
                 self.module.global_digit_bases::<BLOCK_THREADS>(
                     stream,
                     bases_cfg,
-                    workspace.global_histograms,
+                    workspace.global_histograms.as_read_only(),
                     workspace.all_digit_bases,
                 )?;
             }
@@ -917,7 +967,7 @@ pub mod sort_abi {
                         scatter_cfg,
                         input,
                         output,
-                        workspace.all_digit_bases,
+                        workspace.all_digit_bases.as_read_only(),
                         workspace.lookback,
                         workspace.tile_counter,
                         count,
@@ -925,21 +975,21 @@ pub mod sort_abi {
                         num_blocks,
                     )?;
                 }
-                input = output as *const u32;
-                output = if output == scratch_ptr {
-                    keys_ptr
+                input = output.as_read_only();
+                output = if output.same_start(scratch) {
+                    keys
                 } else {
-                    scratch_ptr
+                    scratch
                 };
                 shift += RADIX_BITS;
             }
-            debug_assert_eq!(input, keys_ptr as *const u32);
+            debug_assert_eq!(input.as_ptr(), keys.as_read_only().as_ptr());
             Ok(())
         }
 
         #[doc(hidden)]
         #[inline(always)]
-        pub fn __sort_pairs_u32_with<
+        pub unsafe fn __sort_pairs_u32_with<
             const BLOCK_THREADS: u32,
             const ITEMS_PER_THREAD: u32,
             const ITEMS_PER_THREAD_USIZE: usize,
@@ -949,12 +999,12 @@ pub mod sort_abi {
             const DESCENDING: bool,
         >(
             &self,
-            stream: &Arc<CudaStream>,
-            keys_ptr: *mut u32,
-            values_ptr: *mut u32,
-            len: usize,
-            workspace: U32PairRadixWorkspaceView,
+            stream: &CudaStream,
+            keys: DeviceRangeMut<u32>,
+            values: DeviceRangeMut<u32>,
+            workspace: U32PairRadixWorkspaceView<'_>,
         ) -> Result<(), SortError> {
+            let len = keys.len() as usize;
             let count = u32::try_from(len).map_err(|_| SortError::TooManyItems(len))?;
             let tile = BLOCK_THREADS * ITEMS_PER_THREAD;
             let num_blocks = count.div_ceil(tile).max(1);
@@ -978,8 +1028,8 @@ pub mod sort_abi {
             };
             let key_scratch = workspace.radix.scratch;
             let value_scratch = workspace.value_scratch;
-            let mut input_keys = keys_ptr as *const u32;
-            let mut input_values = values_ptr as *const u32;
+            let mut input_keys = keys.as_read_only();
+            let mut input_values = values.as_read_only();
             let mut output_keys = key_scratch;
             let mut output_values = value_scratch;
 
@@ -1006,7 +1056,7 @@ pub mod sort_abi {
                 self.module.global_digit_bases::<BLOCK_THREADS>(
                     stream,
                     bases_cfg,
-                    workspace.radix.global_histograms,
+                    workspace.radix.global_histograms.as_read_only(),
                     workspace.radix.all_digit_bases,
                 )?;
             }
@@ -1046,7 +1096,7 @@ pub mod sort_abi {
                         input_values,
                         output_keys,
                         output_values,
-                        workspace.radix.all_digit_bases,
+                        workspace.radix.all_digit_bases.as_read_only(),
                         workspace.radix.lookback,
                         workspace.radix.tile_counter,
                         count,
@@ -1054,22 +1104,22 @@ pub mod sort_abi {
                         num_blocks,
                     )?;
                 }
-                input_keys = output_keys as *const u32;
-                input_values = output_values as *const u32;
-                output_keys = if output_keys == key_scratch {
-                    keys_ptr
+                input_keys = output_keys.as_read_only();
+                input_values = output_values.as_read_only();
+                output_keys = if output_keys.same_start(key_scratch) {
+                    keys
                 } else {
                     key_scratch
                 };
-                output_values = if output_values == value_scratch {
-                    values_ptr
+                output_values = if output_values.same_start(value_scratch) {
+                    values
                 } else {
                     value_scratch
                 };
                 shift += RADIX_BITS;
             }
-            debug_assert_eq!(input_keys, keys_ptr as *const u32);
-            debug_assert_eq!(input_values, values_ptr as *const u32);
+            debug_assert_eq!(input_keys.as_ptr(), keys.as_read_only().as_ptr());
+            debug_assert_eq!(input_values.as_ptr(), values.as_read_only().as_ptr());
             Ok(())
         }
     }
@@ -1093,11 +1143,15 @@ pub mod sort_abi {
                 })
             }
 
-            pub fn allocate_u32_workspace<const BLOCK_THREADS: u32, const ITEMS_PER_THREAD: u32>(
+            pub fn allocate_u32_workspace<
+                'stream,
+                const BLOCK_THREADS: u32,
+                const ITEMS_PER_THREAD: u32,
+            >(
                 &self,
-                stream: &Arc<CudaStream>,
+                stream: &'stream CudaStream,
                 capacity: usize,
-            ) -> Result<U32SortWorkspace<A>, SortError> {
+            ) -> Result<U32SortWorkspace<'stream, A>, SortError> {
                 let count =
                     u32::try_from(capacity).map_err(|_| SortError::TooManyItems(capacity))?;
                 let tile_items = BLOCK_THREADS * ITEMS_PER_THREAD;
@@ -1106,58 +1160,58 @@ pub mod sort_abi {
                     .checked_mul(max_blocks as usize)
                     .ok_or(SortError::TooManyItems(capacity))?;
                 Ok(U32SortWorkspace {
-                    scratch: ResourceBuffer::zeroed_in(
-                        self.allocator.clone(),
-                        stream.clone(),
-                        capacity,
-                    )?,
+                    scratch: ResourceBuffer::zeroed_in(self.allocator.clone(), stream, capacity)?,
                     global_histograms: ResourceBuffer::zeroed_in(
                         self.allocator.clone(),
-                        stream.clone(),
+                        stream,
                         RADIX_PASSES * RADIX_SIZE,
                     )?,
                     all_digit_bases: ResourceBuffer::zeroed_in(
                         self.allocator.clone(),
-                        stream.clone(),
+                        stream,
                         RADIX_PASSES * RADIX_SIZE,
                     )?,
                     lookback: ResourceBuffer::zeroed_in(
                         self.allocator.clone(),
-                        stream.clone(),
+                        stream,
                         histogram_len,
                     )?,
-                    tile_counter: ResourceBuffer::zeroed_in(
-                        self.allocator.clone(),
-                        stream.clone(),
-                        1,
-                    )?,
+                    tile_counter: ResourceBuffer::zeroed_in(self.allocator.clone(), stream, 1)?,
                     capacity,
                     max_blocks,
                 })
             }
 
             pub fn allocate_u32_pair_workspace<
+                'stream,
                 const BLOCK_THREADS: u32,
                 const ITEMS_PER_THREAD: u32,
             >(
                 &self,
-                stream: &Arc<CudaStream>,
+                stream: &'stream CudaStream,
                 capacity: usize,
-            ) -> Result<U32PairSortWorkspace<A>, SortError> {
+            ) -> Result<U32PairSortWorkspace<'stream, A>, SortError> {
                 Ok(U32PairSortWorkspace {
                     radix: self.allocate_u32_workspace::<BLOCK_THREADS, ITEMS_PER_THREAD>(
                         stream, capacity,
                     )?,
                     value_scratch: ResourceBuffer::zeroed_in(
                         self.allocator.clone(),
-                        stream.clone(),
+                        stream,
                         capacity,
                     )?,
                     capacity,
                 })
             }
 
-            pub fn sort_u32<
+            /// Enqueue a radix sort on `stream`.
+            ///
+            /// # Safety
+            ///
+            /// `keys` and `workspace` must remain alive and inaccessible until
+            /// all work submitted by this call completes, including after an
+            /// error returned by a later launch.
+            pub unsafe fn sort_u32<
                 const BLOCK_THREADS: u32,
                 const ITEMS_PER_THREAD: u32,
                 const ITEMS_PER_THREAD_USIZE: usize,
@@ -1168,9 +1222,9 @@ pub mod sort_abi {
                 B,
             >(
                 &self,
-                stream: &Arc<CudaStream>,
+                stream: &CudaStream,
                 keys: &mut B,
-                workspace: &mut U32SortWorkspace<A>,
+                workspace: &mut U32SortWorkspace<'_, A>,
             ) -> Result<(), SortError>
             where
                 B: DeviceSliceMut<u32> + ?Sized,
@@ -1185,28 +1239,42 @@ pub mod sort_abi {
                 if keys.is_empty() {
                     return Ok(());
                 }
-                workspace.transition_to(stream)?;
+                workspace.ensure_usable_on(stream)?;
                 let launcher = RadixLauncher {
                     module: &self.module,
                     multiprocessors: self.multiprocessors,
                 };
-                launcher.__sort_u32_with::<
-                    BLOCK_THREADS,
-                    ITEMS_PER_THREAD,
-                    ITEMS_PER_THREAD_USIZE,
-                    BLOCK_WARPS,
-                    MIN_BLOCKS_PER_SM,
-                    UNROLL,
-                    DESCENDING,
-                >(
-                    stream,
-                    keys.cu_deviceptr() as *mut u32,
-                    keys.len(),
-                    workspace.launch_view(),
-                )
+                // SAFETY: `keys` owns this initialized device range and the
+                // public unsafe contract keeps it exclusively borrowed until
+                // the queued kernels complete.
+                let keys_range = unsafe {
+                    DeviceRangeMut::from_raw_parts(keys.cu_deviceptr() as *mut u32, keys.len())
+                };
+                unsafe {
+                    launcher.__sort_u32_with::<
+                        BLOCK_THREADS,
+                        ITEMS_PER_THREAD,
+                        ITEMS_PER_THREAD_USIZE,
+                        BLOCK_WARPS,
+                        MIN_BLOCKS_PER_SM,
+                        UNROLL,
+                        DESCENDING,
+                    >(
+                        stream,
+                        keys_range,
+                        workspace.launch_view(),
+                    )
+                }
             }
 
-            pub fn stable_sort_by_key_u32<
+            /// Enqueue a stable key/value radix sort on `stream`.
+            ///
+            /// # Safety
+            ///
+            /// `keys`, `values`, and `workspace` must remain alive and
+            /// inaccessible until all submitted work completes, including after
+            /// an error returned by a later launch.
+            pub unsafe fn stable_sort_by_key_u32<
                 const BLOCK_THREADS: u32,
                 const ITEMS_PER_THREAD: u32,
                 const ITEMS_PER_THREAD_USIZE: usize,
@@ -1218,10 +1286,10 @@ pub mod sort_abi {
                 V,
             >(
                 &self,
-                stream: &Arc<CudaStream>,
+                stream: &CudaStream,
                 keys: &mut K,
                 values: &mut V,
-                workspace: &mut U32PairSortWorkspace<A>,
+                workspace: &mut U32PairSortWorkspace<'_, A>,
             ) -> Result<(), SortError>
             where
                 K: DeviceSliceMut<u32> + ?Sized,
@@ -1244,26 +1312,36 @@ pub mod sort_abi {
                 if keys.is_empty() {
                     return Ok(());
                 }
-                workspace.transition_to(stream)?;
+                workspace.ensure_usable_on(stream)?;
                 let launcher = RadixLauncher {
                     module: &self.module,
                     multiprocessors: self.multiprocessors,
                 };
-                launcher.__sort_pairs_u32_with::<
-                    BLOCK_THREADS,
-                    ITEMS_PER_THREAD,
-                    ITEMS_PER_THREAD_USIZE,
-                    BLOCK_WARPS,
-                    MIN_BLOCKS_PER_SM,
-                    UNROLL,
-                    DESCENDING,
-                >(
-                    stream,
-                    keys.cu_deviceptr() as *mut u32,
-                    values.cu_deviceptr() as *mut u32,
-                    keys.len(),
-                    workspace.launch_view(),
-                )
+                // SAFETY: both owners cover their initialized ranges, have
+                // equal lengths, and remain exclusively borrowed under this
+                // method's unsafe enqueue contract.
+                let keys_range = unsafe {
+                    DeviceRangeMut::from_raw_parts(keys.cu_deviceptr() as *mut u32, keys.len())
+                };
+                let values_range = unsafe {
+                    DeviceRangeMut::from_raw_parts(values.cu_deviceptr() as *mut u32, values.len())
+                };
+                unsafe {
+                    launcher.__sort_pairs_u32_with::<
+                        BLOCK_THREADS,
+                        ITEMS_PER_THREAD,
+                        ITEMS_PER_THREAD_USIZE,
+                        BLOCK_WARPS,
+                        MIN_BLOCKS_PER_SM,
+                        UNROLL,
+                        DESCENDING,
+                    >(
+                        stream,
+                        keys_range,
+                        values_range,
+                        workspace.launch_view(),
+                    )
+                }
             }
         }
     }

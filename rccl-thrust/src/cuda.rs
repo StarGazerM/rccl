@@ -3,7 +3,7 @@
 use cuda_core::{CudaStream, DriverError};
 use rccl_cub::{KernelContext, KernelContextError};
 use rccl_memory::{CudaAsyncMemoryResource, DeviceAllocator, MemoryError};
-use std::{error::Error, fmt, sync::Arc};
+use std::{error::Error, fmt};
 
 /// Failure while binding a Thrust execution policy to a CUDA stream.
 #[derive(Debug)]
@@ -48,13 +48,13 @@ impl From<KernelContextError> for ExecutionError {
 /// The policy owns no algorithm schedule. CUB owns kernel modules and target
 /// policy; Thrust retains only the CUB context handle needed by its algorithms.
 pub struct Execution<'stream, A: DeviceAllocator + Clone = CudaAsyncMemoryResource> {
-    stream: &'stream Arc<CudaStream>,
+    stream: &'stream CudaStream,
     allocator: A,
     kernels: KernelContext,
 }
 
 impl<A: DeviceAllocator + Clone> Execution<'_, A> {
-    pub(crate) fn stream(&self) -> &Arc<CudaStream> {
+    pub(crate) fn stream(&self) -> &CudaStream {
         self.stream
     }
 
@@ -69,7 +69,7 @@ impl<A: DeviceAllocator + Clone> Execution<'_, A> {
 
 /// Bind Thrust execution to a borrowed stream and the default stream-ordered
 /// allocator.
-pub fn par(stream: &Arc<CudaStream>) -> Result<Execution<'_>, ExecutionError> {
+pub fn par(stream: &CudaStream) -> Result<Execution<'_>, ExecutionError> {
     par_in(
         stream,
         CudaAsyncMemoryResource::new(stream.context().clone()),
@@ -78,7 +78,7 @@ pub fn par(stream: &Arc<CudaStream>) -> Result<Execution<'_>, ExecutionError> {
 
 /// Bind Thrust execution to a borrowed stream and allocator handle.
 pub fn par_in<A: DeviceAllocator + Clone>(
-    stream: &Arc<CudaStream>,
+    stream: &CudaStream,
     allocator: A,
 ) -> Result<Execution<'_, A>, ExecutionError> {
     if allocator.context().as_ref() != stream.context().as_ref() {
@@ -91,10 +91,7 @@ pub fn par_in<A: DeviceAllocator + Clone>(
     })
 }
 
-pub(crate) fn finish_synchronous<T, E>(
-    stream: &Arc<CudaStream>,
-    operation: Result<T, E>,
-) -> Result<T, E>
+pub(crate) fn finish_synchronous<T, E>(stream: &CudaStream, operation: Result<T, E>) -> Result<T, E>
 where
     E: From<DriverError>,
 {

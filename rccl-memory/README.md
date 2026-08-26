@@ -15,7 +15,7 @@ uses Rust ownership for resource and allocation lifetimes.
 | `SamHeadroomMemoryResource` | Rust aligned system allocation plus CUDA advice | HMM migration while reserving GPU headroom |
 | `CudaAsyncMemoryResource` | `cuMemAllocAsync` / `cuMemFreeAsync` | CUDA device's current/default pool |
 | `CudaPoolMemoryResource` | `cuMemAllocFromPoolAsync` | private configurable CUDA driver pool |
-| `CudaPoolViewMemoryResource` | shared existing CUDA pool | lifetime-safe view retaining the source pool |
+| `CudaPoolViewMemoryResource<'pool>` | borrowed existing CUDA pool | lifetime-safe non-owning view of the source pool |
 | `PoolMemoryResource` | arbitrary upstream resource | stream-ordered coalescing best-fit suballocation |
 | `FixedSizeMemoryResource` | arbitrary upstream resource | preallocated uniform blocks |
 | `BinningMemoryResource` | size-class resource dispatch | fixed-size bins plus upstream fallback |
@@ -35,15 +35,16 @@ dispatch: `TrackingMemoryResource<PoolMemoryResource<CudaMemoryResource>>`.
 The trait does not impose `Debug`, `Send`, or `Sync`; APIs add those bounds only
 when their operation actually needs them.
 
-`DeviceBuffer<T, A>` is a typed allocation with RMM-style reserve, resize,
-shrink, and fallible deep-copy operations. Like `Vec<T, A>`, it stores `A` by
-value. Passing `&'pool Pool` makes the allocator lifetime part of the buffer's
-type and prevents the pool from being dropped or moved while the buffer is
-alive. Passing `Arc<Pool>` explicitly opts into shared ownership for a
-`'static` or cross-task buffer; it is not required by the API. The buffer also
-stores its last-use stream, frees in stream order on `Drop`, and implements
-`DeviceSlice<T>` / `DeviceSliceMut<T>` for algorithm interoperation. The same
-traits are implemented for `cuda_core::DeviceBuffer<T>`.
+`DeviceBuffer<'stream, T, A>` is a typed allocation with RMM-style reserve,
+resize, shrink, and fallible deep-copy operations. It borrows one
+`&'stream CudaStream`, so the compiler prevents the stream owner from being
+dropped or moved while the buffer is alive. Like `Vec<T, A>`, it stores `A` by
+value. Passing `&'pool Pool` likewise makes the allocator lifetime part of the
+buffer's type. Passing `Arc<Pool>` explicitly opts into shared allocator
+ownership; stream sharing is not required by the container. The buffer frees
+in its statically bound stream on `Drop` and implements `DeviceSlice<T>` /
+`DeviceSliceMut<T>` for algorithm interoperation. The same traits are
+implemented for `cuda_core::DeviceBuffer<T>`.
 
 `DeviceSlice::subspan` and `DeviceSliceMut::subspan_mut` create checked
 `DeviceSpan` and `DeviceSpanMut` borrows. They offset the CUDA address only
@@ -54,8 +55,8 @@ host-dereferenceable Rust slice. Mutable spans are not cloneable; consuming
 Because spans implement the same range traits, RCCL algorithms accept them
 without a separate iterator API.
 
-`DeviceUVector<T, A>` names the uninitialized typed-vector contract and
-`DeviceScalar<T, A>` supplies one-value set/get ownership. The optional
+`DeviceUVector<'stream, T, A>` names the uninitialized typed-vector contract and
+`DeviceScalar<'stream, T, A>` supplies one-value set/get ownership. The optional
 process-wide compatibility registry lives under `rccl_memory::registry`. Its
 `SharedDeviceAllocator` is the sole intentionally erased allocator handle,
 because an open runtime registry cannot store arbitrary concrete types.
@@ -77,7 +78,7 @@ let tracked = TrackingMemoryResource::new(&cuda_pool);
 let exec = rccl::cuda::par_in(&stream, &tracked)?;
 let mut keys = DeviceBuffer::<u32, _>::zeroed_in(
     &tracked,
-    stream.clone(),
+    &stream,
     1 << 20,
 )?;
 
@@ -98,11 +99,11 @@ The GPU-resident subspan example is
 ## Stream ownership
 
 An asynchronous allocation is only immediately usable in the stream that
-ordered it. A resource-owned buffer therefore remembers its current stream.
-Before using it from another stream, call `buffer.transition_to(new_stream)`.
-That records an event in the old stream and orders the new stream after it.
-RCCL checks this invariant at its trait boundary. RCCL workspaces transition
-their internal buffers automatically because the workspace is mutably borrowed.
+ordered it. A resource-owned buffer therefore borrows and remains affined to
+that stream for its entire lifetime. Rust rejects dropping or moving the stream
+owner while the buffer exists, and RCCL rejects attempts to submit the buffer
+to a different stream. Reusable CUB workspaces carry the same stream lifetime;
+there is no hidden runtime rebinding or stream-handle clone.
 
 ## Why a custom trait instead of `std::alloc::Allocator`?
 

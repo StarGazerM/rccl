@@ -1,13 +1,4 @@
-use rccl::{BFloat16, DeviceBool, DeviceComparator, DeviceCopy, F16};
-
-#[derive(Clone, Copy)]
-struct Reverse;
-
-unsafe impl DeviceComparator<u32> for Reverse {
-    unsafe fn less(&self, left: &u32, right: &u32) -> bool {
-        left > right
-    }
-}
+use rccl::{BFloat16, DeviceBool, DeviceCopy, F16};
 
 fn sort_surface_compiles<'stream, A, B>(exec: &rccl::cuda::Execution<'stream, A>, keys: &mut B)
 where
@@ -16,8 +7,8 @@ where
 {
     let _ = rccl::sort(exec, keys);
     let _ = rccl::stable_sort(exec, keys);
-    let _ = rccl::sort_by(exec, keys, Reverse);
-    let _ = rccl::stable_sort_by(exec, keys, Reverse);
+    let _ = rccl::sort_by(exec, keys, |left: &u32, right: &u32| right.cmp(left));
+    let _ = rccl::stable_sort_by(exec, keys, |left: &u32, right: &u32| right.cmp(left));
 }
 
 fn pair_sort_surface_compiles<'stream, A, KB, VB>(
@@ -31,24 +22,50 @@ fn pair_sort_surface_compiles<'stream, A, KB, VB>(
 {
     let _ = rccl::sort_by_key(exec, keys, values);
     let _ = rccl::stable_sort_by_key(exec, keys, values);
-    let _ = rccl::sort_by_key_with(exec, keys, values, Reverse);
-    let _ = rccl::stable_sort_by_key_with(exec, keys, values, Reverse);
+    let _ = rccl::sort_by_key_with(exec, keys, values, |left: &u32, right: &u32| {
+        right.cmp(left)
+    });
+    let _ = rccl::stable_sort_by_key_with(exec, keys, values, |left: &u32, right: &u32| {
+        right.cmp(left)
+    });
 }
 
 #[test]
 fn ordinary_sort_api_uses_thrust_execution() {
     fn assert_device_copy<T: DeviceCopy>() {}
+    type Buffer<'stream> =
+        rccl::memory::DeviceBuffer<'stream, u32, rccl::memory::CudaAsyncMemoryResource>;
+    fn instantiate<'stream>(_: core::marker::PhantomData<&'stream ()>) {
+        let _ = sort_surface_compiles::<rccl::memory::CudaAsyncMemoryResource, Buffer<'stream>>;
+        let _ = pair_sort_surface_compiles::<
+            rccl::memory::CudaAsyncMemoryResource,
+            Buffer<'stream>,
+            Buffer<'stream>,
+        >;
+    }
+
     assert_device_copy::<u32>();
     assert!(core::mem::size_of::<Option<rccl::cuda::Execution<'static>>>() > 0);
-    let _ = sort_surface_compiles::<
-        rccl::memory::CudaAsyncMemoryResource,
-        rccl::memory::DeviceBuffer<u32, rccl::memory::CudaAsyncMemoryResource>,
-    >;
-    let _ = pair_sort_surface_compiles::<
-        rccl::memory::CudaAsyncMemoryResource,
-        rccl::memory::DeviceBuffer<u32, rccl::memory::CudaAsyncMemoryResource>,
-        rccl::memory::DeviceBuffer<u32, rccl::memory::CudaAsyncMemoryResource>,
-    >;
+    let _ = instantiate;
+}
+
+#[test]
+fn ordering_arguments_are_ordinary_copy_closures() {
+    fn accepts_order<K, C>(order: C) -> C
+    where
+        C: Fn(&K, &K) -> core::cmp::Ordering + Copy + 'static,
+    {
+        order
+    }
+
+    let descending = accepts_order::<u32, _>(|left: &u32, right: &u32| right.cmp(left));
+    assert!(descending(&2, &1).is_lt());
+
+    let mask = 0xff_u32;
+    let masked =
+        accepts_order::<u32, _>(move |left: &u32, right: &u32| (left & mask).cmp(&(right & mask)));
+    assert!(masked(&0x101, &0x002).is_lt());
+    assert!(masked(&0x101, &0x201).is_eq());
 }
 
 #[test]

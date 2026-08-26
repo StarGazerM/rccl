@@ -15,7 +15,6 @@ const DEFAULT_GROWTH_SIZE: usize = 1 << 20;
 #[derive(Debug)]
 struct FreeBlock {
     size: usize,
-    ready: Arc<CudaEvent>,
     stream_id: u64,
     upstream_head: bool,
 }
@@ -32,7 +31,7 @@ struct PoolState {
     free: BTreeMap<sys::CUdeviceptr, FreeBlock>,
     free_by_size: BTreeSet<(usize, sys::CUdeviceptr)>,
     live: HashMap<sys::CUdeviceptr, LiveAllocation>,
-    stream_events: HashMap<u64, Arc<CudaEvent>>,
+    stream_events: HashMap<u64, CudaEvent>,
     upstream_blocks: Vec<DeviceBlock>,
     pool_size: usize,
     next_growth: usize,
@@ -153,11 +152,12 @@ impl<U: DeviceAllocator> PoolMemoryResource<U> {
         let mut released = 0usize;
         let mut index = 0usize;
         while index < state.upstream_blocks.len() {
-            let upstream_block = state.upstream_blocks[index];
+            let upstream_ptr = state.upstream_blocks[index].cu_deviceptr();
+            let upstream_size = state.upstream_blocks[index].size();
             let is_wholly_free = state
                 .free
-                .get(&upstream_block.cu_deviceptr())
-                .is_some_and(|free| free.upstream_head && free.size == upstream_block.size());
+                .get(&upstream_ptr)
+                .is_some_and(|free| free.upstream_head && free.size == upstream_size);
             if !is_wholly_free {
                 index += 1;
                 continue;
@@ -166,19 +166,18 @@ impl<U: DeviceAllocator> PoolMemoryResource<U> {
             {
                 let free = state
                     .free
-                    .get(&upstream_block.cu_deviceptr())
+                    .get(&upstream_ptr)
                     .expect("free block checked above");
-                order_after(stream, stream_id, free)?;
+                order_after(stream, stream_id, free.stream_id, &state.stream_events)?;
             }
-            let free = remove_free(&mut state, upstream_block.cu_deviceptr())
-                .expect("free block checked above");
-            if let Err(error) = unsafe { self.upstream.deallocate(upstream_block, stream) } {
-                insert_free(&mut state, upstream_block.cu_deviceptr(), free);
-                return Err(error);
-            }
-            state.upstream_blocks.swap_remove(index);
-            state.pool_size -= upstream_block.size();
-            released += upstream_block.size();
+            let _free = remove_free(&mut state, upstream_ptr).expect("free block checked above");
+            let upstream_block = state.upstream_blocks.swap_remove(index);
+            state.pool_size -= upstream_size;
+            // The affine block token is consumed even when the upstream
+            // resource reports a failure. The allocation may leak, but it
+            // must not remain available for reuse without an ownership token.
+            unsafe { self.upstream.deallocate(upstream_block, stream) }?;
+            released += upstream_size;
         }
         Ok(released)
     }
@@ -202,7 +201,7 @@ impl<U: DeviceAllocator> PoolMemoryResource<U> {
 
         {
             let free = state.free.get(&ptr).expect("selected free block exists");
-            order_after(stream, stream_id, free)?;
+            order_after(stream, stream_id, free.stream_id, &state.stream_events)?;
         }
         let free = remove_free(state, ptr).expect("selected free block exists");
         let remainder_size = free.size - rounded_size;
@@ -212,8 +211,10 @@ impl<U: DeviceAllocator> PoolMemoryResource<U> {
                 ptr + rounded_size as sys::CUdeviceptr,
                 FreeBlock {
                     size: remainder_size,
-                    ready: free.ready.clone(),
-                    stream_id,
+                    // Splitting does not touch the remainder. It retains the
+                    // original producer event rather than pretending the
+                    // allocation stream recorded new work for this range.
+                    stream_id: free.stream_id,
                     upstream_head: false,
                 },
             );
@@ -265,17 +266,12 @@ impl<U: DeviceAllocator> PoolMemoryResource<U> {
         let layout = Layout::from_size_align(growth, DEVICE_ALLOCATION_ALIGNMENT)?;
         let upstream_block = self.upstream.allocate(layout, stream)?;
         let remainder_size = growth - rounded_size;
-        let remainder_event = if remainder_size > 0 {
-            match record_ready(state, stream, stream_id) {
-                Ok(event) => Some(event),
-                Err(error) => {
-                    let _ = unsafe { self.upstream.deallocate(upstream_block, stream) };
-                    return Err(error);
-                }
-            }
-        } else {
-            None
-        };
+        if remainder_size > 0
+            && let Err(error) = record_ready(state, stream, stream_id)
+        {
+            let _ = unsafe { self.upstream.deallocate(upstream_block, stream) };
+            return Err(error);
+        }
         let ptr = upstream_block.cu_deviceptr();
         if remainder_size > 0 {
             let remainder_ptr = ptr + rounded_size as sys::CUdeviceptr;
@@ -284,7 +280,6 @@ impl<U: DeviceAllocator> PoolMemoryResource<U> {
                 remainder_ptr,
                 FreeBlock {
                     size: remainder_size,
-                    ready: remainder_event.expect("remainder records an event"),
                     stream_id,
                     upstream_head: false,
                 },
@@ -310,20 +305,16 @@ impl<U: DeviceAllocator> PoolMemoryResource<U> {
         let layout = Layout::from_size_align(size, DEVICE_ALLOCATION_ALIGNMENT)?;
         let upstream_block = self.upstream.allocate(layout, stream)?;
         let stream_id = stream_id(stream)?;
-        let ready = match record_ready(state, stream, stream_id) {
-            Ok(event) => event,
-            Err(error) => {
-                let _ = unsafe { self.upstream.deallocate(upstream_block, stream) };
-                return Err(error);
-            }
-        };
+        if let Err(error) = record_ready(state, stream, stream_id) {
+            let _ = unsafe { self.upstream.deallocate(upstream_block, stream) };
+            return Err(error);
+        }
         let ptr = upstream_block.cu_deviceptr();
         insert_free(
             state,
             ptr,
             FreeBlock {
                 size,
-                ready,
                 stream_id,
                 upstream_head: true,
             },
@@ -356,17 +347,19 @@ impl<U: DeviceAllocator> PoolMemoryResource<U> {
                 return Ok(());
             };
 
-            order_after(
-                stream,
-                stream_id,
-                state.free.get(&left_ptr).expect("left free block exists"),
-            )?;
-            order_after(
-                stream,
-                stream_id,
-                state.free.get(&right_ptr).expect("right free block exists"),
-            )?;
-            let ready = record_ready(state, stream, stream_id)?;
+            let left_stream_id = state
+                .free
+                .get(&left_ptr)
+                .expect("left free block exists")
+                .stream_id;
+            let right_stream_id = state
+                .free
+                .get(&right_ptr)
+                .expect("right free block exists")
+                .stream_id;
+            order_after(stream, stream_id, left_stream_id, &state.stream_events)?;
+            order_after(stream, stream_id, right_stream_id, &state.stream_events)?;
+            record_ready(state, stream, stream_id)?;
             let left = remove_free(state, left_ptr).expect("left block exists");
             let right = remove_free(state, right_ptr).expect("right block exists");
             insert_free(
@@ -374,7 +367,6 @@ impl<U: DeviceAllocator> PoolMemoryResource<U> {
                 left_ptr,
                 FreeBlock {
                     size: left.size + right.size,
-                    ready,
                     stream_id,
                     upstream_head: left.upstream_head,
                 },
@@ -427,7 +419,7 @@ unsafe impl<U: DeviceAllocator> DeviceAllocator for PoolMemoryResource<U> {
         }
         let mut state = self.state.lock().expect("memory pool poisoned");
         let stream_id = stream_id(stream)?;
-        let ready = record_ready(&mut state, stream, stream_id)?;
+        record_ready(&mut state, stream, stream_id)?;
         let Some(allocation) = state.live.remove(&block.cu_deviceptr()) else {
             return Err(MemoryError::UnknownAllocation {
                 ptr: block.cu_deviceptr(),
@@ -446,7 +438,6 @@ unsafe impl<U: DeviceAllocator> DeviceAllocator for PoolMemoryResource<U> {
             block.cu_deviceptr(),
             FreeBlock {
                 size: allocation.rounded_size,
-                ready,
                 stream_id,
                 upstream_head: allocation.upstream_head,
             },
@@ -459,9 +450,12 @@ impl<U: DeviceAllocator> Drop for PoolMemoryResource<U> {
     fn drop(&mut self) {
         let context = self.upstream.context().clone();
         let stream = context.default_stream();
-        let state = self.state.get_mut().expect("memory pool poisoned");
-        for free in state.free.values() {
-            context.record_err(free.ready.synchronize());
+        let state = self
+            .state
+            .get_mut()
+            .unwrap_or_else(|poison| poison.into_inner());
+        for event in state.stream_events.values() {
+            context.record_err(event.synchronize());
         }
         for block in state.upstream_blocks.drain(..) {
             match unsafe { self.upstream.deallocate(block, &stream) } {
@@ -493,9 +487,17 @@ fn stream_id(stream: &CudaStream) -> Result<u64, MemoryError> {
     Ok(id)
 }
 
-fn order_after(stream: &CudaStream, stream_id: u64, free: &FreeBlock) -> Result<(), MemoryError> {
-    if free.stream_id != stream_id {
-        stream.wait(&free.ready)?;
+fn order_after(
+    stream: &CudaStream,
+    stream_id: u64,
+    predecessor_stream_id: u64,
+    stream_events: &HashMap<u64, CudaEvent>,
+) -> Result<(), MemoryError> {
+    if predecessor_stream_id != stream_id {
+        let ready = stream_events
+            .get(&predecessor_stream_id)
+            .expect("every free block stream has a recorded event");
+        stream.wait(ready)?;
     }
     Ok(())
 }
@@ -504,14 +506,15 @@ fn record_ready(
     state: &mut PoolState,
     stream: &CudaStream,
     stream_id: u64,
-) -> Result<Arc<CudaEvent>, MemoryError> {
+) -> Result<(), MemoryError> {
     if let Some(event) = state.stream_events.get(&stream_id) {
         unsafe { sys::cuEventRecord(event.cu_event(), stream.cu_stream()).result()? };
-        return Ok(event.clone());
+        return Ok(());
     }
-    let event = Arc::new(stream.record_event(None)?);
-    state.stream_events.insert(stream_id, event.clone());
-    Ok(event)
+    state
+        .stream_events
+        .insert(stream_id, stream.record_event(None)?);
+    Ok(())
 }
 
 /// Insert a free range and coalesce address neighbors already ordered on the

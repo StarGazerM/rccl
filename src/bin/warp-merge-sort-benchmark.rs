@@ -14,16 +14,6 @@ const WARPS_PER_BLOCK: usize = THREADS_PER_BLOCK / LOGICAL_WARP_THREADS;
 const ITEMS_PER_WARP: usize = ITEMS_PER_THREAD * LOGICAL_WARP_THREADS;
 const ITEMS_PER_BLOCK: usize = THREADS_PER_BLOCK * ITEMS_PER_THREAD;
 
-#[derive(Clone, Copy)]
-struct Less;
-
-unsafe impl rccl::DeviceComparator<u32> for Less {
-    #[inline(always)]
-    unsafe fn less(&self, left: &u32, right: &u32) -> bool {
-        left < right
-    }
-}
-
 #[expect(
     dead_code,
     reason = "cuda-oxide consumes these kernels during device compilation"
@@ -32,24 +22,23 @@ unsafe impl rccl::DeviceComparator<u32> for Less {
 mod kernels {
     use super::*;
     use cuda_device::{
+        DisjointSlice,
         atomic::{AtomicOrdering, DeviceAtomicU64},
         kernel, thread,
     };
 
     #[kernel]
-    pub unsafe fn fill_descending_tiles(data: *mut u32, count: u64) {
+    pub unsafe fn fill_descending_tiles(mut data: DisjointSlice<u32>, count: u64) {
         let index = thread::index_1d().get() as u64;
         if index < count {
             let within_warp = index as usize % ITEMS_PER_WARP;
-            unsafe {
-                data.add(index as usize)
-                    .write((ITEMS_PER_WARP - 1 - within_warp) as u32)
-            };
+            *unsafe { data.get_unchecked_mut(index as usize) } =
+                (ITEMS_PER_WARP - 1 - within_warp) as u32;
         }
     }
 
     #[kernel]
-    pub unsafe fn sort_tiles(data: *mut u32) {
+    pub unsafe fn sort_tiles(mut data: DisjointSlice<u32>) {
         let thread_id = thread::threadIdx_x() as usize;
         let warp_id = thread_id / LOGICAL_WARP_THREADS;
         let linear_tid = thread_id % LOGICAL_WARP_THREADS;
@@ -67,27 +56,28 @@ mod kernels {
             )
         };
         let warp_sort = rccl::cub::WarpMergeSort::<u32, ITEMS_PER_THREAD>::new(storage);
-        let mut keys = [unsafe { data.add(thread_offset).read() }; ITEMS_PER_THREAD];
+        let mut keys = [*unsafe { data.get_unchecked_mut(thread_offset) }; ITEMS_PER_THREAD];
         let mut item = 1usize;
         while item < ITEMS_PER_THREAD {
-            keys[item] = unsafe { data.add(thread_offset + item).read() };
+            keys[item] = *unsafe { data.get_unchecked_mut(thread_offset + item) };
             item += 1;
         }
-        unsafe { warp_sort.sort(&mut keys, Less) };
+        unsafe { warp_sort.sort(&mut keys, u32::cmp) };
         let mut item = 0usize;
         while item < ITEMS_PER_THREAD {
-            unsafe { data.add(thread_offset + item).write(keys[item]) };
+            *unsafe { data.get_unchecked_mut(thread_offset + item) } = keys[item];
             item += 1;
         }
     }
 
     #[kernel]
-    pub unsafe fn validate_tiles(data: *const u32, count: u64, errors: *mut u64) {
+    pub unsafe fn validate_tiles(data: &[u32], count: u64, mut errors: DisjointSlice<u64>) {
         let index = thread::index_1d().get() as u64;
         if index < count {
             let expected = index as usize % ITEMS_PER_WARP;
-            if unsafe { data.add(index as usize).read() } != expected as u32 {
-                unsafe { DeviceAtomicU64::from_ptr(errors) }.fetch_add(1, AtomicOrdering::Relaxed);
+            if data[index as usize] != expected as u32 {
+                unsafe { DeviceAtomicU64::from_ptr(errors.as_mut_ptr()) }
+                    .fetch_add(1, AtomicOrdering::Relaxed);
             }
         }
     }
@@ -113,7 +103,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let context = CudaContext::new(0)?;
     let stream = context.default_stream();
     let module = kernels::load(&context)?;
-    let data = DeviceBuffer::<u32>::zeroed(&stream, count)?;
+    let mut data = DeviceBuffer::<u32>::zeroed(&stream, count)?;
     let blocks = u32::try_from(count / ITEMS_PER_BLOCK)?;
     let sort_launch = LaunchConfig {
         grid_dim: (blocks, 1, 1),
@@ -124,13 +114,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     for _ in 0..5 {
         unsafe {
-            module.fill_descending_tiles(
-                &stream,
-                fill_launch,
-                data.cu_deviceptr() as *mut u32,
-                count as u64,
-            )?;
-            module.sort_tiles(&stream, sort_launch, data.cu_deviceptr() as *mut u32)?;
+            module.fill_descending_tiles(&stream, fill_launch, &mut data, count as u64)?;
+            module.sort_tiles(&stream, sort_launch, &mut data)?;
         }
     }
     stream.synchronize()?;
@@ -138,31 +123,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut timings = Vec::with_capacity(iterations);
     for _ in 0..iterations {
         unsafe {
-            module.fill_descending_tiles(
-                &stream,
-                fill_launch,
-                data.cu_deviceptr() as *mut u32,
-                count as u64,
-            )?;
+            module.fill_descending_tiles(&stream, fill_launch, &mut data, count as u64)?;
         }
         let start = stream.record_event(Some(0))?;
         unsafe {
-            module.sort_tiles(&stream, sort_launch, data.cu_deviceptr() as *mut u32)?;
+            module.sort_tiles(&stream, sort_launch, &mut data)?;
         }
         let end = stream.record_event(Some(0))?;
         end.synchronize()?;
         timings.push(start.elapsed_ms(&end)? as f64);
     }
 
-    let errors = DeviceBuffer::<u64>::zeroed(&stream, 1)?;
+    let mut errors = DeviceBuffer::<u64>::zeroed(&stream, 1)?;
     unsafe {
-        module.validate_tiles(
-            &stream,
-            fill_launch,
-            data.cu_deviceptr() as *const u32,
-            count as u64,
-            errors.cu_deviceptr() as *mut u64,
-        )?;
+        module.validate_tiles(&stream, fill_launch, &data, count as u64, &mut errors)?;
     }
     let error_count = errors.to_host_vec(&stream)?[0];
     if error_count != 0 {

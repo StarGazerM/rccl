@@ -18,7 +18,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     stable_sort_by_key(&exec, &mut keys, &mut values)?;
 
     assert_eq!(
-        support.validate_stable_u32_pairs(&stream, &keys, &values, rccl::Less)?,
+        support.validate_stable_u32_pairs(&stream, &keys, &values, u32::cmp)?,
         0
     );
     println!("generic GPU stable_sort_by_key example: PASS");

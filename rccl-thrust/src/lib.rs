@@ -17,5 +17,5 @@ pub use algorithm::{
 pub use cuda_core::DeviceCopy;
 pub use merge::{merge, merge_by, merge_by_key, merge_by_key_with};
 pub use rccl_cub::dispatch::merge::MergeError;
-pub use rccl_cub::{BFloat16, DeviceBool, DeviceComparator, F16, Greater, Less};
+pub use rccl_cub::{BFloat16, DeviceBool, F16};
 pub use rccl_memory as memory;

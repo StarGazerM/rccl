@@ -13,10 +13,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut records = DeviceBuffer::<gpu_support::I32Pair>::zeroed(&stream, COUNT)?;
     support.fill_i32_pairs(&stream, &mut records, 0x414f_535f_534f_5254)?;
     let aos_start = stream.record_event(Some(0))?;
-    rccl::stable_sort_by(&exec, &mut records, gpu_support::I32PairLess)?;
+    rccl::stable_sort_by(&exec, &mut records, gpu_support::order_i32_pair)?;
     let aos_end = stream.record_event(Some(0))?;
     assert_eq!(
-        support.validate_order(&stream, &records, gpu_support::I32PairLess)?,
+        support.validate_order(&stream, &records, gpu_support::order_i32_pair)?,
         0
     );
 
@@ -28,7 +28,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     rccl::stable_sort_by_key(&exec, &mut keys, &mut values)?;
     let soa_end = stream.record_event(Some(0))?;
     assert_eq!(
-        support.validate_stable_u32_pairs(&stream, &keys, &values, rccl::Less)?,
+        support.validate_stable_u32_pairs(&stream, &keys, &values, u32::cmp)?,
         0
     );
 

@@ -7,15 +7,27 @@
 //! target policy is passed as literal const arguments; no runtime policy record
 //! is retained.
 
-use crate::{DeviceComparator, Less};
+use crate::device::{DeviceRange, DeviceRangeMut};
+use core::cmp::Ordering;
 use cuda_core::{CudaStream, DeviceCopy, DriverError, LaunchConfig};
 use rccl_memory::{
     CudaAsyncMemoryResource, DeviceAllocator, DeviceBuffer as ResourceBuffer, DeviceSlice,
     DeviceSliceMut, MemoryError,
 };
-use std::{error::Error, fmt, mem::size_of, sync::Arc};
+use std::{error::Error, fmt, marker::PhantomData, mem::size_of, sync::Arc};
 
 const MERGE_PORTABLE_SHARED_BYTES: usize = 48 * 1024;
+
+#[inline(always)]
+fn natural_order<K: PartialOrd>(left: &K, right: &K) -> Ordering {
+    if left < right {
+        Ordering::Less
+    } else if right < left {
+        Ordering::Greater
+    } else {
+        Ordering::Equal
+    }
+}
 
 /// CUB's `nominal_4B_items_to_items`: floor-scale a tuning point by the
 /// combined record size and clamp it to `1..=nominal`.
@@ -89,6 +101,7 @@ const fn pair_shared_bytes<const BLOCK_THREADS: u32, const NOMINAL_4B_ITEMS: u32
     )
 }
 
+#[cfg(test)]
 #[inline(always)]
 const fn virtual_shared_bytes(shared_bytes: usize) -> usize {
     if shared_bytes > MERGE_PORTABLE_SHARED_BYTES {
@@ -124,7 +137,7 @@ const fn merge_pair_uses_fallback<
         && pair_shared_bytes::<FALLBACK_BLOCK_THREADS, 1, K, V>() <= MERGE_PORTABLE_SHARED_BYTES
 }
 
-/// Canonical comparator values shared with the sorting facade.
+/// Canonical order values shared with the sorting facade.
 /// Device-callable random-access input.  The concrete iterator type is a
 /// kernel parameter, so contiguous pointers, counting iterators, and mapped
 /// iterators remain separate compile-time specializations just as in Thrust.
@@ -164,30 +177,17 @@ pub(crate) unsafe trait MergeDeviceOutput<T: DeviceCopy>:
     }
 }
 
-#[doc(hidden)]
-#[repr(C)]
-pub(crate) struct RawMergeInput<T> {
-    pointer: *const T,
-}
-
-impl<T> Copy for RawMergeInput<T> {}
-impl<T> Clone for RawMergeInput<T> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-unsafe impl<T> DeviceCopy for RawMergeInput<T> {}
-unsafe impl<T: DeviceCopy + 'static> MergeDeviceInput<T> for RawMergeInput<T> {
+unsafe impl<T: DeviceCopy + 'static> MergeDeviceInput<T> for DeviceRange<T> {
     const DIRECT_REFERENCE: bool = true;
 
     #[inline(always)]
     unsafe fn read(&self, index: u64) -> T {
-        unsafe { self.pointer.add(index as usize).read() }
+        unsafe { (*self).read(index) }
     }
 
     #[inline(always)]
     unsafe fn pointer(&self, index: u64) -> *const T {
-        unsafe { self.pointer.add(index as usize) }
+        unsafe { self.as_ptr().add(index as usize) }
     }
 
     #[inline(always)]
@@ -196,28 +196,15 @@ unsafe impl<T: DeviceCopy + 'static> MergeDeviceInput<T> for RawMergeInput<T> {
     }
 }
 
-#[doc(hidden)]
-#[repr(C)]
-pub(crate) struct RawMergeOutput<T> {
-    pointer: *mut T,
-}
-
-impl<T> Copy for RawMergeOutput<T> {}
-impl<T> Clone for RawMergeOutput<T> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-unsafe impl<T> DeviceCopy for RawMergeOutput<T> {}
-unsafe impl<T: DeviceCopy + 'static> MergeDeviceOutput<T> for RawMergeOutput<T> {
+unsafe impl<T: DeviceCopy + 'static> MergeDeviceOutput<T> for DeviceRangeMut<T> {
     #[inline(always)]
     unsafe fn write(&self, index: u64, value: T) {
-        unsafe { self.pointer.add(index as usize).write(value) };
+        unsafe { (*self).write(index, value) };
     }
 
     #[inline(always)]
     unsafe fn write_from(&self, index: u64, source: *const T) {
-        unsafe { source.copy_to_nonoverlapping(self.pointer.add(index as usize), 1) };
+        unsafe { source.copy_to_nonoverlapping(self.as_mut_ptr().add(index as usize), 1) };
     }
 }
 #[derive(Debug)]
@@ -315,10 +302,10 @@ mod kernels {
         first_len: u64,
         second_len: u64,
         diagonal: u64,
-        comparator: &C,
+        order: &C,
     ) -> u64
     where
-        C: DeviceComparator<K>,
+        C: Fn(&K, &K) -> Ordering + Copy + 'static,
         K: DeviceCopy + 'static,
         I1: MergeDeviceInput<K>,
         I2: MergeDeviceInput<K>,
@@ -328,16 +315,14 @@ mod kernels {
         while begin < end {
             let middle = begin + (end - begin) / 2;
             let second_before_first = if I1::DIRECT_REFERENCE && I2::DIRECT_REFERENCE {
-                unsafe {
-                    comparator.less(
-                        &*second.pointer(diagonal - 1 - middle),
-                        &*first.pointer(middle),
-                    )
-                }
+                order(unsafe { &*second.pointer(diagonal - 1 - middle) }, unsafe {
+                    &*first.pointer(middle)
+                })
+                .is_lt()
             } else {
                 let first_key = unsafe { first.read(middle) };
                 let second_key = unsafe { second.read(diagonal - 1 - middle) };
-                unsafe { comparator.less(&second_key, &first_key) }
+                order(&second_key, &first_key).is_lt()
             };
             if second_before_first {
                 end = middle;
@@ -356,10 +341,10 @@ mod kernels {
         second_len: u64,
         tile_items: u64,
         partition_count: u64,
-        partitions: *mut u64,
-        comparator: C,
+        partitions: DeviceRangeMut<u64>,
+        order: C,
     ) where
-        C: DeviceComparator<K>,
+        C: Fn(&K, &K) -> Ordering + Copy + 'static,
         K: DeviceCopy + 'static,
         I1: MergeDeviceInput<K>,
         I2: MergeDeviceInput<K>,
@@ -368,16 +353,9 @@ mod kernels {
         if partition < partition_count {
             let diagonal = (partition * tile_items).min(first_len + second_len);
             let offset = unsafe {
-                merge_path_inputs(
-                    &first,
-                    &second,
-                    first_len,
-                    second_len,
-                    diagonal,
-                    &comparator,
-                )
+                merge_path_inputs(&first, &second, first_len, second_len, diagonal, &order)
             };
-            unsafe { partitions.add(partition as usize).write(offset) };
+            unsafe { partitions.write(partition, offset) };
         }
     }
 
@@ -401,11 +379,11 @@ mod kernels {
         second: I2,
         second_len: u64,
         output: O,
-        partitions: *const u64,
-        virtual_shared: *mut u8,
-        comparator: &C,
+        partitions: DeviceRange<u64>,
+        virtual_keys: DeviceRangeMut<K>,
+        order: &C,
     ) where
-        C: DeviceComparator<K>,
+        C: Fn(&K, &K) -> Ordering + Copy + 'static,
         K: DeviceCopy + 'static,
         I1: MergeDeviceInput<K>,
         I2: MergeDeviceInput<K>,
@@ -420,8 +398,8 @@ mod kernels {
         let tile_end = (tile_begin + tile_items as u64).min(total);
         let tile_count = (tile_end - tile_begin) as u32;
 
-        let first_begin = unsafe { partitions.add(tile_index as usize).read() };
-        let first_end = unsafe { partitions.add(tile_index as usize + 1).read() };
+        let first_begin = unsafe { partitions.read(tile_index) };
+        let first_end = unsafe { partitions.read(tile_index + 1) };
         let second_begin = tile_begin - first_begin;
         let second_end = tile_end - first_end;
         let first_count = (first_end - first_begin) as u32;
@@ -431,7 +409,9 @@ mod kernels {
             merge_shared_bytes(BLOCK_THREADS, items_per_thread, size_of::<K>(), 0);
         let shared = if required_shared > MERGE_PORTABLE_SHARED_BYTES {
             unsafe {
-                virtual_shared.add(tile_index as usize * align_up(required_shared, 128)) as *mut K
+                virtual_keys
+                    .as_mut_ptr()
+                    .add(tile_index as usize * tile_items as usize)
             }
         } else {
             DynamicSharedArray::<K, 256>::get()
@@ -456,14 +436,15 @@ mod kernels {
         let diagonal = (tid * items_per_thread).min(tile_count);
         let mut first_local = unsafe {
             merge_path_inputs(
-                &RawMergeInput { pointer: shared },
-                &RawMergeInput {
-                    pointer: shared.add(first_count as usize),
-                },
+                &DeviceRange::from_raw_parts(shared, first_count as usize),
+                &DeviceRange::from_raw_parts(
+                    shared.add(first_count as usize),
+                    second_count as usize,
+                ),
                 first_count as u64,
                 second_count as u64,
                 diagonal as u64,
-                comparator,
+                order,
             ) as u32
         };
         let mut second_local = diagonal - first_local;
@@ -472,12 +453,11 @@ mod kernels {
         if items_per_thread == 1 {
             let take_second = second_local < second_count
                 && (first_local >= first_count
-                    || unsafe {
-                        comparator.less(
-                            &*shared.add((first_count + second_local) as usize),
-                            &*shared.add(first_local as usize),
-                        )
-                    });
+                    || order(
+                        unsafe { &*shared.add((first_count + second_local) as usize) },
+                        unsafe { &*shared.add(first_local as usize) },
+                    )
+                    .is_lt());
             let source = if take_second {
                 first_count + second_local
             } else {
@@ -507,12 +487,11 @@ mod kernels {
                     cuda_device::thread::__unroll_config::<UNROLL>();
                     let take_second = second_local < second_count
                         && (first_local >= first_count
-                            || unsafe {
-                                comparator.less(
-                                    &*shared.add((first_count + second_local) as usize),
-                                    &*shared.add(first_local as usize),
-                                )
-                            });
+                            || order(
+                                unsafe { &*shared.add((first_count + second_local) as usize) },
+                                unsafe { &*shared.add(first_local as usize) },
+                            )
+                            .is_lt());
                     let key = if take_second {
                         let value = unsafe {
                             shared.add((first_count + second_local) as usize).read()
@@ -589,11 +568,11 @@ mod kernels {
         second: I2,
         second_len: u64,
         output: O,
-        partitions: *const u64,
-        virtual_shared: *mut u8,
-        comparator: C,
+        partitions: DeviceRange<u64>,
+        virtual_keys: DeviceRangeMut<K>,
+        order: C,
     ) where
-        C: DeviceComparator<K>,
+        C: Fn(&K, &K) -> Ordering + Copy + 'static,
         K: DeviceCopy + 'static,
         I1: MergeDeviceInput<K>,
         I2: MergeDeviceInput<K>,
@@ -608,8 +587,8 @@ mod kernels {
                 second_len,
                 output,
                 partitions,
-                virtual_shared,
-                &comparator,
+                virtual_keys,
+                &order,
             )
         };
     }
@@ -637,11 +616,12 @@ mod kernels {
         second_len: u64,
         output_keys: KO,
         output_values: VO,
-        partitions: *const u64,
-        virtual_shared: *mut u8,
-        comparator: C,
+        partitions: DeviceRange<u64>,
+        virtual_keys: DeviceRangeMut<K>,
+        virtual_values: DeviceRangeMut<V>,
+        order: C,
     ) where
-        C: DeviceComparator<K>,
+        C: Fn(&K, &K) -> Ordering + Copy + 'static,
         K: DeviceCopy + 'static,
         V: DeviceCopy + 'static,
         K1: MergeDeviceInput<K>,
@@ -661,25 +641,30 @@ mod kernels {
         let tile_end = (tile_begin + tile_items as u64).min(total);
         let tile_count = (tile_end - tile_begin) as u32;
 
-        let first_begin = unsafe { partitions.add(tile_index as usize).read() };
-        let first_end = unsafe { partitions.add(tile_index as usize + 1).read() };
+        let first_begin = unsafe { partitions.read(tile_index) };
+        let first_end = unsafe { partitions.read(tile_index + 1) };
         let second_begin = tile_begin - first_begin;
         let second_end = tile_end - first_end;
         let first_count = (first_end - first_begin) as u32;
         let second_count = (second_end - second_begin) as u32;
 
-        let keys_bytes = tile_items as usize * size_of::<K>();
-        let values_offset = align_up(keys_bytes, 256);
+        let values_offset = align_up(tile_items as usize * size_of::<K>(), 256);
         let required_shared = values_offset + tile_items as usize * size_of::<V>();
         let keys_shared = if required_shared > MERGE_PORTABLE_SHARED_BYTES {
             unsafe {
-                virtual_shared.add(tile_index as usize * align_up(required_shared, 128)) as *mut K
+                virtual_keys
+                    .as_mut_ptr()
+                    .add(tile_index as usize * tile_items as usize)
             }
         } else {
             DynamicSharedArray::<K, 256>::get()
         };
         let values_shared = if required_shared > MERGE_PORTABLE_SHARED_BYTES {
-            unsafe { (keys_shared as *mut u8).add(values_offset) as *mut V }
+            unsafe {
+                virtual_values
+                    .as_mut_ptr()
+                    .add(tile_index as usize * tile_items as usize)
+            }
         } else {
             DynamicSharedArray::<V, 256>::offset(values_offset)
         };
@@ -710,16 +695,15 @@ mod kernels {
         let diagonal = (tid * items_per_thread).min(tile_count);
         let mut first_local = unsafe {
             merge_path_inputs(
-                &RawMergeInput {
-                    pointer: keys_shared,
-                },
-                &RawMergeInput {
-                    pointer: keys_shared.add(first_count as usize),
-                },
+                &DeviceRange::from_raw_parts(keys_shared, first_count as usize),
+                &DeviceRange::from_raw_parts(
+                    keys_shared.add(first_count as usize),
+                    second_count as usize,
+                ),
                 first_count as u64,
                 second_count as u64,
                 diagonal as u64,
-                &comparator,
+                &order,
             ) as u32
         };
         let mut second_local = diagonal - first_local;
@@ -728,12 +712,11 @@ mod kernels {
         if items_per_thread == 1 {
             let take_second = second_local < second_count
                 && (first_local >= first_count
-                    || unsafe {
-                        comparator.less(
-                            &*keys_shared.add((first_count + second_local) as usize),
-                            &*keys_shared.add(first_local as usize),
-                        )
-                    });
+                    || order(
+                        unsafe { &*keys_shared.add((first_count + second_local) as usize) },
+                        unsafe { &*keys_shared.add(first_local as usize) },
+                    )
+                    .is_lt());
             let source = if take_second {
                 first_count + second_local
             } else {
@@ -767,12 +750,13 @@ mod kernels {
                     cuda_device::thread::__unroll_config::<UNROLL>();
                     let take_second = second_local < second_count
                         && (first_local >= first_count
-                            || unsafe {
-                                comparator.less(
-                                    &*keys_shared.add((first_count + second_local) as usize),
-                                    &*keys_shared.add(first_local as usize),
-                                )
-                            });
+                            || order(
+                                unsafe {
+                                    &*keys_shared.add((first_count + second_local) as usize)
+                                },
+                                unsafe { &*keys_shared.add(first_local as usize) },
+                            )
+                            .is_lt());
                     let index = if take_second {
                         let index = first_count + second_local;
                         second_local += 1;
@@ -891,18 +875,18 @@ unsafe fn launch_merge_keys<
     O,
 >(
     module: &kernels::LoadedModule,
-    stream: &Arc<CudaStream>,
+    stream: &CudaStream,
     first: I1,
     first_len: u64,
     second: I2,
     second_len: u64,
     output: O,
-    partitions: *mut u64,
-    virtual_shared: *mut u8,
-    comparator: C,
+    partitions: DeviceRangeMut<u64>,
+    virtual_keys: DeviceRangeMut<K>,
+    order: C,
 ) -> Result<(), MergeError>
 where
-    C: DeviceComparator<K>,
+    C: Fn(&K, &K) -> Ordering + Copy + 'static,
     K: DeviceCopy + 'static,
     I1: MergeDeviceInput<K>,
     I2: MergeDeviceInput<K>,
@@ -935,7 +919,7 @@ where
             tile,
             partition_count,
             partitions,
-            comparator,
+            order,
         )?;
         module.merge_keys::<BLOCK_THREADS, NOMINAL_4B_ITEMS, UNROLL, C, K, I1, I2, O>(
             stream,
@@ -945,9 +929,9 @@ where
             second,
             second_len,
             output,
-            partitions,
-            virtual_shared,
-            comparator,
+            partitions.as_read_only(),
+            virtual_keys,
+            order,
         )?;
     }
     Ok(())
@@ -972,7 +956,7 @@ unsafe fn launch_merge_pairs<
     VO,
 >(
     module: &kernels::LoadedModule,
-    stream: &Arc<CudaStream>,
+    stream: &CudaStream,
     first_keys: K1,
     first_values: V1,
     first_len: u64,
@@ -981,12 +965,13 @@ unsafe fn launch_merge_pairs<
     second_len: u64,
     output_keys: KO,
     output_values: VO,
-    partitions: *mut u64,
-    virtual_shared: *mut u8,
-    comparator: C,
+    partitions: DeviceRangeMut<u64>,
+    virtual_keys: DeviceRangeMut<K>,
+    virtual_values: DeviceRangeMut<V>,
+    order: C,
 ) -> Result<(), MergeError>
 where
-    C: DeviceComparator<K>,
+    C: Fn(&K, &K) -> Ordering + Copy + 'static,
     K: DeviceCopy + 'static,
     V: DeviceCopy + 'static,
     K1: MergeDeviceInput<K>,
@@ -1028,7 +1013,7 @@ where
             tile,
             partition_count,
             partitions,
-            comparator,
+            order,
         )?;
         module.merge_pairs::<
             BLOCK_THREADS,
@@ -1054,24 +1039,68 @@ where
             second_len,
             output_keys,
             output_values,
-            partitions,
-            virtual_shared,
-            comparator,
+            partitions.as_read_only(),
+            virtual_keys,
+            virtual_values,
+            order,
         )?;
     }
     Ok(())
 }
 
-pub(crate) struct MergeWorkspace<A: DeviceAllocator + Clone = CudaAsyncMemoryResource> {
-    partitions: ResourceBuffer<u64, A>,
-    virtual_shared: ResourceBuffer<u8, A>,
+pub(crate) struct MergeWorkspace<
+    'stream,
+    K: DeviceCopy,
+    V: DeviceCopy,
+    A: DeviceAllocator + Clone = CudaAsyncMemoryResource,
+> {
+    partitions: ResourceBuffer<'stream, u64, A>,
+    virtual_keys: ResourceBuffer<'stream, K, A>,
+    virtual_values: Option<ResourceBuffer<'stream, V, A>>,
     capacity: usize,
 }
 
-impl<A: DeviceAllocator + Clone> MergeWorkspace<A> {
-    fn transition_to(&mut self, stream: &Arc<CudaStream>) -> Result<(), MemoryError> {
-        self.partitions.transition_to(stream.clone())?;
-        self.virtual_shared.transition_to(stream.clone())
+struct MergeWorkspaceView<'workspace, K, V> {
+    partitions: DeviceRangeMut<u64>,
+    virtual_keys: DeviceRangeMut<K>,
+    virtual_values: Option<DeviceRangeMut<V>>,
+    _borrow: PhantomData<&'workspace mut (K, V)>,
+}
+
+impl<K: DeviceCopy, V: DeviceCopy, A: DeviceAllocator + Clone> MergeWorkspace<'_, K, V, A> {
+    fn ensure_usable_on(&self, stream: &CudaStream) -> Result<(), MemoryError> {
+        self.partitions.ensure_usable_on(stream)?;
+        self.virtual_keys.ensure_usable_on(stream)?;
+        if let Some(values) = &self.virtual_values {
+            values.ensure_usable_on(stream)?;
+        }
+        Ok(())
+    }
+
+    fn launch_view(&mut self) -> MergeWorkspaceView<'_, K, V> {
+        // SAFETY: every range is bounded by its owning typed allocation. The
+        // non-Copy view retains this exclusive workspace borrow for dispatch.
+        let partitions = unsafe {
+            DeviceRangeMut::from_raw_parts(
+                self.partitions.cu_deviceptr() as *mut u64,
+                self.partitions.len(),
+            )
+        };
+        let virtual_keys = unsafe {
+            DeviceRangeMut::from_raw_parts(
+                self.virtual_keys.cu_deviceptr() as *mut K,
+                self.virtual_keys.len(),
+            )
+        };
+        let virtual_values = self.virtual_values.as_mut().map(|values| unsafe {
+            DeviceRangeMut::from_raw_parts(values.cu_deviceptr() as *mut V, values.len())
+        });
+        MergeWorkspaceView {
+            partitions,
+            virtual_keys,
+            virtual_values,
+            _borrow: PhantomData,
+        }
     }
 }
 
@@ -1091,95 +1120,100 @@ impl<A: DeviceAllocator + Clone> DeviceMerge<A> {
     }
 
     pub(crate) fn allocate_keys_workspace<
+        'stream,
         const BLOCK_THREADS: u32,
         const NOMINAL_4B_ITEMS: u32,
         K,
     >(
         &self,
-        stream: &Arc<CudaStream>,
+        stream: &'stream CudaStream,
         capacity: usize,
-    ) -> Result<MergeWorkspace<A>, MergeError>
+    ) -> Result<MergeWorkspace<'stream, K, (), A>, MergeError>
     where
         K: DeviceCopy,
     {
-        if capacity != 0 && size_of::<K>() == 0 {
+        if size_of::<K>() == 0 {
             return Err(MergeError::ZeroSizedKey);
         }
         let items_per_thread = key_items_per_thread::<NOMINAL_4B_ITEMS, K>();
         let tile_items = BLOCK_THREADS * items_per_thread;
-        let virtual_shared_bytes_per_tile = virtual_shared_bytes(merge_shared_bytes(
-            BLOCK_THREADS,
-            items_per_thread,
-            size_of::<K>(),
-            0,
-        ));
-        self.allocate_workspace_for(stream, capacity, tile_items, virtual_shared_bytes_per_tile)
+        let required_shared =
+            merge_shared_bytes(BLOCK_THREADS, items_per_thread, size_of::<K>(), 0);
+        let (tiles, partitions) = workspace_shape(capacity, tile_items)?;
+        let virtual_items = if required_shared > MERGE_PORTABLE_SHARED_BYTES {
+            tiles
+                .checked_mul(tile_items as usize)
+                .ok_or(MergeError::LengthOverflow)?
+        } else {
+            0
+        };
+        Ok(MergeWorkspace {
+            partitions: ResourceBuffer::zeroed_in(self.allocator.clone(), stream, partitions)?,
+            virtual_keys: unsafe {
+                ResourceBuffer::uninitialized_in(self.allocator.clone(), stream, virtual_items)?
+            },
+            virtual_values: None,
+            capacity,
+        })
     }
 
     pub(crate) fn allocate_pairs_workspace<
+        'stream,
         const BLOCK_THREADS: u32,
         const NOMINAL_4B_ITEMS: u32,
         K,
         V,
     >(
         &self,
-        stream: &Arc<CudaStream>,
+        stream: &'stream CudaStream,
         capacity: usize,
-    ) -> Result<MergeWorkspace<A>, MergeError>
+    ) -> Result<MergeWorkspace<'stream, K, V, A>, MergeError>
     where
         K: DeviceCopy,
         V: DeviceCopy,
     {
-        if capacity != 0 && size_of::<K>() == 0 {
+        if size_of::<K>() == 0 {
             return Err(MergeError::ZeroSizedKey);
         }
-        if capacity != 0 && size_of::<V>() == 0 {
+        if size_of::<V>() == 0 {
             return Err(MergeError::ZeroSizedValue);
         }
         let items_per_thread = pair_items_per_thread::<NOMINAL_4B_ITEMS, K, V>();
         let tile_items = BLOCK_THREADS * items_per_thread;
-        let virtual_shared_bytes_per_tile = virtual_shared_bytes(merge_shared_bytes(
+        let required_shared = merge_shared_bytes(
             BLOCK_THREADS,
             items_per_thread,
             size_of::<K>(),
             size_of::<V>(),
-        ));
-        self.allocate_workspace_for(stream, capacity, tile_items, virtual_shared_bytes_per_tile)
-    }
-
-    fn allocate_workspace_for(
-        &self,
-        stream: &Arc<CudaStream>,
-        capacity: usize,
-        tile_items: u32,
-        virtual_shared_bytes_per_tile: usize,
-    ) -> Result<MergeWorkspace<A>, MergeError> {
-        let tiles = capacity.div_ceil(tile_items as usize);
-        if tiles > i32::MAX as usize {
-            return Err(MergeError::LengthOverflow);
-        }
-        let partitions = tiles.checked_add(1).ok_or(MergeError::LengthOverflow)?;
-        let virtual_bytes = tiles
-            .checked_mul(virtual_shared_bytes_per_tile)
-            .ok_or(MergeError::LengthOverflow)?;
+        );
+        let (tiles, partitions) = workspace_shape(capacity, tile_items)?;
+        let virtual_items = if required_shared > MERGE_PORTABLE_SHARED_BYTES {
+            tiles
+                .checked_mul(tile_items as usize)
+                .ok_or(MergeError::LengthOverflow)?
+        } else {
+            0
+        };
         Ok(MergeWorkspace {
-            partitions: ResourceBuffer::zeroed_in(
-                self.allocator.clone(),
-                stream.clone(),
-                partitions,
-            )?,
-            virtual_shared: unsafe {
-                ResourceBuffer::uninitialized_in(
-                    self.allocator.clone(),
-                    stream.clone(),
-                    virtual_bytes,
-                )?
+            partitions: ResourceBuffer::zeroed_in(self.allocator.clone(), stream, partitions)?,
+            virtual_keys: unsafe {
+                ResourceBuffer::uninitialized_in(self.allocator.clone(), stream, virtual_items)?
             },
+            virtual_values: Some(unsafe {
+                ResourceBuffer::uninitialized_in(self.allocator.clone(), stream, virtual_items)?
+            }),
             capacity,
         })
     }
 
-    pub(crate) fn merge_keys<
+    /// Enqueue a key-only merge using a caller-owned workspace.
+    ///
+    /// # Safety
+    ///
+    /// Every input, output, and workspace borrow must remain alive and
+    /// inaccessible until all submitted stream work completes, including when
+    /// a later launch in this method returns an error.
+    pub(crate) unsafe fn merge_keys<
         const BLOCK_THREADS: u32,
         const NOMINAL_4B_ITEMS: u32,
         const UNROLL: u32,
@@ -1190,15 +1224,15 @@ impl<A: DeviceAllocator + Clone> DeviceMerge<A> {
         O,
     >(
         &self,
-        stream: &Arc<CudaStream>,
+        stream: &CudaStream,
         first: &A1,
         second: &A2,
         output: &mut O,
-        comparator: C,
-        workspace: &mut MergeWorkspace<A>,
+        order: C,
+        workspace: &mut MergeWorkspace<'_, K, (), A>,
     ) -> Result<usize, MergeError>
     where
-        C: DeviceComparator<K>,
+        C: Fn(&K, &K) -> Ordering + Copy + 'static,
         K: DeviceCopy + 'static,
         A1: DeviceSlice<K> + ?Sized,
         A2: DeviceSlice<K> + ?Sized,
@@ -1216,25 +1250,20 @@ impl<A: DeviceAllocator + Clone> DeviceMerge<A> {
         }
         let tile_items = BLOCK_THREADS * key_items_per_thread::<NOMINAL_4B_ITEMS, K>();
         self.check_workspace(workspace, total, tile_items)?;
-        workspace.transition_to(stream)?;
+        workspace.ensure_usable_on(stream)?;
+        let workspace = workspace.launch_view();
         unsafe {
             launch_merge_keys::<BLOCK_THREADS, NOMINAL_4B_ITEMS, UNROLL, C, K, _, _, _>(
                 &self.module,
                 stream,
-                RawMergeInput {
-                    pointer: first.cu_deviceptr() as *const K,
-                },
+                DeviceRange::from_raw_parts(first.cu_deviceptr() as *const K, first.len()),
                 first.len() as u64,
-                RawMergeInput {
-                    pointer: second.cu_deviceptr() as *const K,
-                },
+                DeviceRange::from_raw_parts(second.cu_deviceptr() as *const K, second.len()),
                 second.len() as u64,
-                RawMergeOutput {
-                    pointer: output.cu_deviceptr() as *mut K,
-                },
-                workspace.partitions.cu_deviceptr() as *mut u64,
-                workspace.virtual_shared.cu_deviceptr() as *mut u8,
-                comparator,
+                DeviceRangeMut::from_raw_parts(output.cu_deviceptr() as *mut K, output.len()),
+                workspace.partitions,
+                workspace.virtual_keys,
+                order,
             )?;
         }
         Ok(total)
@@ -1244,7 +1273,14 @@ impl<A: DeviceAllocator + Clone> DeviceMerge<A> {
         clippy::too_many_arguments,
         reason = "internal key-value merge boundary preserves separately borrowed ranges"
     )]
-    pub(crate) fn merge_pairs<
+    /// Enqueue a key/value merge using a caller-owned workspace.
+    ///
+    /// # Safety
+    ///
+    /// Every input, output, and workspace borrow must remain alive and
+    /// inaccessible until all submitted stream work completes, including when
+    /// a later launch in this method returns an error.
+    pub(crate) unsafe fn merge_pairs<
         const BLOCK_THREADS: u32,
         const NOMINAL_4B_ITEMS: u32,
         const UNROLL: u32,
@@ -1259,18 +1295,18 @@ impl<A: DeviceAllocator + Clone> DeviceMerge<A> {
         VO,
     >(
         &self,
-        stream: &Arc<CudaStream>,
+        stream: &CudaStream,
         first_keys: &K1,
         first_values: &V1,
         second_keys: &K2,
         second_values: &V2,
         output_keys: &mut KO,
         output_values: &mut VO,
-        comparator: C,
-        workspace: &mut MergeWorkspace<A>,
+        order: C,
+        workspace: &mut MergeWorkspace<'_, K, V, A>,
     ) -> Result<(usize, usize), MergeError>
     where
-        C: DeviceComparator<K>,
+        C: Fn(&K, &K) -> Ordering + Copy + 'static,
         K: DeviceCopy + 'static,
         V: DeviceCopy + 'static,
         K1: DeviceSlice<K> + ?Sized,
@@ -1300,42 +1336,53 @@ impl<A: DeviceAllocator + Clone> DeviceMerge<A> {
         }
         let tile_items = BLOCK_THREADS * pair_items_per_thread::<NOMINAL_4B_ITEMS, K, V>();
         self.check_workspace(workspace, total, tile_items)?;
-        workspace.transition_to(stream)?;
+        workspace.ensure_usable_on(stream)?;
+        let workspace = workspace.launch_view();
+        let virtual_values = workspace
+            .virtual_values
+            .expect("pair workspace always owns typed value spill storage");
         unsafe {
             launch_merge_pairs::<BLOCK_THREADS, NOMINAL_4B_ITEMS, UNROLL, C, K, V, _, _, _, _, _, _>(
                 &self.module,
                 stream,
-                RawMergeInput {
-                    pointer: first_keys.cu_deviceptr() as *const K,
-                },
-                RawMergeInput {
-                    pointer: first_values.cu_deviceptr() as *const V,
-                },
+                DeviceRange::from_raw_parts(
+                    first_keys.cu_deviceptr() as *const K,
+                    first_keys.len(),
+                ),
+                DeviceRange::from_raw_parts(
+                    first_values.cu_deviceptr() as *const V,
+                    first_values.len(),
+                ),
                 first_keys.len() as u64,
-                RawMergeInput {
-                    pointer: second_keys.cu_deviceptr() as *const K,
-                },
-                RawMergeInput {
-                    pointer: second_values.cu_deviceptr() as *const V,
-                },
+                DeviceRange::from_raw_parts(
+                    second_keys.cu_deviceptr() as *const K,
+                    second_keys.len(),
+                ),
+                DeviceRange::from_raw_parts(
+                    second_values.cu_deviceptr() as *const V,
+                    second_values.len(),
+                ),
                 second_keys.len() as u64,
-                RawMergeOutput {
-                    pointer: output_keys.cu_deviceptr() as *mut K,
-                },
-                RawMergeOutput {
-                    pointer: output_values.cu_deviceptr() as *mut V,
-                },
-                workspace.partitions.cu_deviceptr() as *mut u64,
-                workspace.virtual_shared.cu_deviceptr() as *mut u8,
-                comparator,
+                DeviceRangeMut::from_raw_parts(
+                    output_keys.cu_deviceptr() as *mut K,
+                    output_keys.len(),
+                ),
+                DeviceRangeMut::from_raw_parts(
+                    output_values.cu_deviceptr() as *mut V,
+                    output_values.len(),
+                ),
+                workspace.partitions,
+                workspace.virtual_keys,
+                virtual_values,
+                order,
             )?;
         }
         Ok((total, total))
     }
 
-    fn check_workspace(
+    fn check_workspace<K: DeviceCopy, V: DeviceCopy>(
         &self,
-        workspace: &MergeWorkspace<A>,
+        workspace: &MergeWorkspace<'_, K, V, A>,
         total: usize,
         tile_items: u32,
     ) -> Result<(), MergeError> {
@@ -1348,6 +1395,15 @@ impl<A: DeviceAllocator + Clone> DeviceMerge<A> {
         }
         Ok(())
     }
+}
+
+fn workspace_shape(capacity: usize, tile_items: u32) -> Result<(usize, usize), MergeError> {
+    let tiles = capacity.div_ceil(tile_items as usize);
+    if tiles > i32::MAX as usize {
+        return Err(MergeError::LengthOverflow);
+    }
+    let partitions = tiles.checked_add(1).ok_or(MergeError::LengthOverflow)?;
+    Ok((tiles, partitions))
 }
 
 fn checked_total(first: usize, second: usize) -> Result<usize, MergeError> {
@@ -1410,7 +1466,7 @@ pub unsafe fn merge<
     A,
 >(
     context: &crate::KernelContext,
-    stream: &Arc<CudaStream>,
+    stream: &CudaStream,
     allocator: &A,
     first: &A1,
     second: &A2,
@@ -1429,17 +1485,25 @@ where
             NORMAL_ITEMS,
             NORMAL_UNROLL,
             FALLBACK_BLOCK_THREADS,
-            Less,
+            _,
             K,
             A1,
             A2,
             O,
             A,
-        >(context, stream, allocator, first, second, output, Less)
+        >(
+            context,
+            stream,
+            allocator,
+            first,
+            second,
+            output,
+            natural_order::<K>,
+        )
     }
 }
 
-/// Enqueue a stable merge with a state-carrying device comparator.
+/// Enqueue a stable merge with a state-carrying device order.
 ///
 /// # Safety
 ///
@@ -1459,15 +1523,15 @@ pub unsafe fn merge_by<
     A,
 >(
     context: &crate::KernelContext,
-    stream: &Arc<CudaStream>,
+    stream: &CudaStream,
     allocator: &A,
     first: &A1,
     second: &A2,
     output: &mut O,
-    comparator: C,
+    order: C,
 ) -> Result<usize, MergeError>
 where
-    C: DeviceComparator<K>,
+    C: Fn(&K, &K) -> Ordering + Copy + 'static,
     K: DeviceCopy + 'static,
     A1: DeviceSlice<K> + ?Sized,
     A2: DeviceSlice<K> + ?Sized,
@@ -1477,13 +1541,13 @@ where
     if merge_key_uses_fallback::<NORMAL_BLOCK_THREADS, NORMAL_ITEMS, FALLBACK_BLOCK_THREADS, K>() {
         return unsafe {
             merge_by_geometry::<FALLBACK_BLOCK_THREADS, 1, 2, C, K, A1, A2, O, A>(
-                context, stream, allocator, first, second, output, comparator,
+                context, stream, allocator, first, second, output, order,
             )
         };
     }
     unsafe {
         merge_by_geometry::<NORMAL_BLOCK_THREADS, NORMAL_ITEMS, NORMAL_UNROLL, C, K, A1, A2, O, A>(
-            context, stream, allocator, first, second, output, comparator,
+            context, stream, allocator, first, second, output, order,
         )
     }
 }
@@ -1500,15 +1564,15 @@ unsafe fn merge_by_geometry<
     A,
 >(
     context: &crate::KernelContext,
-    stream: &Arc<CudaStream>,
+    stream: &CudaStream,
     allocator: &A,
     first: &A1,
     second: &A2,
     output: &mut O,
-    comparator: C,
+    order: C,
 ) -> Result<usize, MergeError>
 where
-    C: DeviceComparator<K>,
+    C: Fn(&K, &K) -> Ordering + Copy + 'static,
     K: DeviceCopy + 'static,
     A1: DeviceSlice<K> + ?Sized,
     A2: DeviceSlice<K> + ?Sized,
@@ -1522,14 +1586,16 @@ where
     let engine = DeviceMerge::new(context, allocator.clone())?;
     let mut workspace =
         engine.allocate_keys_workspace::<BLOCK_THREADS, NOMINAL_4B_ITEMS, K>(stream, total)?;
-    engine.merge_keys::<BLOCK_THREADS, NOMINAL_4B_ITEMS, UNROLL, C, K, _, _, _>(
-        stream,
-        first,
-        second,
-        output,
-        comparator,
-        &mut workspace,
-    )
+    unsafe {
+        engine.merge_keys::<BLOCK_THREADS, NOMINAL_4B_ITEMS, UNROLL, C, K, _, _, _>(
+            stream,
+            first,
+            second,
+            output,
+            order,
+            &mut workspace,
+        )
+    }
 }
 
 /// Enqueue a stable ascending key/value merge. Both returned logical ends equal
@@ -1560,7 +1626,7 @@ pub unsafe fn merge_by_key<
     A,
 >(
     context: &crate::KernelContext,
-    stream: &Arc<CudaStream>,
+    stream: &CudaStream,
     allocator: &A,
     first_keys: &K1,
     first_values: &V1,
@@ -1586,7 +1652,7 @@ where
             NORMAL_ITEMS,
             NORMAL_UNROLL,
             FALLBACK_BLOCK_THREADS,
-            Less,
+            _,
             K,
             V,
             K1,
@@ -1606,12 +1672,12 @@ where
             second_values,
             output_keys,
             output_values,
-            Less,
+            natural_order::<K>,
         )
     }
 }
 
-/// Enqueue a stable key/value merge with a state-carrying device comparator.
+/// Enqueue a stable key/value merge with a state-carrying device order.
 ///
 /// # Safety
 ///
@@ -1639,7 +1705,7 @@ pub unsafe fn merge_by_key_with<
     A,
 >(
     context: &crate::KernelContext,
-    stream: &Arc<CudaStream>,
+    stream: &CudaStream,
     allocator: &A,
     first_keys: &K1,
     first_values: &V1,
@@ -1647,10 +1713,10 @@ pub unsafe fn merge_by_key_with<
     second_values: &V2,
     output_keys: &mut KO,
     output_values: &mut VO,
-    comparator: C,
+    order: C,
 ) -> Result<(usize, usize), MergeError>
 where
-    C: DeviceComparator<K>,
+    C: Fn(&K, &K) -> Ordering + Copy + 'static,
     K: DeviceCopy + 'static,
     V: DeviceCopy + 'static,
     K1: DeviceSlice<K> + ?Sized,
@@ -1688,7 +1754,7 @@ where
                 second_values,
                 output_keys,
                 output_values,
-                comparator,
+                order,
             )
         };
     }
@@ -1717,7 +1783,7 @@ where
             second_values,
             output_keys,
             output_values,
-            comparator,
+            order,
         )
     }
 }
@@ -1742,7 +1808,7 @@ unsafe fn merge_by_key_with_geometry<
     A,
 >(
     context: &crate::KernelContext,
-    stream: &Arc<CudaStream>,
+    stream: &CudaStream,
     allocator: &A,
     first_keys: &K1,
     first_values: &V1,
@@ -1750,10 +1816,10 @@ unsafe fn merge_by_key_with_geometry<
     second_values: &V2,
     output_keys: &mut KO,
     output_values: &mut VO,
-    comparator: C,
+    order: C,
 ) -> Result<(usize, usize), MergeError>
 where
-    C: DeviceComparator<K>,
+    C: Fn(&K, &K) -> Ordering + Copy + 'static,
     K: DeviceCopy + 'static,
     V: DeviceCopy + 'static,
     K1: DeviceSlice<K> + ?Sized,
@@ -1773,17 +1839,19 @@ where
     let engine = DeviceMerge::new(context, allocator.clone())?;
     let mut workspace =
         engine.allocate_pairs_workspace::<BLOCK_THREADS, NOMINAL_4B_ITEMS, K, V>(stream, total)?;
-    engine.merge_pairs::<BLOCK_THREADS, NOMINAL_4B_ITEMS, UNROLL, C, K, V, _, _, _, _, _, _>(
-        stream,
-        first_keys,
-        first_values,
-        second_keys,
-        second_values,
-        output_keys,
-        output_values,
-        comparator,
-        &mut workspace,
-    )
+    unsafe {
+        engine.merge_pairs::<BLOCK_THREADS, NOMINAL_4B_ITEMS, UNROLL, C, K, V, _, _, _, _, _, _>(
+            stream,
+            first_keys,
+            first_values,
+            second_keys,
+            second_values,
+            output_keys,
+            output_values,
+            order,
+            &mut workspace,
+        )
+    }
 }
 
 #[cfg(test)]

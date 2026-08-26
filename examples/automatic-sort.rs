@@ -3,7 +3,7 @@ use std::error::Error;
 
 mod gpu_support;
 
-use rccl::{Greater, sort_by};
+use rccl::sort_by;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let context = CudaContext::new(0)?;
@@ -13,8 +13,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut keys = DeviceBuffer::<i64>::zeroed(&stream, 1_000_003)?;
 
     support.fill_i64(&stream, &mut keys, 0x534d_4152_545f_534f)?;
-    sort_by(&exec, &mut keys, Greater)?;
-    assert_eq!(support.validate_order(&stream, &keys, Greater)?, 0);
-    println!("type-inferred i64 comparator dispatch example: PASS");
+    let descending = |left: &i64, right: &i64| right.cmp(left);
+    sort_by(&exec, &mut keys, descending)?;
+    assert_eq!(support.validate_order(&stream, &keys, descending)?, 0);
+    println!("type-inferred i64 order dispatch example: PASS");
     Ok(())
 }

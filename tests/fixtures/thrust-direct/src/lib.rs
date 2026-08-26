@@ -10,8 +10,6 @@ pub fn direct_thrust_surface_compiles<'stream, A, B1, B2, O>(
     B2: host_algorithms::memory::DeviceSlice<u32> + ?Sized,
     O: host_algorithms::memory::DeviceSliceMut<u32> + ?Sized,
 {
-    fn comparator<C: host_algorithms::DeviceComparator<u32>>() {}
-    comparator::<host_algorithms::Less>();
     let _ = host_algorithms::sort(exec, sortable);
     let _ = host_algorithms::merge(exec, first, second, output);
 }
@@ -21,10 +19,18 @@ mod tests {
     use super::*;
 
     type Allocator = host_algorithms::memory::CudaAsyncMemoryResource;
-    type Buffer = host_algorithms::memory::DeviceBuffer<u32, Allocator>;
+    type Buffer<'stream> = host_algorithms::memory::DeviceBuffer<'stream, u32, Allocator>;
 
     #[test]
     fn direct_thrust_dependency_instantiates_sort_and_merge_facades() {
-        let _ = direct_thrust_surface_compiles::<Allocator, Buffer, Buffer, Buffer>;
+        fn instantiate<'stream>(_: core::marker::PhantomData<&'stream ()>) {
+            let _ = direct_thrust_surface_compiles::<
+                Allocator,
+                Buffer<'stream>,
+                Buffer<'stream>,
+                Buffer<'stream>,
+            >;
+        }
+        let _ = instantiate;
     }
 }

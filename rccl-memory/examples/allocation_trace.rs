@@ -82,7 +82,9 @@ fn run_trace(
     allocation_count: usize,
     capture_latency: bool,
 ) -> Result<TraceResult, Box<dyn Error>> {
-    let mut live: Vec<Option<DeviceBlock>> = vec![None; allocation_count];
+    let mut live: Vec<Option<DeviceBlock>> = std::iter::repeat_with(|| None)
+        .take(allocation_count)
+        .collect();
     let mut latencies = capture_latency.then(|| Vec::with_capacity(operations.len()));
     let mut allocation_latencies = capture_latency.then(Vec::new);
     let mut free_latencies = capture_latency.then(Vec::new);

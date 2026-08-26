@@ -96,7 +96,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!(
         "public operation: {} on {} u32 keys ({:.3} GiB)",
         if descending {
-            "sort_by(Greater)"
+            "sort_by(descending closure)"
         } else {
             "sort"
         },
@@ -106,7 +106,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     support.fill_pattern_u32(&stream, &mut keys, 0x7263_636c, pattern)?;
     if descending {
-        rccl::sort_by(&exec, &mut keys, rccl::Greater)?;
+        rccl::sort_by(&exec, &mut keys, |left: &u32, right: &u32| right.cmp(left))?;
     } else {
         rccl::sort(&exec, &mut keys)?;
     }
@@ -122,7 +122,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         )?;
         let start = stream.record_event(Some(0))?;
         if descending {
-            rccl::sort_by(&exec, &mut keys, rccl::Greater)?;
+            rccl::sort_by(&exec, &mut keys, |left: &u32, right: &u32| right.cmp(left))?;
         } else {
             rccl::sort(&exec, &mut keys)?;
         }
@@ -134,9 +134,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let errors = if descending {
-        support.validate_order(&stream, &keys, rccl::Greater)?
+        support.validate_order(&stream, &keys, |left: &u32, right: &u32| right.cmp(left))?
     } else {
-        support.validate_order(&stream, &keys, rccl::Less)?
+        support.validate_order(&stream, &keys, u32::cmp)?
     };
     if errors != 0 {
         return Err(format!("GPU validation found {errors} adjacent inversions").into());

@@ -154,10 +154,7 @@ impl fmt::Display for MemoryError {
                     "memory resource, buffer, and stream must share one CUDA context"
                 )
             }
-            Self::StreamMismatch => write!(
-                f,
-                "buffer is ordered on a different CUDA stream; call DeviceBuffer::transition_to first"
-            ),
+            Self::StreamMismatch => write!(f, "buffer is bound to a different CUDA stream"),
             Self::AllocationLimitExceeded {
                 requested,
                 allocated,
@@ -231,9 +228,20 @@ impl From<std::alloc::LayoutError> for MemoryError {
 
 /// A byte allocation returned by a [`DeviceAllocator`].
 ///
-/// This is a copyable descriptor, not an owner. Ownership is transferred back
-/// to the resource by exactly one `deallocate` call.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// This is an affine ownership token. It is intentionally neither `Copy` nor
+/// `Clone`: ownership is transferred back to the resource by exactly one
+/// `deallocate` call.
+///
+/// ```compile_fail
+/// use rccl_memory::DeviceBlock;
+///
+/// fn duplicate(block: DeviceBlock) {
+///     let first_owner = block;
+///     let second_owner = block; // use of moved value
+///     drop((first_owner, second_owner));
+/// }
+/// ```
+#[derive(Debug, PartialEq, Eq)]
 pub struct DeviceBlock {
     ptr: sys::CUdeviceptr,
     size: usize,
@@ -252,15 +260,15 @@ impl DeviceBlock {
         Self { ptr, size, align }
     }
 
-    pub const fn cu_deviceptr(self) -> sys::CUdeviceptr {
+    pub const fn cu_deviceptr(&self) -> sys::CUdeviceptr {
         self.ptr
     }
 
-    pub const fn size(self) -> usize {
+    pub const fn size(&self) -> usize {
         self.size
     }
 
-    pub const fn align(self) -> usize {
+    pub const fn align(&self) -> usize {
         self.align
     }
 
@@ -268,11 +276,11 @@ impl DeviceBlock {
     /// pointer. Dereferencing is only valid when the allocating resource
     /// reports `properties().host_accessible` and CUDA's coherence rules permit
     /// host access at that point.
-    pub const fn host_ptr(self) -> *mut c_void {
+    pub const fn host_ptr(&self) -> *mut c_void {
         self.ptr as usize as *mut c_void
     }
 
-    pub fn layout(self) -> Result<Layout, MemoryError> {
+    pub fn layout(&self) -> Result<Layout, MemoryError> {
         Ok(Layout::from_size_align(self.size, self.align)?)
     }
 }
@@ -616,7 +624,10 @@ pub unsafe trait DeviceAllocator {
     /// # Safety
     ///
     /// `block` must be live, owned by the caller, allocated by `self`, and no
-    /// use may be ordered after this deallocation on any stream.
+    /// use may be ordered after this deallocation on any stream. Ownership is
+    /// consumed regardless of whether this method returns `Ok` or `Err`; an
+    /// implementation that cannot complete deallocation may therefore leak the
+    /// allocation, but it must never fabricate a replacement ownership token.
     unsafe fn deallocate(&self, block: DeviceBlock, stream: &CudaStream)
     -> Result<(), MemoryError>;
 
@@ -1069,23 +1080,36 @@ unsafe impl DeviceAllocator for CudaPoolMemoryResource {
     }
 }
 
-/// Shared view of an existing private CUDA pool.
+/// Borrowed view of an existing private CUDA pool.
 ///
-/// RMM exposes a non-owning raw-handle view. Rust retains the pool through an
-/// `Arc`, preventing the source pool from being destroyed while a view or one
-/// of its resource-owned buffers is still live.
-#[derive(Debug, Clone)]
-pub struct CudaPoolViewMemoryResource {
-    pool: Arc<CudaPoolMemoryResource>,
+/// RMM exposes a non-owning raw-handle view. Rust represents that relationship
+/// as a borrow, preventing the source pool from being destroyed while a view
+/// or one of its resource-owned buffers is still live.
+///
+/// ```compile_fail
+/// use cuda_core::CudaContext;
+/// use rccl_memory::{CudaPoolMemoryResource, CudaPoolViewMemoryResource, DeviceBuffer, PoolConfig};
+///
+/// let context = CudaContext::new(0).unwrap();
+/// let stream = context.default_stream();
+/// let pool = CudaPoolMemoryResource::new(context, PoolConfig::default()).unwrap();
+/// let view = CudaPoolViewMemoryResource::new(&pool);
+/// let buffer = DeviceBuffer::<u8, _>::zeroed_in(view, &stream, 16).unwrap();
+/// drop(pool); // cannot move the pool while `buffer` owns a borrowed view
+/// drop(buffer);
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct CudaPoolViewMemoryResource<'pool> {
+    pool: &'pool CudaPoolMemoryResource,
 }
 
-impl CudaPoolViewMemoryResource {
-    pub fn new(pool: Arc<CudaPoolMemoryResource>) -> Self {
+impl<'pool> CudaPoolViewMemoryResource<'pool> {
+    pub const fn new(pool: &'pool CudaPoolMemoryResource) -> Self {
         Self { pool }
     }
 
-    pub fn pool(&self) -> &Arc<CudaPoolMemoryResource> {
-        &self.pool
+    pub const fn pool(&self) -> &'pool CudaPoolMemoryResource {
+        self.pool
     }
 
     pub fn cu_memory_pool(&self) -> sys::CUmemoryPool {
@@ -1093,7 +1117,7 @@ impl CudaPoolViewMemoryResource {
     }
 }
 
-unsafe impl DeviceAllocator for CudaPoolViewMemoryResource {
+unsafe impl DeviceAllocator for CudaPoolViewMemoryResource<'_> {
     fn context(&self) -> &Arc<CudaContext> {
         self.pool.context()
     }
@@ -1196,9 +1220,10 @@ unsafe impl<U: DeviceAllocator> DeviceAllocator for TrackingMemoryResource<U> {
         block: DeviceBlock,
         stream: &CudaStream,
     ) -> Result<(), MemoryError> {
+        let size = block.size;
         unsafe { self.upstream.deallocate(block, stream)? };
-        if block.size > 0 {
-            self.current_bytes.fetch_sub(block.size, Ordering::Relaxed);
+        if size > 0 {
+            self.current_bytes.fetch_sub(size, Ordering::Relaxed);
             self.outstanding_allocations.fetch_sub(1, Ordering::Relaxed);
         }
         Ok(())
@@ -1501,13 +1526,15 @@ unsafe impl<T> DeviceSlice<T> for cuda_core::DeviceBuffer<T> {
 
 unsafe impl<T> DeviceSliceMut<T> for cuda_core::DeviceBuffer<T> {}
 
-/// Fixed-length typed device allocation owned with an allocator handle.
+/// Fixed-length typed device allocation owned with an allocator handle and
+/// bound to one borrowed CUDA stream.
 ///
 /// `A` follows the same model as `Vec<T, A>`: it is stored by value. Passing
 /// `&'a PoolMemoryResource<_>` makes the buffer borrow the pool for `'a`;
 /// passing `Arc<_>` explicitly selects shared ownership.
 ///
-/// The borrow checker rejects destroying a borrowed pool before its buffer:
+/// The borrow checker rejects destroying either a borrowed pool or the stream
+/// handle before its buffer:
 ///
 /// ```compile_fail
 /// use cuda_core::CudaContext;
@@ -1521,20 +1548,34 @@ unsafe impl<T> DeviceSliceMut<T> for cuda_core::DeviceBuffer<T> {}
 ///     0,
 /// )
 /// .unwrap();
-/// let buffer = DeviceBuffer::<u8, _>::zeroed_in(&pool, stream, 16).unwrap();
+/// let buffer = DeviceBuffer::<u8, _>::zeroed_in(&pool, &stream, 16).unwrap();
 /// drop(pool); // cannot move out of `pool` because `buffer` borrows it
 /// drop(buffer);
 /// ```
-pub struct DeviceBuffer<T: DeviceCopy, A: DeviceAllocator> {
+///
+/// The same rule applies to the stream owner:
+///
+/// ```compile_fail
+/// use cuda_core::CudaContext;
+/// use rccl_memory::{CudaAsyncMemoryResource, DeviceBuffer};
+///
+/// let context = CudaContext::new(0).unwrap();
+/// let stream = context.default_stream();
+/// let allocator = CudaAsyncMemoryResource::new(context.clone());
+/// let buffer = DeviceBuffer::<u8, _>::zeroed_in(allocator, &stream, 16).unwrap();
+/// drop(stream); // cannot move out of `stream` because `buffer` borrows it
+/// drop(buffer);
+/// ```
+pub struct DeviceBuffer<'stream, T: DeviceCopy, A: DeviceAllocator> {
     block: Option<DeviceBlock>,
     len: usize,
     capacity: usize,
     allocator: A,
-    stream: Arc<CudaStream>,
+    stream: &'stream CudaStream,
     _marker: PhantomData<T>,
 }
 
-impl<T: DeviceCopy, A: DeviceAllocator> fmt::Debug for DeviceBuffer<T, A> {
+impl<T: DeviceCopy, A: DeviceAllocator> fmt::Debug for DeviceBuffer<'_, T, A> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DeviceBuffer")
             .field("ptr", &self.cu_deviceptr())
@@ -1546,7 +1587,7 @@ impl<T: DeviceCopy, A: DeviceAllocator> fmt::Debug for DeviceBuffer<T, A> {
     }
 }
 
-impl<T: DeviceCopy, A: DeviceAllocator> DeviceBuffer<T, A> {
+impl<'stream, T: DeviceCopy, A: DeviceAllocator> DeviceBuffer<'stream, T, A> {
     fn layout_for(len: usize) -> Result<Layout, MemoryError> {
         if std::mem::size_of::<T>() == 0 {
             return Err(MemoryError::ZeroSizedType);
@@ -1565,11 +1606,11 @@ impl<T: DeviceCopy, A: DeviceAllocator> DeviceBuffer<T, A> {
     /// or copies it to the host as `T`.
     pub unsafe fn uninitialized_in(
         allocator: A,
-        stream: Arc<CudaStream>,
+        stream: &'stream CudaStream,
         len: usize,
     ) -> Result<Self, MemoryError> {
-        validate_stream(allocator.context(), &stream)?;
-        let block = allocator.allocate(Self::layout_for(len)?, &stream)?;
+        validate_stream(allocator.context(), stream)?;
+        let block = allocator.allocate(Self::layout_for(len)?, stream)?;
         Ok(Self {
             block: Some(block),
             len,
@@ -1582,7 +1623,7 @@ impl<T: DeviceCopy, A: DeviceAllocator> DeviceBuffer<T, A> {
 
     pub fn zeroed_in(
         allocator: A,
-        stream: Arc<CudaStream>,
+        stream: &'stream CudaStream,
         len: usize,
     ) -> Result<Self, MemoryError> {
         let buffer = unsafe { Self::uninitialized_in(allocator, stream, len)? };
@@ -1601,7 +1642,7 @@ impl<T: DeviceCopy, A: DeviceAllocator> DeviceBuffer<T, A> {
 
     pub fn from_host_in(
         allocator: A,
-        stream: Arc<CudaStream>,
+        stream: &'stream CudaStream,
         values: &[T],
     ) -> Result<Self, MemoryError> {
         let buffer = unsafe { Self::uninitialized_in(allocator, stream, values.len())? };
@@ -1700,9 +1741,8 @@ impl<T: DeviceCopy, A: DeviceAllocator> DeviceBuffer<T, A> {
     where
         A: Clone,
     {
-        let copy = unsafe {
-            Self::uninitialized_in(self.allocator.clone(), self.stream.clone(), self.len)?
-        };
+        let copy =
+            unsafe { Self::uninitialized_in(self.allocator.clone(), self.stream, self.len)? };
         if self.num_bytes() > 0 {
             unsafe {
                 memcpy_dtod_async(
@@ -1718,7 +1758,7 @@ impl<T: DeviceCopy, A: DeviceAllocator> DeviceBuffer<T, A> {
 
     fn reallocate(&mut self, new_capacity: usize) -> Result<(), MemoryError> {
         let new_layout = Self::layout_for(new_capacity)?;
-        let new_block = self.allocator.allocate(new_layout, &self.stream)?;
+        let new_block = self.allocator.allocate(new_layout, self.stream)?;
         let bytes_to_copy = self
             .len
             .min(new_capacity)
@@ -1734,15 +1774,21 @@ impl<T: DeviceCopy, A: DeviceAllocator> DeviceBuffer<T, A> {
                 )
             }
         {
-            let _ = unsafe { self.allocator.deallocate(new_block, &self.stream) };
+            let _ = unsafe { self.allocator.deallocate(new_block, self.stream) };
             return Err(error.into());
         }
 
-        let old_block = self.block.expect("device buffer always owns a block");
-        if let Err(error) = unsafe { self.allocator.deallocate(old_block, &self.stream) } {
-            // The new allocation is ordered after the copy, so releasing it on
-            // this stream is safe even when release of the old block failed.
-            let _ = unsafe { self.allocator.deallocate(new_block, &self.stream) };
+        let old_block = self
+            .block
+            .take()
+            .expect("device buffer always owns a block");
+        if let Err(error) = unsafe { self.allocator.deallocate(old_block, self.stream) } {
+            // The old affine token was consumed even though its release may
+            // have leaked. Keep the successfully copied replacement so this
+            // buffer remains internally valid when the error is observed.
+            self.block = Some(new_block);
+            self.capacity = new_capacity;
+            self.len = self.len.min(new_capacity);
             return Err(error);
         }
         self.block = Some(new_block);
@@ -1768,23 +1814,8 @@ impl<T: DeviceCopy, A: DeviceAllocator> DeviceBuffer<T, A> {
         Ok(host)
     }
 
-    /// Move the buffer's stream-ordering contract to another stream.
-    ///
-    /// The new stream waits on an event recorded after all work currently
-    /// submitted to the old stream. Call this before giving the buffer to a
-    /// library operation that will use the new stream.
-    pub fn transition_to(&mut self, stream: Arc<CudaStream>) -> Result<(), MemoryError> {
-        validate_stream(self.allocator.context(), &stream)?;
-        if self.stream.cu_stream() != stream.cu_stream() {
-            let event = self.stream.record_event(None)?;
-            stream.wait(&event)?;
-            self.stream = stream;
-        }
-        Ok(())
-    }
-
-    pub fn stream(&self) -> &Arc<CudaStream> {
-        &self.stream
+    pub const fn stream(&self) -> &'stream CudaStream {
+        self.stream
     }
 
     pub fn allocator(&self) -> &A {
@@ -1808,43 +1839,41 @@ impl<T: DeviceCopy, A: DeviceAllocator> DeviceBuffer<T, A> {
     }
 
     pub fn allocation_bytes(&self) -> usize {
-        self.block.map_or(0, DeviceBlock::size)
+        self.block.as_ref().map_or(0, DeviceBlock::size)
     }
 
     pub fn cu_deviceptr(&self) -> sys::CUdeviceptr {
-        self.block.map_or(0, DeviceBlock::cu_deviceptr)
+        self.block.as_ref().map_or(0, DeviceBlock::cu_deviceptr)
     }
 
     pub fn context(&self) -> &Arc<CudaContext> {
         self.allocator.context()
     }
 
-    /// Deallocate on `stream` and surface submission errors instead of
-    /// recording them during `Drop`.
-    pub fn release_on(mut self, stream: Arc<CudaStream>) -> Result<(), MemoryError> {
-        self.transition_to(stream)?;
-        if let Some(block) = self.block {
-            unsafe { self.allocator.deallocate(block, &self.stream)? };
-            self.block = None;
+    /// Deallocate on the statically bound stream and surface submission errors
+    /// instead of recording them during `Drop`.
+    pub fn release(mut self) -> Result<(), MemoryError> {
+        if let Some(block) = self.block.take() {
+            unsafe { self.allocator.deallocate(block, self.stream)? };
         }
         Ok(())
     }
 }
 
-impl<T: DeviceCopy, A: DeviceAllocator> Drop for DeviceBuffer<T, A> {
+impl<T: DeviceCopy, A: DeviceAllocator> Drop for DeviceBuffer<'_, T, A> {
     fn drop(&mut self) {
-        let Some(block) = self.block else {
+        let Some(block) = self.block.take() else {
             return;
         };
-        match unsafe { self.allocator.deallocate(block, &self.stream) } {
-            Ok(()) => self.block = None,
+        match unsafe { self.allocator.deallocate(block, self.stream) } {
+            Ok(()) => {}
             Err(MemoryError::Driver(error)) => self.context().record_err::<()>(Err(error)),
             Err(_) => {}
         }
     }
 }
 
-unsafe impl<T: DeviceCopy, A: DeviceAllocator> DeviceSlice<T> for DeviceBuffer<T, A> {
+unsafe impl<T: DeviceCopy, A: DeviceAllocator> DeviceSlice<T> for DeviceBuffer<'_, T, A> {
     fn len(&self) -> usize {
         self.len
     }
@@ -1866,19 +1895,23 @@ unsafe impl<T: DeviceCopy, A: DeviceAllocator> DeviceSlice<T> for DeviceBuffer<T
     }
 }
 
-unsafe impl<T: DeviceCopy, A: DeviceAllocator> DeviceSliceMut<T> for DeviceBuffer<T, A> {}
+unsafe impl<T: DeviceCopy, A: DeviceAllocator> DeviceSliceMut<T> for DeviceBuffer<'_, T, A> {}
 
 /// RMM-compatible name for an uninitialized typed device vector.
-pub type DeviceUVector<T, A> = DeviceBuffer<T, A>;
+pub type DeviceUVector<'stream, T, A> = DeviceBuffer<'stream, T, A>;
 
 /// One typed value in device memory with explicit stream ordering.
 #[derive(Debug)]
-pub struct DeviceScalar<T: DeviceCopy, A: DeviceAllocator> {
-    storage: DeviceBuffer<T, A>,
+pub struct DeviceScalar<'stream, T: DeviceCopy, A: DeviceAllocator> {
+    storage: DeviceBuffer<'stream, T, A>,
 }
 
-impl<T: DeviceCopy, A: DeviceAllocator> DeviceScalar<T, A> {
-    pub fn new_in(allocator: A, stream: Arc<CudaStream>, value: T) -> Result<Self, MemoryError> {
+impl<'stream, T: DeviceCopy, A: DeviceAllocator> DeviceScalar<'stream, T, A> {
+    pub fn new_in(
+        allocator: A,
+        stream: &'stream CudaStream,
+        value: T,
+    ) -> Result<Self, MemoryError> {
         Ok(Self {
             storage: DeviceBuffer::from_host_in(allocator, stream, std::slice::from_ref(&value))?,
         })
@@ -1891,7 +1924,7 @@ impl<T: DeviceCopy, A: DeviceAllocator> DeviceScalar<T, A> {
     /// The caller must initialize the value before reading it.
     pub unsafe fn uninitialized_in(
         allocator: A,
-        stream: Arc<CudaStream>,
+        stream: &'stream CudaStream,
     ) -> Result<Self, MemoryError> {
         Ok(Self {
             storage: unsafe { DeviceBuffer::uninitialized_in(allocator, stream, 1)? },
@@ -1906,20 +1939,16 @@ impl<T: DeviceCopy, A: DeviceAllocator> DeviceScalar<T, A> {
         Ok(self.storage.to_host_vec()?.remove(0))
     }
 
-    pub fn transition_to(&mut self, stream: Arc<CudaStream>) -> Result<(), MemoryError> {
-        self.storage.transition_to(stream)
-    }
-
-    pub fn as_buffer(&self) -> &DeviceBuffer<T, A> {
+    pub fn as_buffer(&self) -> &DeviceBuffer<'stream, T, A> {
         &self.storage
     }
 
-    pub fn as_buffer_mut(&mut self) -> &mut DeviceBuffer<T, A> {
+    pub fn as_buffer_mut(&mut self) -> &mut DeviceBuffer<'stream, T, A> {
         &mut self.storage
     }
 }
 
-unsafe impl<T: DeviceCopy, A: DeviceAllocator> DeviceSlice<T> for DeviceScalar<T, A> {
+unsafe impl<T: DeviceCopy, A: DeviceAllocator> DeviceSlice<T> for DeviceScalar<'_, T, A> {
     fn len(&self) -> usize {
         1
     }
@@ -1937,7 +1966,7 @@ unsafe impl<T: DeviceCopy, A: DeviceAllocator> DeviceSlice<T> for DeviceScalar<T
     }
 }
 
-unsafe impl<T: DeviceCopy, A: DeviceAllocator> DeviceSliceMut<T> for DeviceScalar<T, A> {}
+unsafe impl<T: DeviceCopy, A: DeviceAllocator> DeviceSliceMut<T> for DeviceScalar<'_, T, A> {}
 
 #[cfg(test)]
 mod tests {

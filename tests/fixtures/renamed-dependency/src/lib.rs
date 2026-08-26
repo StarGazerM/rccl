@@ -7,13 +7,8 @@ pub struct Record {
 
 unsafe impl gpu_primitives::DeviceCopy for Record {}
 
-#[derive(Clone, Copy)]
-pub struct RecordLess;
-
-unsafe impl gpu_primitives::DeviceComparator<Record> for RecordLess {
-    unsafe fn less(&self, left: &Record, right: &Record) -> bool {
-        left.major < right.major || (left.major == right.major && left.minor < right.minor)
-    }
+fn order_record(left: &Record, right: &Record) -> core::cmp::Ordering {
+    (left.major, left.minor).cmp(&(right.major, right.minor))
 }
 
 pub fn renamed_sort_facade_compiles<'stream, A, B>(
@@ -23,8 +18,8 @@ pub fn renamed_sort_facade_compiles<'stream, A, B>(
     A: gpu_primitives::memory::DeviceAllocator + Clone,
     B: gpu_primitives::memory::DeviceSliceMut<Record> + ?Sized,
 {
-    let _ = gpu_primitives::sort_by(exec, records, RecordLess);
-    let _ = gpu_primitives::stable_sort_by(exec, records, RecordLess);
+    let _ = gpu_primitives::sort_by(exec, records, order_record);
+    let _ = gpu_primitives::stable_sort_by(exec, records, order_record);
 }
 
 pub fn renamed_merge_facade_compiles<'stream, A, I1, I2, O>(
@@ -39,15 +34,14 @@ pub fn renamed_merge_facade_compiles<'stream, A, I1, I2, O>(
     O: gpu_primitives::memory::DeviceSliceMut<u32> + ?Sized,
 {
     let _ = gpu_primitives::merge(exec, first, second, output);
-    let _ = gpu_primitives::merge_by(exec, first, second, output, gpu_primitives::Greater);
+    let _ = gpu_primitives::merge_by(exec, first, second, output, |left: &u32, right: &u32| {
+        right.cmp(left)
+    });
 }
 
 pub fn compile_time_api_check() {
     fn assert_device_copy<T: gpu_primitives::DeviceCopy>() {}
-    fn assert_comparator<C: gpu_primitives::DeviceComparator<u32>>() {}
-
     assert_device_copy::<Record>();
-    assert_comparator::<gpu_primitives::Less>();
     assert!(core::mem::size_of::<gpu_primitives::cuda::Execution<'static>>() > 0);
 }
 
@@ -56,13 +50,21 @@ mod tests {
     use super::*;
 
     type Allocator = gpu_primitives::memory::CudaAsyncMemoryResource;
-    type RecordBuffer = gpu_primitives::memory::DeviceBuffer<Record, Allocator>;
-    type U32Buffer = gpu_primitives::memory::DeviceBuffer<u32, Allocator>;
+    type RecordBuffer<'stream> = gpu_primitives::memory::DeviceBuffer<'stream, Record, Allocator>;
+    type U32Buffer<'stream> = gpu_primitives::memory::DeviceBuffer<'stream, u32, Allocator>;
 
     #[test]
     fn renamed_dependency_instantiates_sort_and_merge_facades() {
         compile_time_api_check();
-        let _ = renamed_sort_facade_compiles::<Allocator, RecordBuffer>;
-        let _ = renamed_merge_facade_compiles::<Allocator, U32Buffer, U32Buffer, U32Buffer>;
+        fn instantiate<'stream>(_: core::marker::PhantomData<&'stream ()>) {
+            let _ = renamed_sort_facade_compiles::<Allocator, RecordBuffer<'stream>>;
+            let _ = renamed_merge_facade_compiles::<
+                Allocator,
+                U32Buffer<'stream>,
+                U32Buffer<'stream>,
+                U32Buffer<'stream>,
+            >;
+        }
+        let _ = instantiate;
     }
 }
