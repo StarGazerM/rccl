@@ -9,4 +9,3 @@ description = "Thrust-shaped host algorithm facade for RCCL"
 cuda-core = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "b22efa99e8383e2a349c4a3af60d8aa083973890" }
 rccl-cub = { path = "../rccl-cub" }
 rccl-memory = { path = "../rccl-memory" }
-rccl-thrust-macros = { path = "../rccl-thrust-macros" }

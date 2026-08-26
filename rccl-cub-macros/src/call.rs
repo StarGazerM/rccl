@@ -1,145 +1,226 @@
-//! `syn` ASTs for the shallow, user-facing CUB operation macros.
+//! `syn` ASTs for shallow CUB operation macros.
 //!
-//! These nodes deliberately retain Rust expressions. The compiler assigns
-//! CUB semantics to the fields, while rustc still owns parsing and type
-//! checking of paths, closures, borrows, generics, and inferred types.
+//! The operand shapes come from the pinned CCCL examples and API tests. They
+//! retain ordinary Rust expressions; the proc macro does not attempt to see
+//! rustc-inferred types.
 #![allow(dead_code)]
 
 use syn::{
-    Expr, Ident, Result, Token,
+    Expr, Result, Token,
     parse::{Parse, ParseStream},
+    punctuated::Punctuated,
 };
 
-mod keyword {
-    syn::custom_keyword!(auto);
-}
-
-#[derive(Debug)]
-pub(crate) enum TempStorageArg {
-    Auto,
-    Borrowed(Box<Expr>),
-}
-
-#[derive(Debug)]
-pub(crate) struct DeviceReduceCall {
-    pub(crate) on: Expr,
-    pub(crate) input: Expr,
-    pub(crate) output: Expr,
-    pub(crate) init: Expr,
-    pub(crate) op: Expr,
-    pub(crate) temp: TempStorageArg,
-}
-
-impl Parse for DeviceReduceCall {
-    fn parse(input: ParseStream<'_>) -> Result<Self> {
-        let mut on = None;
-        let mut range = None;
-        let mut output = None;
-        let mut init = None;
-        let mut op = None;
-        let mut temp = None;
-
-        while !input.is_empty() {
-            let field: Ident = input.parse()?;
-            input.parse::<Token![:]>()?;
-            match field.to_string().as_str() {
-                "on" => set_once(&mut on, input.parse()?, &field)?,
-                "input" => set_once(&mut range, input.parse()?, &field)?,
-                "output" => set_once(&mut output, input.parse()?, &field)?,
-                "init" => set_once(&mut init, input.parse()?, &field)?,
-                "op" => set_once(&mut op, input.parse()?, &field)?,
-                "temp" => {
-                    let value = if input.peek(keyword::auto) {
-                        input.parse::<keyword::auto>()?;
-                        TempStorageArg::Auto
-                    } else {
-                        TempStorageArg::Borrowed(Box::new(input.parse()?))
-                    };
-                    set_once(&mut temp, value, &field)?;
-                }
-                _ => {
-                    return Err(syn::Error::new(
-                        field.span(),
-                        "unknown device_reduce! field",
-                    ));
-                }
-            }
-            if input.is_empty() {
-                break;
-            }
-            input.parse::<Token![,]>()?;
+macro_rules! operation_call {
+    ($name:ident, $operation:literal, $($field:ident),+ $(,)?) => {
+        #[derive(Debug)]
+        pub(crate) struct $name {
+            $(pub(crate) $field: Expr,)+
         }
 
-        Ok(Self {
-            on: required(on, "on", input)?,
-            input: required(range, "input", input)?,
-            output: required(output, "output", input)?,
-            init: required(init, "init", input)?,
-            op: required(op, "op", input)?,
-            temp: required(temp, "temp", input)?,
-        })
-    }
+        impl Parse for $name {
+            fn parse(input: ParseStream<'_>) -> Result<Self> {
+                let expressions = Punctuated::<Expr, Token![,]>::parse_terminated(input)?;
+                let expected = [$(stringify!($field)),+].len();
+                if expressions.len() != expected {
+                    return Err(input.error(format!(
+                        "{} expects {} operands ({}) but received {}",
+                        $operation,
+                        expected,
+                        [$(stringify!($field)),+].join(", "),
+                        expressions.len(),
+                    )));
+                }
+                let mut expressions = expressions.into_iter();
+                Ok(Self {
+                    $($field: expressions.next().expect("validated operand count"),)+
+                })
+            }
+        }
+    };
 }
 
-fn set_once<T>(slot: &mut Option<T>, value: T, field: &Ident) -> Result<()> {
-    if slot.replace(value).is_some() {
-        return Err(syn::Error::new(
-            field.span(),
-            format!("duplicate `{field}` field"),
-        ));
-    }
-    Ok(())
-}
+// Pinned CCCL: DeviceReduce::Reduce(input, output, count, op, init, env).
+// RCCL infers count from the input range and puts the execution environment
+// first, followed by the remaining CCCL operands in their upstream order.
+operation_call!(
+    DeviceReduceCall,
+    "device_reduce!",
+    execution,
+    input,
+    output,
+    op,
+    init,
+);
 
-fn required<T>(value: Option<T>, field: &str, input: ParseStream<'_>) -> Result<T> {
-    value.ok_or_else(|| input.error(format!("missing `{field}` field")))
-}
+operation_call!(
+    DeviceReduceSumCall,
+    "device_reduce_sum!",
+    execution,
+    input,
+    output,
+);
+operation_call!(
+    DeviceReduceMinCall,
+    "device_reduce_min!",
+    execution,
+    input,
+    output,
+);
+operation_call!(
+    DeviceReduceMaxCall,
+    "device_reduce_max!",
+    execution,
+    input,
+    output,
+);
+
+// Pinned CCCL env API uses separate value and signed 64-bit index outputs.
+operation_call!(
+    DeviceReduceArgMinCall,
+    "device_reduce_arg_min!",
+    execution,
+    input,
+    value_output,
+    index_output,
+);
+operation_call!(
+    DeviceReduceArgMaxCall,
+    "device_reduce_arg_max!",
+    execution,
+    input,
+    value_output,
+    index_output,
+);
+operation_call!(
+    DeviceReduceArgMinMaxCall,
+    "device_reduce_arg_min_max!",
+    execution,
+    input,
+    min_output,
+    min_index_output,
+    max_output,
+    max_index_output,
+);
+
+operation_call!(
+    DeviceTransformReduceCall,
+    "device_transform_reduce!",
+    execution,
+    input,
+    output,
+    op,
+    transform,
+    init,
+);
+
+operation_call!(
+    DeviceReduceByKeyCall,
+    "device_reduce_by_key!",
+    execution,
+    keys_input,
+    unique_keys_output,
+    values_input,
+    aggregates_output,
+    num_runs_output,
+    op,
+);
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use quote::ToTokens;
 
+    fn tokens(expression: &Expr) -> String {
+        expression.to_token_stream().to_string()
+    }
+
     #[test]
-    fn rust_closure_paths_borrows_and_inference_remain_rust_syntax() {
+    fn reduce_matches_the_pinned_reduce_env_operand_shape() {
         let call: DeviceReduceCall = syn::parse_quote! {
-            on: &exec,
-            input: values.view::<i64>(),
-            output: &mut result,
-            init: 0_i64,
-            op: |left, right| left + right,
-            temp: auto,
+            &exec, &values, &mut result, |left, right| left + right, 0_i64
         };
-        assert_eq!(call.on.into_token_stream().to_string(), "& exec");
-        assert!(call.input.into_token_stream().to_string().contains("view"));
-        assert!(matches!(call.temp, TempStorageArg::Auto));
+        assert_eq!(tokens(&call.execution), "& exec");
+        assert_eq!(tokens(&call.input), "& values");
+        assert!(matches!(call.output, Expr::Reference(_)));
+        assert!(matches!(call.op, Expr::Closure(_)));
+        assert_eq!(tokens(&call.init), "0_i64");
+    }
+
+    #[test]
+    fn sum_min_and_max_are_distinct_three_operand_operations() {
+        let sum: DeviceReduceSumCall = syn::parse_quote! { &exec, &values, &mut sum_output };
+        let min: DeviceReduceMinCall = syn::parse_quote! { &exec, &values, &mut min_output };
+        let max: DeviceReduceMaxCall = syn::parse_quote! { &exec, &values, &mut max_output };
+        assert_eq!(tokens(&sum.output), "& mut sum_output");
+        assert_eq!(tokens(&min.output), "& mut min_output");
+        assert_eq!(tokens(&max.output), "& mut max_output");
+    }
+
+    #[test]
+    fn arg_operations_preserve_separate_value_and_index_outputs() {
+        let arg_min: DeviceReduceArgMinCall =
+            syn::parse_quote! { &exec, &values, &mut min_value, &mut min_index };
+        let arg_max: DeviceReduceArgMaxCall =
+            syn::parse_quote! { &exec, &values, &mut max_value, &mut max_index };
+        let both: DeviceReduceArgMinMaxCall = syn::parse_quote! {
+            &exec, &values,
+            &mut min_value, &mut min_index,
+            &mut max_value, &mut max_index
+        };
+        assert_eq!(tokens(&arg_min.index_output), "& mut min_index");
+        assert_eq!(tokens(&arg_max.index_output), "& mut max_index");
+        assert_eq!(tokens(&both.min_index_output), "& mut min_index");
+        assert_eq!(tokens(&both.max_index_output), "& mut max_index");
+    }
+
+    #[test]
+    fn transform_reduce_keeps_both_device_closures_as_rust_expressions() {
+        let call: DeviceTransformReduceCall = syn::parse_quote! {
+            &exec,
+            &values,
+            &mut output,
+            |left, right| left + right,
+            |value| -value,
+            0_i32
+        };
+        assert!(matches!(call.op, Expr::Closure(_)));
+        assert!(matches!(call.transform, Expr::Closure(_)));
+    }
+
+    #[test]
+    fn reduce_by_key_keeps_all_pinned_output_roles() {
+        let call: DeviceReduceByKeyCall = syn::parse_quote! {
+            &exec,
+            &keys,
+            &mut unique_keys,
+            &values,
+            &mut aggregates,
+            &mut num_runs,
+            |left, right| left.min(right)
+        };
+        assert_eq!(tokens(&call.unique_keys_output), "& mut unique_keys");
+        assert_eq!(tokens(&call.aggregates_output), "& mut aggregates");
+        assert_eq!(tokens(&call.num_runs_output), "& mut num_runs");
         assert!(matches!(call.op, Expr::Closure(_)));
     }
 
     #[test]
-    fn borrowed_storage_is_an_ordinary_expression() {
-        let call: DeviceReduceCall = syn::parse_quote! {
-            on: execution(), input: &values, output: &mut result,
-            init: Default::default(), op: ops::sum::<i64>(), temp: &mut scratch,
-        };
-        assert!(matches!(
-            call.temp,
-            TempStorageArg::Borrowed(expression) if matches!(*expression, Expr::Reference(_))
-        ));
-    }
+    fn wrong_arity_and_the_old_named_temp_syntax_are_rejected() {
+        let missing = syn::parse_str::<DeviceReduceSumCall>("&exec, &values")
+            .expect_err("a missing output must not be masked");
+        assert!(missing.to_string().contains("expects 3 operands"));
 
-    #[test]
-    fn missing_and_duplicate_fields_are_rejected() {
-        let missing = syn::parse_str::<DeviceReduceCall>(
-            "on: &exec, input: &values, output: &mut out, init: 0, op: |a,b| a+b",
+        let extra = syn::parse_str::<DeviceReduceArgMinCall>(
+            "&exec, &values, &mut value, &mut index, &mut accidental_extra",
         )
-        .expect_err("temp is semantic and required");
-        assert!(missing.to_string().contains("missing `temp`"));
+        .expect_err("an extra output must not be ignored");
+        assert!(extra.to_string().contains("expects 4 operands"));
 
-        let duplicate = syn::parse_str::<DeviceReduceCall>(
-            "on: &exec, on: &other, input: &values, output: &mut out, init: 0, op: |a,b| a+b, temp: auto",
+        let obsolete = syn::parse_str::<DeviceReduceCall>(
+            "on: &exec, input: &values, output: &mut out, init: 0, op: |a,b| a+b, temp: auto",
         )
-        .expect_err("duplicates must not be silently masked");
-        assert!(duplicate.to_string().contains("duplicate `on`"));
+        .expect_err("the invented named-field/temp:auto API must stay deleted");
+        assert!(!obsolete.to_string().is_empty());
     }
 }

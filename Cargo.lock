@@ -105,14 +105,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cuda-device"
-version = "0.2.1"
-source = "git+https://github.com/NVlabs/cuda-oxide.git?rev=b22efa99e8383e2a349c4a3af60d8aa083973890#b22efa99e8383e2a349c4a3af60d8aa083973890"
-dependencies = [
- "cuda-macros",
-]
-
-[[package]]
 name = "cuda-macros"
 version = "0.2.1"
 source = "git+https://github.com/NVlabs/cuda-oxide.git?rev=b22efa99e8383e2a349c4a3af60d8aa083973890#b22efa99e8383e2a349c4a3af60d8aa083973890"
@@ -297,8 +289,6 @@ name = "rccl-cub"
 version = "0.1.0"
 dependencies = [
  "cuda-core",
- "cuda-device",
- "rccl-cub-macros",
  "rccl-memory",
 ]
 
@@ -325,7 +315,6 @@ dependencies = [
  "cuda-core",
  "rccl-cub",
  "rccl-memory",
- "rccl-thrust-macros",
 ]
 
 [[package]]

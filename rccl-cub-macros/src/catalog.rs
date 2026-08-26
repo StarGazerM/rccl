@@ -17,186 +17,6 @@ pub(crate) enum Target {
 pub(crate) const TARGETS: &[Target] = &[Target::Sm80, Target::Sm89, Target::Sm90, Target::Sm100];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Ownership {
-    Owned,
-    Borrowed,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum RustMapping {
-    Slice,
-    Array,
-    Tuple,
-    OptionValue,
-    ResultValue,
-    MaybeUninit,
-    DeviceBuffer,
-    IndexedAccess,
-    MultidimensionalView,
-    ComplexValue,
-    NamedProduct,
-    BufferPair,
-    DeviceScalar,
-    StorageLayout,
-    Closure,
-    ReadRange,
-    WriteRange,
-    DisjointSlice,
-    Usize,
-    Bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SupportCapability {
-    Contiguous,
-    Product,
-    Sum,
-    Storage,
-    Proxy,
-    Strided,
-    Scalar,
-    Callable,
-    Input,
-    Output,
-    Index,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct Support {
-    pub(crate) cccl: &'static str,
-    pub(crate) rust: RustMapping,
-    pub(crate) ownership: Ownership,
-    pub(crate) capability: SupportCapability,
-}
-
-use Ownership::{Borrowed, Owned};
-use RustMapping::*;
-use SupportCapability as SC;
-
-pub(crate) const SUPPORT: &[Support] = &[
-    Support {
-        cccl: "span",
-        rust: Slice,
-        ownership: Borrowed,
-        capability: SC::Contiguous,
-    },
-    Support {
-        cccl: "array",
-        rust: Array,
-        ownership: Owned,
-        capability: SC::Contiguous,
-    },
-    Support {
-        cccl: "tuple",
-        rust: Tuple,
-        ownership: Owned,
-        capability: SC::Product,
-    },
-    Support {
-        cccl: "optional",
-        rust: OptionValue,
-        ownership: Owned,
-        capability: SC::Sum,
-    },
-    Support {
-        cccl: "expected",
-        rust: ResultValue,
-        ownership: Owned,
-        capability: SC::Sum,
-    },
-    Support {
-        cccl: "uninitialized",
-        rust: MaybeUninit,
-        ownership: Owned,
-        capability: SC::Storage,
-    },
-    Support {
-        cccl: "device_vector",
-        rust: DeviceBuffer,
-        ownership: Owned,
-        capability: SC::Contiguous,
-    },
-    Support {
-        cccl: "device_reference",
-        rust: IndexedAccess,
-        ownership: Borrowed,
-        capability: SC::Proxy,
-    },
-    Support {
-        cccl: "mdspan",
-        rust: MultidimensionalView,
-        ownership: Borrowed,
-        capability: SC::Strided,
-    },
-    Support {
-        cccl: "complex",
-        rust: ComplexValue,
-        ownership: Owned,
-        capability: SC::Scalar,
-    },
-    Support {
-        cccl: "key_value_pair",
-        rust: NamedProduct,
-        ownership: Owned,
-        capability: SC::Product,
-    },
-    Support {
-        cccl: "double_buffer",
-        rust: BufferPair,
-        ownership: Borrowed,
-        capability: SC::Storage,
-    },
-    Support {
-        cccl: "future_value",
-        rust: DeviceScalar,
-        ownership: Borrowed,
-        capability: SC::Input,
-    },
-    Support {
-        cccl: "temp_storage",
-        rust: StorageLayout,
-        ownership: Borrowed,
-        capability: SC::Storage,
-    },
-    Support {
-        cccl: "callable",
-        rust: Closure,
-        ownership: Owned,
-        capability: SC::Callable,
-    },
-    Support {
-        cccl: "input_range",
-        rust: ReadRange,
-        ownership: Borrowed,
-        capability: SC::Input,
-    },
-    Support {
-        cccl: "output_range",
-        rust: WriteRange,
-        ownership: Borrowed,
-        capability: SC::Output,
-    },
-    Support {
-        cccl: "disjoint_output",
-        rust: DisjointSlice,
-        ownership: Borrowed,
-        capability: SC::Output,
-    },
-    Support {
-        cccl: "offset",
-        rust: Usize,
-        ownership: Owned,
-        capability: SC::Index,
-    },
-    Support {
-        cccl: "device_bool",
-        rust: Bool,
-        ownership: Owned,
-        capability: SC::Scalar,
-    },
-];
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Status {
     Planned,
     NativeRust,
@@ -884,6 +704,197 @@ pub(crate) const PRIMITIVES: &[Primitive] = &[
     ),
 ];
 
+/// One public CUB method reached by the pinned executable examples or API
+/// tests. This is an evidence inventory, not a claim that every declaration
+/// in all 59 headers has an example.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ExercisedOperation {
+    pub(crate) cccl: &'static str,
+    pub(crate) primitive: &'static str,
+    pub(crate) status: Status,
+}
+
+macro_rules! exercised_operation {
+    ($cccl:literal, $primitive:literal) => {
+        ExercisedOperation {
+            cccl: $cccl,
+            primitive: $primitive,
+            status: Status::Planned,
+        }
+    };
+}
+
+pub(crate) const EXERCISED_OPERATIONS: &[ExercisedOperation] = &[
+    exercised_operation!(
+        "DeviceAdjacentDifference::SubtractLeft",
+        "device_adjacent_difference"
+    ),
+    exercised_operation!(
+        "DeviceAdjacentDifference::SubtractLeftCopy",
+        "device_adjacent_difference"
+    ),
+    exercised_operation!(
+        "DeviceAdjacentDifference::SubtractRight",
+        "device_adjacent_difference"
+    ),
+    exercised_operation!(
+        "DeviceAdjacentDifference::SubtractRightCopy",
+        "device_adjacent_difference"
+    ),
+    exercised_operation!("DeviceBatchedTopK::MaxKeys", "device_batched_topk"),
+    exercised_operation!("DeviceBatchedTopK::MaxPairs", "device_batched_topk"),
+    exercised_operation!("DeviceBatchedTopK::MinKeys", "device_batched_topk"),
+    exercised_operation!("DeviceBatchedTopK::MinPairs", "device_batched_topk"),
+    exercised_operation!("DeviceCopy::Batched", "device_copy"),
+    exercised_operation!("DeviceCopy::Copy", "device_copy"),
+    exercised_operation!("DeviceFind::FindIf", "device_find"),
+    exercised_operation!("DeviceFind::LowerBound", "device_find"),
+    exercised_operation!("DeviceFind::LowerBoundSortedValues", "device_find"),
+    exercised_operation!("DeviceFind::UpperBound", "device_find"),
+    exercised_operation!("DeviceFind::UpperBoundSortedValues", "device_find"),
+    exercised_operation!("DeviceFor::Bulk", "device_for"),
+    exercised_operation!("DeviceFor::ForEach", "device_for"),
+    exercised_operation!("DeviceFor::ForEachCopy", "device_for"),
+    exercised_operation!("DeviceFor::ForEachCopyN", "device_for"),
+    exercised_operation!("DeviceFor::ForEachInExtents", "device_for"),
+    exercised_operation!("DeviceFor::ForEachInLayout", "device_for"),
+    exercised_operation!("DeviceFor::ForEachN", "device_for"),
+    exercised_operation!("DeviceHistogram::HistogramEven", "device_histogram"),
+    exercised_operation!("DeviceHistogram::HistogramRange", "device_histogram"),
+    exercised_operation!("DeviceHistogram::MultiHistogramEven", "device_histogram"),
+    exercised_operation!("DeviceHistogram::MultiHistogramRange", "device_histogram"),
+    exercised_operation!("DeviceMemcpy::Batched", "device_memcpy"),
+    exercised_operation!("DeviceMerge::MergeKeys", "device_merge"),
+    exercised_operation!("DeviceMerge::MergePairs", "device_merge"),
+    exercised_operation!("DeviceMergeSort::SortKeys", "device_merge_sort"),
+    exercised_operation!("DeviceMergeSort::SortKeysCopy", "device_merge_sort"),
+    exercised_operation!("DeviceMergeSort::SortPairs", "device_merge_sort"),
+    exercised_operation!("DeviceMergeSort::SortPairsCopy", "device_merge_sort"),
+    exercised_operation!("DeviceMergeSort::StableSortKeys", "device_merge_sort"),
+    exercised_operation!("DeviceMergeSort::StableSortKeysCopy", "device_merge_sort"),
+    exercised_operation!("DeviceMergeSort::StableSortPairs", "device_merge_sort"),
+    exercised_operation!("DevicePartition::Flagged", "device_partition"),
+    exercised_operation!("DevicePartition::If", "device_partition"),
+    exercised_operation!("DeviceRadixSort::SortKeys", "device_radix_sort"),
+    exercised_operation!("DeviceRadixSort::SortKeysDescending", "device_radix_sort"),
+    exercised_operation!("DeviceRadixSort::SortPairs", "device_radix_sort"),
+    exercised_operation!("DeviceRadixSort::SortPairsDescending", "device_radix_sort"),
+    exercised_operation!("DeviceReduce::ArgMax", "device_reduce"),
+    exercised_operation!("DeviceReduce::ArgMin", "device_reduce"),
+    exercised_operation!("DeviceReduce::ArgMinMax", "device_reduce"),
+    exercised_operation!("DeviceReduce::Max", "device_reduce"),
+    exercised_operation!("DeviceReduce::Min", "device_reduce"),
+    exercised_operation!("DeviceReduce::Reduce", "device_reduce"),
+    exercised_operation!("DeviceReduce::ReduceByKey", "device_reduce"),
+    exercised_operation!("DeviceReduce::Sum", "device_reduce"),
+    exercised_operation!("DeviceReduce::TransformReduce", "device_reduce"),
+    exercised_operation!("DeviceRunLengthEncode::Encode", "device_run_length_encode"),
+    exercised_operation!(
+        "DeviceRunLengthEncode::NonTrivialRuns",
+        "device_run_length_encode"
+    ),
+    exercised_operation!("DeviceScan::ExclusiveScan", "device_scan"),
+    exercised_operation!("DeviceScan::ExclusiveScanByKey", "device_scan"),
+    exercised_operation!("DeviceScan::ExclusiveSum", "device_scan"),
+    exercised_operation!("DeviceScan::ExclusiveSumByKey", "device_scan"),
+    exercised_operation!("DeviceScan::InclusiveScan", "device_scan"),
+    exercised_operation!("DeviceScan::InclusiveScanByKey", "device_scan"),
+    exercised_operation!("DeviceScan::InclusiveScanInit", "device_scan"),
+    exercised_operation!("DeviceScan::InclusiveSum", "device_scan"),
+    exercised_operation!("DeviceScan::InclusiveSumByKey", "device_scan"),
+    exercised_operation!(
+        "DeviceSegmentedRadixSort::SortKeys",
+        "device_segmented_radix_sort"
+    ),
+    exercised_operation!(
+        "DeviceSegmentedRadixSort::SortKeysDescending",
+        "device_segmented_radix_sort"
+    ),
+    exercised_operation!(
+        "DeviceSegmentedRadixSort::SortPairs",
+        "device_segmented_radix_sort"
+    ),
+    exercised_operation!(
+        "DeviceSegmentedRadixSort::SortPairsDescending",
+        "device_segmented_radix_sort"
+    ),
+    exercised_operation!("DeviceSegmentedReduce::ArgMax", "device_segmented_reduce"),
+    exercised_operation!("DeviceSegmentedReduce::ArgMin", "device_segmented_reduce"),
+    exercised_operation!("DeviceSegmentedReduce::Max", "device_segmented_reduce"),
+    exercised_operation!("DeviceSegmentedReduce::Min", "device_segmented_reduce"),
+    exercised_operation!("DeviceSegmentedReduce::Reduce", "device_segmented_reduce"),
+    exercised_operation!("DeviceSegmentedReduce::Sum", "device_segmented_reduce"),
+    exercised_operation!(
+        "DeviceSegmentedScan::ExclusiveSegmentedScan",
+        "device_segmented_scan"
+    ),
+    exercised_operation!(
+        "DeviceSegmentedScan::ExclusiveSegmentedSum",
+        "device_segmented_scan"
+    ),
+    exercised_operation!(
+        "DeviceSegmentedScan::InclusiveSegmentedScan",
+        "device_segmented_scan"
+    ),
+    exercised_operation!(
+        "DeviceSegmentedScan::InclusiveSegmentedScanInit",
+        "device_segmented_scan"
+    ),
+    exercised_operation!(
+        "DeviceSegmentedScan::InclusiveSegmentedSum",
+        "device_segmented_scan"
+    ),
+    exercised_operation!("DeviceSegmentedSort::SortKeys", "device_segmented_sort"),
+    exercised_operation!(
+        "DeviceSegmentedSort::SortKeysDescending",
+        "device_segmented_sort"
+    ),
+    exercised_operation!("DeviceSegmentedSort::SortPairs", "device_segmented_sort"),
+    exercised_operation!(
+        "DeviceSegmentedSort::SortPairsDescending",
+        "device_segmented_sort"
+    ),
+    exercised_operation!(
+        "DeviceSegmentedSort::StableSortKeys",
+        "device_segmented_sort"
+    ),
+    exercised_operation!(
+        "DeviceSegmentedSort::StableSortKeysDescending",
+        "device_segmented_sort"
+    ),
+    exercised_operation!(
+        "DeviceSegmentedSort::StableSortPairs",
+        "device_segmented_sort"
+    ),
+    exercised_operation!(
+        "DeviceSegmentedSort::StableSortPairsDescending",
+        "device_segmented_sort"
+    ),
+    exercised_operation!("DeviceSelect::Flagged", "device_select"),
+    exercised_operation!("DeviceSelect::FlaggedIf", "device_select"),
+    exercised_operation!("DeviceSelect::If", "device_select"),
+    exercised_operation!("DeviceSelect::Unique", "device_select"),
+    exercised_operation!("DeviceSelect::UniqueByKey", "device_select"),
+    exercised_operation!("DeviceTopK::MaxKeys", "device_topk"),
+    exercised_operation!("DeviceTopK::MaxPairs", "device_topk"),
+    exercised_operation!("DeviceTopK::MinKeys", "device_topk"),
+    exercised_operation!("DeviceTopK::MinPairs", "device_topk"),
+    exercised_operation!("DeviceTransform::Fill", "device_transform"),
+    exercised_operation!("DeviceTransform::Generate", "device_transform"),
+    exercised_operation!("DeviceTransform::Transform", "device_transform"),
+    exercised_operation!("DeviceTransform::TransformIf", "device_transform"),
+    exercised_operation!(
+        "DeviceTransform::TransformStableArgumentAddresses",
+        "device_transform"
+    ),
+    exercised_operation!("WarpReduceBatched::Reduce", "warp_reduce_batched"),
+    exercised_operation!("WarpReduceBatched::ReduceToBlocked", "warp_reduce_batched"),
+    exercised_operation!("WarpReduceBatched::ReduceToStriped", "warp_reduce_batched"),
+    exercised_operation!("WarpReduceBatched::Sum", "warp_reduce_batched"),
+    exercised_operation!("WarpReduceBatched::SumToBlocked", "warp_reduce_batched"),
+    exercised_operation!("WarpReduceBatched::SumToStriped", "warp_reduce_batched"),
+];
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ScheduleRow {
     pub(crate) target: Target,
@@ -1032,13 +1043,13 @@ pub(crate) const SCHEDULES: &[Schedule] = &[
 ];
 
 pub(crate) fn validate() -> Result<(), String> {
-    unique("support mapping", SUPPORT.iter().map(|item| item.cccl))?;
     unique("primitive", PRIMITIVES.iter().map(|item| item.name))?;
+    unique(
+        "exercised CUB operation",
+        EXERCISED_OPERATIONS.iter().map(|operation| operation.cccl),
+    )?;
     let schedule_names = unique("schedule", SCHEDULES.iter().map(|item| item.name))?;
 
-    for support in SUPPORT {
-        let _closed_mapping = (support.rust, support.ownership, support.capability);
-    }
     for schedule in SCHEDULES {
         if schedule.rows.len() != TARGETS.len() {
             return Err(format!(
@@ -1073,6 +1084,15 @@ pub(crate) fn validate() -> Result<(), String> {
         .iter()
         .map(|item| item.name)
         .collect::<BTreeSet<_>>();
+    for operation in EXERCISED_OPERATIONS {
+        if !names.contains(operation.primitive) {
+            return Err(format!(
+                "exercised operation `{}` maps to unknown primitive `{}`",
+                operation.cccl, operation.primitive
+            ));
+        }
+        let _status = operation.status;
+    }
     for primitive in PRIMITIVES {
         for dependency in primitive.requires {
             if !names.contains(dependency) {

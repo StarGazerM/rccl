@@ -16,24 +16,26 @@ rccl-memory -> rccl-cub -> rccl-thrust -> rccl
 ```
 
 The proc-macro expansion is RCCL's AOT boundary. All authored target
-schedules, specialization rules, kernel families, support mappings, and
-Thrust-to-CUB choices live in the two macro crates. The runtime crates do not
-store or rediscover that information.
+schedules, specialization rules, kernel families, and Thrust-to-CUB choices
+live in the two macro crates. Ordinary support types are handwritten Rust in
+the runtime crates; they are not generated merely because their CCCL
+counterparts are templates.
 
 ## Current rewrite state
 
-The two complete catalogs now cover:
+The compiler catalogs and coverage ledger now cover:
 
 - all 59 public CUB thread/warp/block/device/iterator headers;
 - all 34 top-level Thrust algorithm headers;
 - all 19 Thrust iterator headers;
-- the required support values, random engines, and memory-resource families.
+- the required support values, random engines, and memory-resource families
+  in the ordinary-runtime coverage ledger rather than the macro catalogs.
 
 The catalogs are typed Rust compiler data and are validated for duplicates,
 unknown dependencies, target-row drift, selection errors, and CUB dependency
 cycles. Separate operation-specific `syn` 2 parsers retain ordinary Rust
-expressions at the shallow user macro boundary and reject missing or duplicate
-semantic fields.
+expressions at the shallow user macro boundary and reject incorrect operand
+counts.
 
 The old handwritten sort, merge, radix, schedule, module-set, and runtime
 loader implementation has been removed. Those algorithms are intentionally
@@ -42,10 +44,10 @@ written. RCCL does not make the source appear runnable with a panic, CPU
 fallback, PTX merge, JIT, symbol lookup, or runtime "compiler unavailable"
 error.
 
-The currently generated runtime surface contains safe CUB range/storage
-values, safe Thrust range-expression adaptors, and `cuda::Execution`, which
-borrows a stream and allocator. It contains no algorithm policy, schedule,
-type map, module family, or cache.
+The handwritten runtime surface contains CUB range/storage values, Thrust
+range-expression adaptors, and `cuda::Execution`, which borrows a stream and
+allocator. It contains no algorithm policy, schedule, type map, module
+family, or cache.
 
 ## Generated-Rust safety rule
 
@@ -86,9 +88,12 @@ There are no compatibility `Less`, `Greater`, `Comparator`, `DeviceSpan`,
 iterator-pair, schedule, policy, or legacy module aliases.
 
 The precise compiler contract is in
-[RCCL_COMPILER_DSL.md](RCCL_COMPILER_DSL.md). The complete product inventory,
-dependency order, examples/tests stage, and adversarial error-masking review
-are in [CCCL_THRUST_CUB_COVERAGE_PLAN.md](CCCL_THRUST_CUB_COVERAGE_PLAN.md).
+[RCCL_COMPILER_DSL.md](RCCL_COMPILER_DSL.md). The exact pinned CUB example and
+API-test input is in
+[CCCL_CUB_EXAMPLE_TEST_CONTRACT.md](CCCL_CUB_EXAMPLE_TEST_CONTRACT.md). The
+complete product inventory, dependency order, examples/tests stage, and
+adversarial error-masking review are in
+[CCCL_THRUST_CUB_COVERAGE_PLAN.md](CCCL_THRUST_CUB_COVERAGE_PLAN.md).
 
 ## Verification during the compiler rewrite
 
@@ -96,7 +101,8 @@ are in [CCCL_THRUST_CUB_COVERAGE_PLAN.md](CCCL_THRUST_CUB_COVERAGE_PLAN.md).
 scripts/test-gpu.sh
 ```
 
-The current gate validates the two compiler catalogs, generated-token safety,
-the runtime-only crate boundary, the absence of JIT/runtime-TMP code, formatting,
-warning-free host compilation, tests, and docs. It deliberately does not run a
-GPU program before an algorithm has a safe generated launch path.
+The current gate validates the pinned example/API-test inventory, the two
+compiler catalogs, generated-token safety, the runtime/compiler boundary, the
+absence of JIT/runtime-TMP code, formatting, warning-free host compilation,
+tests, and docs. It deliberately does not run a GPU algorithm before one has a
+safe generated launch path.

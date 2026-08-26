@@ -1,36 +1,9 @@
-extern crate proc_macro;
-
+#[cfg(test)]
 mod audit;
+#[cfg(test)]
 mod call;
+#[cfg(test)]
 mod catalog;
-mod expand;
-
-use proc_macro::TokenStream;
-
-/// Emit the Rust-native Thrust support vocabulary into `rccl-thrust`.
-///
-/// User-facing algorithms are separate shallow call-site macros. They are
-/// exported one by one only when their CUB/cuda-oxide lowering is real.
-#[proc_macro]
-pub fn emit_support(input: TokenStream) -> TokenStream {
-    if !input.is_empty() {
-        return syn::Error::new(
-            proc_macro2::Span::call_site(),
-            "emit_support! accepts no runtime-crate configuration",
-        )
-        .into_compile_error()
-        .into();
-    }
-    if let Err(message) = catalog::validate() {
-        return syn::Error::new(proc_macro2::Span::call_site(), message)
-            .into_compile_error()
-            .into();
-    }
-    match expand::support() {
-        Ok(tokens) => tokens.into(),
-        Err(error) => error.into_compile_error().into(),
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -41,7 +14,6 @@ mod tests {
         catalog::validate().expect("the typed Thrust compiler catalog must be valid");
         assert_eq!(catalog::ADAPTORS.len(), 19);
         assert_eq!(catalog::ALGORITHMS.len(), 34);
-        assert!(catalog::SUPPORT.len() >= 50);
         assert!(
             catalog::ALGORITHMS
                 .iter()
@@ -50,9 +22,11 @@ mod tests {
     }
 
     #[test]
-    fn generated_support_is_valid_audited_rust() {
-        let generated = expand::support().expect("generated Thrust Rust must pass its audit");
-        syn::parse2::<syn::File>(generated)
-            .expect("generated Thrust output must remain valid Rust");
+    fn generated_algorithm_audit_accepts_safe_rust() {
+        let generated = audit::generated_rust(quote::quote! {
+            fn generated_helper(value: usize) -> usize { value + 1 }
+        })
+        .expect("safe generated Rust must pass its audit");
+        syn::parse2::<syn::File>(generated).expect("audited output must remain valid Rust");
     }
 }

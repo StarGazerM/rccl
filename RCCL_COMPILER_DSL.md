@@ -24,26 +24,21 @@ An operation that needs compile-time CUB/Thrust selection is a macro, like
 compile-time work:
 
 ```rust,ignore
-sort_by!(
-    on: &exec,
-    range: &mut keys,
-    compare: |left: &i64, right: &i64| left > right,
-)?;
+sort_by!(&exec, &mut keys, |left: &i64, right: &i64| right.cmp(left))?;
 
 stable_sort_by_key!(
-    on: &exec,
-    keys: &mut keys,
-    values: &mut values,
-    compare: |left: &i64, right: &i64| left < right,
+    &exec,
+    &mut keys,
+    &mut values,
+    |left: &i64, right: &i64| left.cmp(right),
 )?;
 
 device_reduce!(
-    on: &exec,
-    input: &values,
-    output: &mut result,
-    init: 0_i64,
-    op: |left, right| left + right,
-    temp: auto,
+    &exec,
+    &values,
+    &mut result,
+    |left, right| left + right,
+    0_i64,
 )?;
 ```
 
@@ -58,7 +53,7 @@ suffix therefore denotes a different semantic input shape, not a comparator
 kind. `compare` is an ordinary Rust closure expression; RCCL has no
 `Comparator`, `Less`, or `Greater` object hierarchy.
 
-The macro parser stores fields as `syn::Expr`. It cannot and does not inspect
+The macro parser stores operands as `syn::Expr`. It cannot and does not inspect
 the inferred type of those expressions. It emits generic Rust whose bounds
 express the required read/write/random-access capabilities, then rustc checks
 the concrete types and monomorphizes the generated code.
@@ -105,14 +100,14 @@ rccl-memory ----------------> rccl-cub -------> rccl-thrust -------> rccl
                          runtime values only
 ```
 
-The zero-input `emit_support!` calls in the runtime crates are internal crate
-construction macros. They emit the Rust-native support vocabulary and are not
-the operation DSL. Runtime crates cannot restate compiler facts.
+There is no support-generation macro. Slices, buffers, tuples, range
+descriptors, storage layouts, and `Execution` are ordinary handwritten Rust.
+Only operation calls that require closed CUB/Thrust selection and concrete
+kernel construction are proc macros.
 
 The macro crates own every authored compile-time fact:
 
 - the complete CCCL-family inventory and dependency graph;
-- support-type mappings and range capabilities;
 - thread, warp, block, agent, grid, and device kernel families;
 - type/callable selection rules;
 - target schedules, launch bounds, tile shapes, unroll factors, shared-memory
@@ -122,6 +117,7 @@ The macro crates own every authored compile-time fact:
 
 Runtime crates own only values that exist while a program runs:
 
+- ordinary support types, range capabilities, and range adaptors;
 - borrowed contexts, streams, and allocators;
 - allocation owners, buffers, views, lengths, and temporary storage;
 - launch dimensions derived from runtime lengths; and
@@ -143,11 +139,11 @@ lower(C, T, G) = (concrete CUB operation, literal schedule, oxide kernel set)
 The proc macro sees `C` and emits the source that lets rustc determine `T` and
 `G`. RCCL never discovers them at runtime.
 
-The CUB macro layer emits:
+The CUB macro layer emits for an implemented operation:
 
-1. only the support code and device helpers needed by implemented operations;
-2. concrete cuda-oxide kernel items;
-3. literal schedule operands/compiler attributes; and
+1. concrete cuda-oxide kernel items and operation-specific device helpers;
+2. literal schedule operands/compiler attributes;
+3. the selected temporary-storage formula and launch graph; and
 4. typed launch code with safe generated arguments.
 
 The Thrust layer parses the public algorithm shape and lowers directly to its
@@ -169,8 +165,8 @@ lacks a required static generic binding, that operation stays unexported.
 
 ## Rust-native support mapping
 
-The catalog records semantic mappings; it does not generate compatibility
-wrappers where Rust already carries the contract:
+Ordinary runtime code uses Rust vocabulary rather than generated compatibility
+wrappers:
 
 | CCCL concept | Rust representation |
 |---|---|

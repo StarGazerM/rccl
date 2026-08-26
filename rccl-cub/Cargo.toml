@@ -6,7 +6,5 @@ license = "Apache-2.0 OR MIT"
 description = "Device-wide and cooperative CUDA primitives for RCCL"
 
 [dependencies]
-cuda-device = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "b22efa99e8383e2a349c4a3af60d8aa083973890" }
 cuda-core = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "b22efa99e8383e2a349c4a3af60d8aa083973890" }
-rccl-cub-macros = { path = "../rccl-cub-macros" }
 rccl-memory = { path = "../rccl-memory" }

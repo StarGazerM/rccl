@@ -64,13 +64,13 @@ the lowest existing owner that needs it:
 
 - `rccl-memory`: owning allocations, allocator handles, host-side borrowed
   device ranges, context and stream-order validation;
-- `rccl-cub-macros`: support generation, CUB primitives, agents, schedules,
-  specialization, and cuda-oxide kernel families;
-- `rccl-cub`: macro-generated runtime values and device code only;
-- `rccl-thrust-macros`: adaptor generation and every Thrust-to-CUB
-  compile-time lowering rule;
-- `rccl-thrust`: macro-generated execution/completion values and algorithm
-  facades only;
+- `rccl-cub-macros`: CUB primitives, agents, schedules, specialization, and
+  cuda-oxide kernel families;
+- `rccl-cub`: handwritten support/runtime values plus macro-emitted operation
+  code only after an operation is implemented;
+- `rccl-thrust-macros`: every Thrust-to-CUB compile-time lowering rule;
+- `rccl-thrust`: handwritten adaptors, execution/completion values, and
+  macro-emitted algorithm facades only after implementation;
 - `rccl`: re-exports only.
 
 Do not create a monolithic compatibility crate. If real implementation work
@@ -139,7 +139,7 @@ implementation.
 |---|---|---|---|
 | `cuda::std::span<T>` | Kernel-side `&[T]`, `&mut [T]`, or `DisjointSlice<T>` | Rust + cuda-oxide | native; the removed host `DeviceSpan` hierarchy was not dereferenceable and duplicated the slice vocabulary; public host subranges remain unimplemented until a real consumer justifies `Range` or native launcher support |
 | `cuda::std::array<T, N>` | `[T; N]` | Rust/cuda-oxide | native; add ABI and device-code matrices |
-| `thrust::pair`, `thrust::tuple` | `(A, B)` and native tuples for ordinary products; named `#[repr(C)]` records where field names or external ABI matter | Rust + CUB value types | partial; cuda-core implements `DeviceCopy` for tuples through arity 8 and the macro emits checked two-way zip range descriptors, but device compilation and higher-arity composition remain |
+| `thrust::pair`, `thrust::tuple` | `(A, B)` and native tuples for ordinary products; named `#[repr(C)]` records where field names or external ABI matter | Rust + CUB value types | partial; cuda-core implements `DeviceCopy` for tuples through arity 8 and handwritten support code provides checked two-way zip range descriptors, but device compilation and higher-arity composition remain |
 | `tuple_size`, `tuple_element`, concepts and type traits | associated types, trait bounds, const generics, and compiler type checking | Rust | native; do not recreate template metafunctions |
 | `optional`, `expected`, variant-like results | `Option<T>`, `Result<T, E>`, and Rust enums | Rust | native; test device lowering for every used shape |
 | CUDA half and bfloat values | canonical `half::f16` / `half::bf16`, which cuda-core already marks `DeviceCopy`; ordering/radix transforms belong to operations, not replacement scalar types | CUB + cuda-core | native scalar types retained; RCCL storage-only wrappers removed; optimized sort coverage remains |
@@ -148,16 +148,16 @@ implementation.
 | `thrust::device_vector` / `vector_base` | `rccl_memory::DeviceBuffer<'stream, T, A>` with Rust `Vec`-like reserve/resize/truncate semantics and a borrowed stream lifetime | memory | partial and usable; iterator/adaptor integration remains |
 | universal and pinned-host vectors | `DeviceBuffer<T, ManagedMemoryResource>` and pinned-host resource/buffer types | memory | resources exist; container aliases and parity tests remain |
 | `device_ptr`, `universal_ptr`, raw pointer casts | unsafe typed device address plus safe lifetime-bearing range/view; raw address only at FFI/kernel internals | memory | replace current universal `cu_deviceptr` escape hatch |
-| `device_reference` and proxy references | no free-standing fake `&T`; range/read/write capabilities and adaptor-specific device lowering | CUB + Thrust | partial; minimal capability traits cover slices and both cuda-core/allocator-aware device buffers, while generated kernels remain |
-| iterator traits/categories/facade/adaptor | descriptor structs compose range/read/write/random-access capabilities without host execution methods | CUB + Thrust | partial; constant/counting/discard/subrange/permutation/reverse/stride/tabulate/transform/zip forms and semantic host tests are generated, while the cuda-oxide device composition matrix remains |
+| `device_reference` and proxy references | no free-standing fake `&T`; range/read/write capabilities and adaptor-specific device lowering | CUB + Thrust | partial; minimal host capability traits cover cuda-core and allocator-aware device buffers but deliberately not host slices, while generated kernels remain |
+| iterator traits/categories/facade/adaptor | descriptor structs compose range/read/write/random-access capabilities without host execution methods | CUB + Thrust | partial; constant/counting/discard/subrange/permutation/reverse/stride/tabulate/transform/zip forms and semantic host tests are handwritten, while the cuda-oxide device composition matrix remains |
 | `mdspan`, extents, layouts | typed multidimensional device view with shape, strides, and layout marker; contiguous 1-D case lowers to slice | CUB | missing; cuda-oxide checked 2-D views are reusable backend pieces |
 | functional objects | ordinary `Fn`/`FnMut` bounds plus `Copy` device-callable closures; specialization is emitted by `rccl-thrust-macros` | CUB + Thrust macros | catalogued; algorithm expansion is backend-blocked; no RCCL callable compatibility trait |
 | `complex<T>` | RCCL-owned `#[repr(C)] Complex<T>` or an upstream cuda-core `DeviceCopy` implementation for a standard Rust complex type | CUB value layer | missing |
 | random engines/distributions | small copyable RNG state values with Rust methods; exact pinned sequences tested against Thrust | Thrust | missing |
 | memory construction/destruction and unique allocation | `MaybeUninit<T>`, RAII owners, `Drop`, and explicit stream-ordered destruction/release | memory + Thrust | partial; unique object/array helpers and nontrivial device construction remain |
 | Thrust memory resources and allocators | `DeviceAllocator` values/references plus existing concrete/adaptor resources | memory | strong partial coverage; public mapping and allocator propagation matrix remain |
-| CUB `Uninitialized`, `KeyValuePair`, `DoubleBuffer`, `FutureValue`, `NullType` | `MaybeUninit`, named key/value record, typed two-buffer selector, device scalar/future input, and `()`/enum absence markers | CUB | partial; macro-generated `MaybeUninit` storage, `KeyValue`, and borrowed `DoubleBuffer` are public and tested, while future/device-scalar and absence forms remain |
-| CUB temporary-storage query/execute | checked `Layout` plus a borrow of caller-owned `DeviceBlock` whose recorded size/alignment satisfies it; collective shared storage stays explicit and typed | CUB macros + runtime | safe layout/storage protocol generated; public algorithm request forms missing |
+| CUB `Uninitialized`, `KeyValuePair`, `DoubleBuffer`, `FutureValue`, `NullType` | `MaybeUninit`, named key/value record, typed two-buffer selector, device scalar/future input, and `()`/enum absence markers | CUB | partial; handwritten `MaybeUninit` storage, `KeyValue`, and borrowed `DoubleBuffer` are public and tested, while future/device-scalar and absence forms remain |
+| CUB temporary-storage query/execute | checked `Layout` plus a borrow of caller-owned `DeviceBlock` whose recorded size/alignment satisfies it; collective shared storage stays explicit and typed | CUB macros + runtime | safe handwritten layout/storage protocol exists; macro-emitted operation formulas and public request forms are missing |
 | CUB chained policies and architecture traits | typed target rows owned only by `rccl-cub-macros`, then emitted as literal kernel operands | CUB macros | catalogued; no runtime or public policy language |
 | CUDA atomics, barriers, warp operations, shared memory, vector loads | reuse canonical `cuda-device` types and intrinsics | cuda-oxide backend | available in part; missing backend operations should be fixed upstream, not re-exported through RCCL paths |
 | status/system errors | opaque Rust error values and `Result` | each owning crate | established; backend choice is private |
@@ -193,12 +193,13 @@ already provide.
 - `rccl-memory` already has allocator-aware `DeviceBuffer`, `DeviceScalar`,
   managed/pinned/device resources, pool resources, and resource adaptors.
 - `rccl-cub-macros` validates the complete 59-primitive public CUB catalog;
-  `rccl-thrust-macros` validates all 34 algorithms, 19 iterator headers, and
-  support families.
-- `rccl-cub` currently exposes only generated safe support values. The old
+  `rccl-thrust-macros` validates all 34 algorithms and 19 iterator/adaptor
+  headers. Support families are ordinary-library coverage rows, not compiler
+  catalog entries.
+- `rccl-cub` currently exposes only handwritten safe support values. The old
   pointer-heavy `WarpMergeSort`, radix, comparison, and merge implementations
   were removed rather than hidden behind a runtime loader.
-- `rccl-thrust` currently exposes only generated `cuda::Execution`, borrowing
+- `rccl-thrust` currently exposes only handwritten `cuda::Execution`, borrowing
   a stream and allocator. Sort and merge are backend-blocked and unexported.
 - Descriptor-only fancy-range algebra and the checked device temporary-storage
   value protocol exist; device access lowering and every public CUB
@@ -425,7 +426,7 @@ host dispatch.
 
 | Phase | Deliverable | Unlocks | Exit evidence |
 |---|---|---|---|
-| 0 | Machine-readable coverage ledger, typed private catalogs, shallow call parsers, generated-Rust safety audit, and zero-input support expansion sites | honest progress, drift checks, and one compile-time owner for every later primitive | every inventory item has an owner/status; runtime crates contain no compile-time metadata; generated code rejects `Arc`, raw pointers, and unsafe; no JIT route exists |
+| 0 | Machine-readable coverage ledger, exact pinned example/API-test inventory, typed private catalogs, shallow call parsers, and generated-algorithm safety audit | honest progress, drift checks, and one compile-time owner for every later primitive | every inventory item has an owner/status; all 19 programs, 378 embedded regions, 49 API tests, and 105 exercised CUB methods are pinned; runtime crates contain no closed compiler metadata; generated code rejects `Arc`, raw pointers, and unsafe; no JIT route exists |
 | 1 | Read/write/random-access range traits, callable bounds, product/key-value types, double buffer, offset selection, temp-storage layout; rely on native cuda-oxide slices | all general algorithms and CUB public forms | compile-fail alias/lifetime tests, host/device ABI tests, zero-copy PTX checks |
 | 2 | Thrust adaptors: counting, constant, discard, offset, reverse, strided, transform, transform-output, transform-in/out, zip, permutation, shuffle, tabulate-output, retag/capability conversion | fancy-iterator parity for later algorithms | adaptor composition matrix on device, including read/write zip and non-contiguous outputs |
 | 3 | CUB thread then warp then block load/store/exchange/reduce/scan/search/sort/radix/histogram building blocks | reusable implementation base for device-wide algorithms | upstream example/test matrices, exact temp-storage sizes/alignment, PTX synchronization checks |
