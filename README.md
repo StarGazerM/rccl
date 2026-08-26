@@ -128,6 +128,9 @@ scalar combinations, large-offset portioning, `DoubleBuffer`, bit-range and
 custom decomposer contracts, general typed iterators, and the complete pinned
 upstream randomized test product. The exact gaps are tracked in
 [`STRICT_CCCL_API_AUDIT.md`](STRICT_CCCL_API_AUDIT.md).
+The complete support-library, Thrust algorithm, CUB primitive, and
+dependency-ordered delivery inventory is in
+[`CCCL_THRUST_CUB_COVERAGE_PLAN.md`](CCCL_THRUST_CUB_COVERAGE_PLAN.md).
 
 ## Execution and memory resources
 
