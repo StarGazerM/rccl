@@ -1,171 +1,81 @@
-# Strict CCCL/Rust API audit
+# Strict RCCL compiler-boundary audit
 
-Baseline: NVIDIA CCCL
-`571f2fc3bc53cd710e306ad43d58995c1fe4219f`.
+Baseline: NVIDIA CCCL `571f2fc3bc53cd710e306ad43d58995c1fe4219f`.
 
-This audit records the observable Rust contract and the exact upstream
-operation represented by each name. Hidden visibility, compatibility aliases,
-and tests that instantiate no real call are not evidence of a correct design.
+This audit describes the current rewrite. Removed sort, merge, radix, and warp
+implementations are not retained evidence.
 
-Status vocabulary:
+## Fixed architecture
 
-- **fixed**: corrected in the retained implementation;
-- **accepted**: intentional, source-backed Rust adaptation;
-- **replace**: an operation is required but the current representation is not
-  sufficient;
-- **missing**: pinned CCCL functionality is not implemented;
-- **backend**: the correction belongs in cuda-oxide rather than an RCCL
-  signature disguise.
-
-## A. Ownership, lifetime, and safety
-
-| ID | Status | Current contract |
+| ID | State | Contract |
 |---|---|---|
-| A01 | fixed | Safe Thrust sort and merge calls always attempt stream synchronization after a path that may have queued work, including when a later launch fails. Borrowed ranges are not accessed after return. |
-| A02 | fixed | `Execution<'stream>` borrows `&'stream CudaStream`; resource buffers and CUB workspaces carry the same explicit stream lifetime and do not retain or clone a shared stream pointer. |
-| A03 | fixed | `Execution` is defined only by `rccl-thrust`. It holds the borrowed stream, allocator, and an opaque CUB kernel-context handle; it contains no schedule or algorithm type. |
-| A04 | accepted | CUB owns a context-scoped typed module cache because cuda-oxide does not provide one. The global registry stores weak entries, so the final live CUB handle can release the module. |
-| A05 | fixed | Sort and merge bind once with `par(&stream)` or `par_in(&stream, allocator)`. There is no algorithm-specific execution wrapper. |
-| A06 | fixed | CUB dispatch receives its own context handle, stream, and allocator. It never accepts or imports the Thrust execution policy. |
-| A07 | fixed | Radix, comparison, and merge workspaces allocate through the allocator held by Thrust execution. |
-| A08 | fixed | Ordering customization is an ordinary `Copy + 'static` closure returning `Ordering`; there is no unsafe RCCL callable trait. Dereferencing captured raw pointers still requires an explicit unsafe block, while future range/proxy views should encode device-state lifetimes. |
-| A09 | fixed | Public sort and merge consume typed borrowed device ranges; erased pointer/boolean iterator mappings are gone. |
-| A10 | missing | A safe no-sync policy needs a completion object that retains every borrowed range. An unchecked safe asynchronous alias would be unsound. |
+| A01 | fixed | `rccl-cub-macros` is the only author of CUB support mappings, primitive dependencies, target schedules, kernel families, and specialization facts. |
+| A02 | fixed | `rccl-thrust-macros` is the only author of Thrust support/adaptor mappings and Thrust-to-CUB selection rules. |
+| A03 | fixed | Both private DSLs use custom `syn` 2 typed ASTs and whole-catalog validation. |
+| A04 | fixed | `rccl-cub/src/lib.rs` and `rccl-thrust/src/lib.rs` are zero-input expansion sites; a runtime crate cannot restate compiler facts. |
+| A05 | fixed | `Execution` borrows a stream and allocator only. It owns no module set, policy, type map, target, schedule, registry, or cache. |
+| A06 | fixed | `AotKernelSet`, `TargetSchedule`, build-script schedule generation, `TypeId`/`Any` registries, module caches, and handwritten dispatch traits are deleted. |
+| A07 | fixed | Runtime PTX merge, driver JIT, nvJitLink, manual symbol lookup, and raw ABI argument-vector paths are absent. |
+| A08 | fixed | There are no compatibility `Comparator`, `Less`, `Greater`, `DeviceSpan`, legacy execution, or stable-sort aliases. |
+| A09 | fixed | Old examples, benchmarks, and compile-only fixtures were removed because they could report API coverage without a generated algorithm. |
+| A10 | fixed | The compiler gate does not run a GPU program before a safe proc-macro-generated launch path exists. |
 
-## B. Crate and dispatch boundary
+## Generated Rust safety
 
-The dependency order is exact:
+Each proc macro parses its output back as a `syn::File` before returning it.
+Expansion rejects:
 
-```text
-rccl-memory -> rccl-cub -> rccl-thrust -> rccl
-```
+- `Arc` paths;
+- raw pointer types and casts, `&raw`, `NonNull`, pointer extraction such as
+  `as_ptr`, and `ptr`/`transmute` paths;
+- unsafe blocks, all unsafe function/method signatures, traits, impls, and
+  bare function types;
+- FFI blocks, unions, `static mut`, and `UnsafeCell` plumbing;
+- opaque nested macro calls and unaudited attributes that could generate code
+  after the structural pass.
 
-`rccl-memory` is also used directly by Thrust, and the umbrella directly
-re-exports both public layers. There is no CUB-to-Thrust edge.
+The generated support surface currently uses ownership, borrows, slices,
+`MaybeUninit`, and ordinary `Result`. There is no generator waiver. A future
+CUDA operation that genuinely requires unsafe code must first be isolated as
+a small reviewed backend primitive; generated algorithms call only its safe
+contract.
 
-| crate | owns | must not own |
+This guarantee is deliberately scoped to proc-macro output. `rccl-memory` is
+the hand-written CUDA FFI/resource boundary and still contains `Arc`, unsafe,
+and raw-pointer operations. Those occurrences are red flags requiring a
+separate line-by-line ownership/necessity audit; they are not evidence that
+generated algorithms may use the same mechanisms. The compiler gate scans
+both expansion bodies and both identical structural auditors so this boundary
+cannot silently widen.
+
+## Current public state
+
+| Surface | State | Evidence |
 |---|---|---|
-| `rccl-memory` | stream-ordered resources, buffers, contiguous device-range ownership | CUB or Thrust dispatch |
-| `rccl-cub` | device scalar vocabulary, closure lowering, cooperative collectives, device-wide kernels and dispatch, target schedule, context module cache | Thrust execution or host facade |
-| `rccl-thrust` | `Execution`, `par`, `par_in`, safe synchronous host algorithms, compile-time backend specialization | CUB kernel bodies, a duplicate module cache, public schedule language |
-| `rccl` | thin re-exports for Thrust, memory, and CUB | kernels, dispatch engines, another execution type |
+| complete CUB public catalog | implemented compiler input | `rccl-cub-macros/src/cub.dsl` contains 59 validated public primitives |
+| complete Thrust algorithm catalog | implemented compiler input | `rccl-thrust-macros/src/thrust.dsl` contains all 34 algorithm headers |
+| complete Thrust iterator catalog | implemented compiler input | the same DSL contains all 19 iterator headers |
+| Rust support mappings | partial | CUB expansion emits `KeyValue`, `DoubleBuffer`, `TempStorage`, `DeviceSource`, and `DeviceSink`; Thrust expansion emits checked constant/counting/discard/subrange/reverse/stride/map/map-output/map-in-out/zip/permutation/tabulate adaptors |
+| `cuda::Execution` | implemented runtime value | generated borrowed stream and allocator only |
+| CUB collectives/device algorithms | missing or backend-blocked | old pointer-heavy code deleted; no safe generated kernels yet |
+| Thrust algorithms | backend-blocked | deliberately unexported until their generated CUB lowering exists |
+| generated support tests | implemented | macro output tests ownership, bounds, composition, failure propagation, closure capture, and rejected inputs; the zero-stride test exposed and repaired eager `then_some` evaluation |
+| public algorithm examples/runtime parity | missing | must be rebuilt after each public algorithm exists |
 
-Target schedules are private CUB constants generated for one
-`CUDA_OXIDE_TARGET`. Host-only Cargo checks use deterministic SM80 constants.
-There is no runtime GPU probe, policy object, generated strategy type,
-breakpoint table, launch callback, or function-pointer dispatch table.
+`backend-blocked` never means a runtime `CompilerUnavailable` error. It means
+the function is not exported and cannot be mistaken for a runnable operation.
 
-Rust generics for element, ordering closure, allocator, and range types are ordinary
-parametric polymorphism. They are not a schedule/control-flow language.
+## Required implementation order
 
-## C. Thrust-facing API
+1. Generate safe source/sink/product/storage vocabulary.
+2. Generate Thrust adaptors and compile-fail ownership tests.
+3. Generate CUB thread, warp, then block primitives without raw-pointer
+   algorithm code.
+4. Generate agents/grid/device operations and typed temporary-storage forms.
+5. Generate Thrust functions only when their CUB lowering and launch path are
+   present.
+6. Restore examples and focused tests, then seed implementation/launch faults
+   to prove those tests fail for the intended reason.
 
-| ID | Status | Current contract or gap |
-|---|---|---|
-| C01 | fixed | Ordinary root functions provide `sort`, `sort_by`, stable variants, key/value variants, and the four merge operations. |
-| C02 | fixed | Descending convenience names and marker types are absent; callers pass `|left, right| right.cmp(left)`. |
-| C03 | accepted | Rust cannot overload by arity, so `_with` denotes the key/value ordering-closure form. |
-| C04 | fixed | Safe operations synchronize like pinned Thrust `par`; only a future explicit no-sync policy may omit that boundary. |
-| C05 | accepted | Rust returns `Result` instead of CUDA status output parameters or C++ exception/termination machinery. |
-| C06 | accepted | A contiguous Rust range replaces `(first, last)` pointer pairs while preserving the same logical range. |
-| C07 | missing | General Thrust fancy/proxy iterators do not participate in the ordinary APIs. |
-| C08 | missing | Device-side Thrust entry points are absent. Pinned Thrust selects its sequential implementation in device code because device-side launches are unsupported. |
-| C09 | replace | `sort` currently shares the stable backend. Stability is guaranteed only by the explicitly stable operations so future optimization remains possible. |
-
-## D. Sort fidelity
-
-| ID | Status | Current contract or gap |
-|---|---|---|
-| D01 | fixed | Default natural-ascending sort over `u32` keys reaches the four-pass stable OneSweep radix path. |
-| D02 | fixed | Default natural-ascending sort over `u32` keys and `u32` values reaches the specialized pair path. |
-| D03 | fixed | Explicit closures and custom records use a typed comparison backend and are not mislabeled as radix; opaque closure semantics are never guessed from a type name. |
-| D04 | replace | The comparison fallback performs rank/binary-search merge passes and is a correctness path, not the claimed CUB-radix performance path. |
-| D05 | missing | Full ascending/descending optimized coverage for every CCCL arithmetic, half, and bfloat combination is absent. |
-| D06 | missing | CUB single-tile versus multi-pass selection, large-offset portioning, `DoubleBuffer`, selector, bit-range, and decomposer contracts are absent. |
-| D07 | missing | Offset type is not selected from the caller's range difference type; the optimized path currently converts counts to `u32`. |
-| D08 | missing | Policy tuning does not yet cover the complete CUB product of key size, value size, offset width, phase, and architecture. |
-| D09 | missing | One SM89 runtime matrix is not evidence for SM80, SM90, or SM100 behavior. |
-| D10 | replace | The recorded 4 GiB OneSweep measurement used an internal reusable workspace, not an identical public allocation/synchronization boundary. |
-
-## E. Merge fidelity
-
-| ID | Status | Current contract or gap |
-|---|---|---|
-| E01 | fixed | The retained host functions perform stable key-only and key/value merge with natural ordering or state-carrying Rust closures. |
-| E02 | fixed | CUB owns the asynchronous device-wide dispatch. The hidden entry points are unsafe and state the stream-completion lifetime requirement; Thrust adds the safe synchronization boundary. |
-| E03 | fixed | Normal and wide-record fallback geometry is selected at monomorphization, not through a runtime strategy object. |
-| E04 | missing | Merge accepts contiguous device slices only; counting, discard, transform, zip, permutation, and other proxy iterators remain missing. |
-| E05 | missing | The public CUB temporary-storage query/execute and environment-allocation forms are not represented. |
-| E06 | replace | Fallback selection measures RCCL's staged key/value bytes rather than pinned CUB's full agent `TempStorage` union and can switch too early for some record shapes. |
-| E07 | replace | Public performance parity needs fresh CUB/Thrust measurements with identical allocation and synchronization timing. |
-
-## F. CUB device layer
-
-Pinned CUB distinguishes device-wide host dispatch from in-kernel collectives:
-
-| Pinned primitive | Ordering customization | RCCL state |
-|---|---|---|
-| thread stable odd-even sort | ordering callable | missing |
-| `WarpBitonicSort` | ordering callable | missing |
-| `WarpMergeSort` | ordering closure | implemented and public |
-| `BlockMergeSort` | ordering callable | missing |
-| `BlockRadixSort` | decomposer and bit range | missing |
-| `DeviceRadixSort` | device-wide host dispatch | private specialized backend only |
-
-The public `WarpMergeSort` is device-callable, has compile-time geometry, and
-uses explicit temporary storage. Missing collectives must follow the same CUB
-shape rather than introducing host execution objects into the device layer.
-
-## G. Iterator and range gaps
-
-The deleted transitional iterator designs are not retained under compatibility
-names. A replacement needs associated typed device views/proxy references,
-must retain every backing range, must propagate stream-ordering dependencies,
-and must preserve zero-copy contiguous behavior. Zip/tuple, transform,
-counting, discard, reverse, strided, and permutation views remain missing.
-
-`DeviceSlice::cu_deviceptr` is still the universal low-level interop escape
-hatch. The pinned cuda-oxide synchronous generated launcher accepts
-`DeviceBuffer` for slice-shaped arguments but not arbitrary RCCL range types,
-so generic span/resource lowering remains a private pointer/count ABI. Safe
-algorithms should eventually consume a launcher-recognized typed device view
-instead of asking implementations for an untyped integer address.
-
-## H. Test and example integrity
-
-| ID | Status | Evidence rule |
-|---|---|---|
-| H01 | fixed | Integration tests instantiate ordinary root functions with real buffer and allocator types. Renamed-root and direct-Thrust fixtures each contain an actual test. |
-| H02 | fixed | Every retained sort example uses the ordinary host facade; the collective example uses the real CUB `WarpMergeSort`. |
-| H03 | fixed | The gate derives every binary and example from Cargo metadata and fails if a target has no runtime route. |
-| H04 | fixed | Known consumer inventories are non-empty and each declared consumer must contain an ordinary algorithm call. |
-| H05 | fixed | The gate rejects obsolete crate directories, dependencies, names, and generated call structures rather than allowing compatibility shims. |
-| H06 | fixed | Host tests and the complete GPU runtime/example inventory run twice, exercising cache reuse and teardown paths. |
-| H07 | fixed | CUDA C++ reference sources are inventoried and executed against the exact pinned CCCL commit. |
-| H08 | missing | The complete randomized upstream Thrust/CUB test product is not ported; selected matrices must not be called all CCCL tests. |
-
-Passing the gate proves only the retained RCCL surface and the recorded pinned
-reference cases. It does not prove full upstream product parity.
-
-## I. Accepted Rust adaptations
-
-- `Result` replaces CUDA status output parameters and C++ exceptions.
-- Safe functions borrow typed device ranges rather than accepting naked
-  pointer/count pairs.
-- Ordering customization is an ordinary `Copy + 'static`
-  `Fn(&K, &K) -> Ordering`, including move-capturing closures.
-- Target schedule constants are selected during the CUB build for one explicit
-  cargo-oxide architecture.
-- Mutable raw pointers remain confined to CUDA driver out-parameters, private
-  kernel launch ABIs, atomic destinations, dynamically typed shared/scratch
-  storage, and zero-copy source/sink adapters. Register-array pair handling in
-  `WarpMergeSort` uses ordinary mutable array borrows rather than a nullable
-  pointer.
-- `Arc` is not an execution-policy convention: streams are borrowed, CUDA pool
-  views borrow their source pool, per-stream events have one pool owner, and
-  scoped worker tests share borrows. Remaining `Arc` values retain cuda-core
-  contexts/modules or intentionally shared process-wide registries and caches.
-- Temporary storage and collective shared storage have explicit Rust ownership.
-
-Any additional difference needs a source-backed justification rather than the
-claim that C++ used a pointer, class, overload, or template.
+The full dependency order and error-masking checklist are in
+`CCCL_THRUST_CUB_COVERAGE_PLAN.md`.

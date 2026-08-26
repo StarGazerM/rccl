@@ -19,7 +19,7 @@ machines without a CUDA device can still run `cargo test`.
 | `cuda_memory_resource` | `CudaMemoryResource` | implemented | allocation, zero-byte, alignment, wrong-context tests |
 | `managed_memory_resource` | `ManagedMemoryResource` | implemented | host/device visibility and teardown tests |
 | `cuda_async_memory_resource` | `CudaAsyncMemoryResource` | implemented | same/cross-stream reuse tests |
-| `cuda_async_view_memory_resource` | `CudaPoolViewMemoryResource<'pool>` | implemented | borrowed-handle identity, source lifetime, and allocation tests |
+| `cuda_async_view_memory_resource` | `&CudaPoolMemoryResource` | native Rust borrow | source lifetime and allocation tests |
 | `cuda_async_managed_memory_resource` | none | missing | managed native-pool tests |
 | `cuda_memory_resource` with fabric | none | missing | fabric handle tests on supported hardware |
 | CUDA private pool | `CudaPoolMemoryResource` | implemented | configuration, stats, trim, max-size tests |
@@ -36,7 +36,7 @@ machines without a CUDA device can still run `cargo test`.
 | `thread_safe_resource_adaptor` | `ThreadSafeMemoryResource` | implemented | concurrent callback serialization test |
 | `prefetch_resource_adaptor` | `PrefetchMemoryResource` | implemented | managed-memory location and non-managed no-op tests |
 | aligned resource | `AlignedMemoryResource` | implemented | over-alignment, threshold, size, and multithread tests |
-| per-device resource registry | `registry::{get_per_device_resource, set_per_device_resource}` | implemented compatibility boundary | replacement, restoration, multi-device tests |
+| per-device resource registry | intentionally omitted | explicit allocator arguments avoid process-global mutable policy |
 | pinned host resource | `PinnedHostMemoryResource` | implemented | host/device visibility, pool, zero-byte, and alignment tests |
 | `system_memory_resource` | `SystemMemoryResource` | implemented | capability rejection, alignment, host/device visibility, and stream-ordered free tests |
 | `sam_headroom_memory_resource` | `SamHeadroomMemoryResource` | implemented | all-host headroom and host/device visibility tests; split-range pressure test pending |
@@ -48,11 +48,11 @@ machines without a CUDA device can still run `cargo test`.
 | --- | --- |
 | `device_buffer` byte ownership, copy/move, reserve, resize, shrink | typed `DeviceBuffer<'stream, T, A>` borrows its stream, stores its allocator handle, and has deep copy and capacity operations; byte-erased facade missing |
 | allocator lifetime and dispatch | `A`, `&'pool A`, `Rc<A>`, and `Arc<A>` handles use static dispatch; compile-fail coverage prevents a borrowed pool from being destroyed first |
-| `device_uvector<T>` uninitialized typed vector | implemented as `DeviceUVector<'stream, T, A>`; broader parity tests pending |
+| `device_uvector<T>` uninitialized typed vector | `DeviceUninitBuffer<'stream, T, A>` uses `MaybeUninit<T>` and requires unsafe `assume_init`; broader parity tests pending |
 | `device_scalar<T>` set/get and stream ordering | implemented as `DeviceScalar<'stream, T, A>`; broader parity tests pending |
 | destruction after active-device change | context is retained; automated multi-device coverage missing |
 | explicit stream transitions | intentionally replaced by compile-time fixed stream affinity; cross-stream use is rejected instead of mutating buffer state |
-| RCCL/CCCL zero-copy input traits | `DeviceSlice` and `DeviceSliceMut` implemented; broader CCCL traits pending |
+| RCCL/CCCL zero-copy input traits | `ContiguousDeviceRange` and `ContiguousDeviceRangeMut` implemented; broader CCCL traits pending |
 
 ## Test gates
 
@@ -61,8 +61,8 @@ machines without a CUDA device can still run `cargo test`.
 2. GPU contract tests mirror upstream test groups, including same-stream,
    cross-stream, deleted-stream, and multi-thread cases. The multi-device case
    is present but skips on the one-GPU reference machine.
-3. Miri/loom-style host tests cover registry and adaptor state machines where
-   CUDA calls are not required.
+3. Miri/loom-style host tests cover adaptor state machines where CUDA calls are
+   not required.
 4. Sanitizer and `compute-sanitizer` jobs cover use-after-free, races, and
    stream-order mistakes.
 5. No row reaches performance parity until the comparison benchmark meets the

@@ -1,195 +1,99 @@
-# RCCL: pure-Rust CUDA primitives
+# RCCL: Rust-native CCCL algorithms
 
-RCCL implements CUDA primitives in Rust with NVIDIA Research's
-[`cuda-oxide`](https://github.com/NVlabs/cuda-oxide) compiler. Kernel bodies are
-ordinary Rust compiled through MIR to PTX. RCCL does not call Thrust, CUB, CUDA
-C++, NVRTC, or a CPU sorting library at runtime.
+RCCL is being rebuilt as a Rust compiler expansion of the Thrust/CUB subset
+in NVIDIA CCCL. It is not a C++ API clone and does not contain a runtime
+template engine.
 
-The host API consists of ordinary functions:
-
-```rust
-use cuda_core::{CudaContext, DeviceBuffer};
-
-let context = CudaContext::new(0)?;
-let stream = context.default_stream();
-let exec = rccl::cuda::par(&stream)?;
-let mut keys = DeviceBuffer::<u32>::zeroed(&stream, count)?;
-
-rccl::sort(&exec, &mut keys)?;
-```
-
-`rccl::cuda::par` borrows the stream and uses its context. Each safe host
-algorithm synchronizes before returning, including after a failure on a path
-that may already have queued work. Temporary storage stays on the GPU; the GPU
-examples generate and validate their data on the GPU and copy only scalar
-validation results to the CPU.
-
-## Crate boundary
-
-The workspace follows CCCL's CUB-below-Thrust dependency direction:
+The architectural pipeline is:
 
 ```text
-rccl-memory
-     |
-     v
-  rccl-cub       device-callable collectives, device-wide dispatch,
-     |           target schedules, kernels, context module cache
-     v
- rccl-thrust     Execution, par/par_in, safe host algorithms
-     |
-     v
-    rccl         thin re-export crate
+rccl-cub-macros     private CUB DSL -> typed syn 2 AST -> cuda-oxide Rust
+rccl-thrust-macros  private Thrust DSL -> typed syn 2 AST -> CUB lowering
+
+rccl-memory -> rccl-cub -> rccl-thrust -> rccl
+                 runtime values only
 ```
 
-There is no shared algorithm runtime crate and no generated facade crate.
-`rccl-cub` never accepts a Thrust `Execution`. Its hidden asynchronous merge
-dispatch accepts a CUB kernel context, stream, and allocator directly.
-`rccl-thrust` owns the safe borrowed-range boundary, invokes CUB, and performs
-the required synchronization.
+The proc-macro expansion is RCCL's AOT boundary. All authored target
+schedules, specialization rules, kernel families, support mappings, and
+Thrust-to-CUB choices live in the two macro crates. The runtime crates do not
+store or rediscover that information.
 
-Applications can depend directly on `rccl-thrust`. Device-level users can
-depend directly on `rccl-cub`. The `rccl` umbrella re-exports both surfaces but
-contains no kernels or dispatch implementation.
+## Current rewrite state
 
-## Thrust host algorithms
+The two complete catalogs now cover:
 
-The sort surface contains:
+- all 59 public CUB thread/warp/block/device/iterator headers;
+- all 34 top-level Thrust algorithm headers;
+- all 19 Thrust iterator headers;
+- the required support values, random engines, and memory-resource families.
 
-- `sort`, `sort_by`, `stable_sort`, `stable_sort_by`
-- `sort_by_key`, `sort_by_key_with`
-- `stable_sort_by_key`, `stable_sort_by_key_with`
+Both catalogs are parsed with custom `syn` 2 `Parse` implementations and
+validated for duplicates, missing fields, unknown dependencies, target-row
+drift, selection errors, and CUB dependency cycles.
 
-The merge surface contains:
+The old handwritten sort, merge, radix, schedule, module-set, and runtime
+loader implementation has been removed. Those algorithms are intentionally
+not exported while their safe proc-macro-generated cuda-oxide path is being
+written. RCCL does not make the source appear runnable with a panic, CPU
+fallback, PTX merge, JIT, symbol lookup, or runtime "compiler unavailable"
+error.
 
-- `merge`, `merge_by`
-- `merge_by_key`, `merge_by_key_with`
+The currently generated runtime surface contains safe CUB range/storage values,
+safe Thrust source/sink adaptors, and `cuda::Execution`, which borrows a stream
+and allocator. It contains no algorithm policy, schedule, type map, module
+family, or cache.
 
-Rust cannot overload functions by arity, so `_with` denotes the key/value form
-with an explicit ordering closure. Descending order uses the same operation
-with a closure such as `|left, right| right.cmp(left)`.
+## Generated-Rust safety rule
 
-Range parameters implement `rccl::memory::DeviceSlice<T>` or
-`DeviceSliceMut<T>`. Both `cuda_core::DeviceBuffer<T>` and allocator-aware
-`rccl::memory::DeviceBuffer<'stream, T, A>` implement those traits. Their `subspan` and
-`subspan_mut` methods create checked, lifetime-bearing device subranges without
-CPU staging; existing sort and merge functions accept those spans directly.
-[`examples/span-sort.rs`](examples/span-sort.rs) sorts only the middle of one
-allocation and validates both its exact output and untouched guards on the
-GPU. General Thrust-style fancy/proxy iterators are not implemented yet.
+Before returning tokens, both proc macros parse their own output back through
+`syn::File`. Expansion fails if generated algorithm code contains:
 
-A custom ordering is an ordinary `Copy + 'static` Rust closure whose concrete
-type and captured state are monomorphized into the GPU kernels:
+- `Arc`;
+- raw pointer types, casts, raw-address expressions, pointer extraction,
+  `NonNull`, `UnsafeCell`, `ptr`, or `transmute` plumbing;
+- unsafe blocks, signatures, traits, impls, and bare function types;
+- FFI blocks, unions, or `static mut`;
+- opaque nested macro calls or unaudited attributes.
 
-```rust
-let mask = 0xff_i64;
-rccl::stable_sort_by(&exec, &mut keys, move |left: &i64, right: &i64| {
-    (left & mask).cmp(&(right & mask))
-})?;
-```
+Generated code uses ownership, borrows, slices, checked disjoint slices,
+`MaybeUninit`, closures, and typed cuda-oxide arguments. Any CUDA operation
+that cannot be represented safely must first be isolated and reviewed as a
+small backend primitive; there is no broad generator waiver. The hand-written
+`rccl-memory` CUDA FFI/resource layer remains a separate unsafe/ownership audit
+surface and does not weaken this generator rule.
 
-There is no RCCL callable trait to implement and no built-in `Less`/`Greater`
-compatibility vocabulary. Unsafe work inside a closure, such as dereferencing
-a captured raw device pointer, remains explicitly unsafe ordinary Rust.
+## Rust API direction
 
-## Compile-target schedules
+Native Rust vocabulary replaces support-library spelling:
 
-CUB owns its target schedule. A cargo-oxide build with `--arch sm_XX` supplies
-`CUDA_OXIDE_TARGET=sm_XX`; `rccl-cub/build.rs` validates that target and writes
-one set of internal constants. Sort and merge pass those constants directly to
-const-generic kernels. There is no public schedule language, policy type,
-runtime architecture probe, breakpoint table, or function-pointer dispatch.
+| CCCL | RCCL/Rust |
+|---|---|
+| `span` | kernel slices and checked disjoint slices |
+| `array` | `[T; N]` |
+| `pair`, `tuple` | Rust tuples or a named `repr(C)` record when names/layout matter |
+| TMP/type traits | proc-macro validation, generics, bounds, associated types, const generics |
+| `optional`, `expected` | `Option`, `Result` |
+| `device_vector` | `rccl_memory::DeviceBuffer` |
+| function object/comparator | an ordinary copyable Rust closure |
+| iterator facade/categories | source/sink capability traits and zero-copy adaptors |
+| execution policy | borrowed stream and allocator runtime values only |
 
-Ordinary host-only Cargo commands do not set a CUDA target, so CUB uses a
-deterministic SM80 specialization for type checking. GPU builds must supply an
-explicit architecture.
+There are no compatibility `Less`, `Greater`, `Comparator`, `DeviceSpan`,
+iterator-pair, schedule, policy, or legacy module aliases.
 
-## Current sort dispatch
+The precise compiler contract is in
+[RCCL_COMPILER_DSL.md](RCCL_COMPILER_DSL.md). The complete product inventory,
+dependency order, examples/tests stage, and adversarial error-masking review
+are in [CCCL_THRUST_CUB_COVERAGE_PLAN.md](CCCL_THRUST_CUB_COVERAGE_PLAN.md).
 
-Compile-time specialization selects the backend from the call shape and
-concrete key/value types:
-
-| Call shape | Ordering | Current backend |
-|---|---|---|
-| default `sort`/`stable_sort` on `u32` keys | natural ascending | four-pass stable OneSweep radix |
-| default key/value sort on `u32`/`u32` | natural ascending | four-pass stable OneSweep radix |
-| any explicit closure, or other supported shapes | closure or natural ascending | typed stable rank/merge fallback |
-
-The optimized boundary is therefore default ascending `u32` and `u32/u32`, not
-every arithmetic type supported by Thrust smart sort. An arbitrary Rust
-closure is opaque to specialization and deliberately takes the comparison
-path, including a descending closure. The rank/merge fallback is a correctness
-path, not a CUB-radix-performance claim. `sort` currently uses the stable
-backend, but callers should rely on stability only through `stable_sort`.
-
-Important remaining parity work includes optimized radix coverage for all CCCL
-scalar combinations, large-offset portioning, `DoubleBuffer`, bit-range and
-custom decomposer contracts, general typed iterators, and the complete pinned
-upstream randomized test product. The exact gaps are tracked in
-[`STRICT_CCCL_API_AUDIT.md`](STRICT_CCCL_API_AUDIT.md).
-The complete support-library, Thrust algorithm, CUB primitive, and
-dependency-ordered delivery inventory is in
-[`CCCL_THRUST_CUB_COVERAGE_PLAN.md`](CCCL_THRUST_CUB_COVERAGE_PLAN.md).
-
-## Execution and memory resources
-
-`rccl::cuda::Execution` belongs to Thrust and can be shared by sort and merge.
-The default constructor uses `CudaAsyncMemoryResource`; applications can bind a
-concrete allocator with `par_in`:
-
-```rust
-let pool = rccl::memory::CudaPoolMemoryResource::new(
-    context.clone(),
-    rccl::memory::PoolConfig::default(),
-)?;
-let tracked = rccl::memory::TrackingMemoryResource::new(&pool);
-let exec = rccl::cuda::par_in(&stream, &tracked)?;
-```
-
-Allocator handles are ordinary Rust type parameters, so a borrowed resource
-cannot be outlived by a buffer or execution policy. CUB maintains one merged
-CUDA module and typed namespace views for each live CUDA context. Its registry
-stores weak handles; the module can be released after the last execution drops
-its CUB context handle. See [`rccl-memory/README.md`](rccl-memory/README.md) for
-the resource matrix.
-
-## CUB device primitives
-
-`rccl::cub::WarpMergeSort` is a real device-callable warp collective with
-explicit temporary storage. Its pinned-source and overload mapping is recorded
-in
-[`CCCL_WARP_MERGE_SORT_COMPATIBILITY.md`](CCCL_WARP_MERGE_SORT_COMPATIBILITY.md).
-Device-wide merge parity is recorded in
-[`CCCL_MERGE_COMPATIBILITY.md`](CCCL_MERGE_COMPATIBILITY.md).
-
-## Verification
-
-The full gate is:
+## Verification during the compiler rewrite
 
 ```bash
 scripts/test-gpu.sh
 ```
 
-It derives the complete binary/example inventory from Cargo metadata, rejects
-obsolete crates and generated call paths, verifies the exact dependency graph,
-and fails if a declared consumer contains zero ordinary algorithm calls. It
-runs formatting, warning-denied Clippy, workspace tests, warning-denied docs,
-the oxide doctor/build, every GPU compatibility binary, every registered RCCL
-example, bounded benchmark smoke runs, both `rccl-memory` examples, and the
-pinned CUDA C++ references.
-
-Host tests and the complete GPU runtime/example set each run for two rounds.
-The second round exercises reuse and teardown paths instead of treating one
-fresh-process pass as sufficient evidence.
-
-The reference phase verifies pinned CCCL commit
-`571f2fc3bc53cd710e306ad43d58995c1fe4219f`. It uses `CCCL_ROOT` when provided;
-otherwise it creates a cached checkout below ignored `target/`. A manual GPU
-build must also specify its architecture:
-
-```bash
-cargo oxide build --arch sm_89 --features gpu-examples
-```
-
-Passing the gate proves the retained RCCL surface and recorded pinned-reference
-cases. It does not claim that the complete upstream Thrust/CUB product has been
-ported.
+The current gate validates the two compiler catalogs, generated-token safety,
+the runtime-only crate boundary, the absence of JIT/runtime-TMP code, formatting,
+warning-free host compilation, tests, and docs. It deliberately does not run a
+GPU program before an algorithm has a safe generated launch path.

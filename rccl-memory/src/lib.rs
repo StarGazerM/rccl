@@ -37,7 +37,6 @@ use std::{
 mod adaptors;
 mod fixed;
 mod pool;
-pub mod registry;
 
 pub use adaptors::{
     AlignedMemoryResource, CallbackMemoryResource, FailureCallbackMemoryResource,
@@ -120,11 +119,6 @@ pub enum MemoryError {
     InvalidAlignment {
         requested: usize,
     },
-    DeviceRangeOutOfBounds {
-        offset: usize,
-        len: usize,
-        source_len: usize,
-    },
     SystemMemoryUnsupported {
         device: usize,
     },
@@ -180,15 +174,6 @@ impl fmt::Display for MemoryError {
             Self::InvalidAlignment { requested } => write!(
                 f,
                 "allocation alignment {requested} must be a non-zero power of two"
-            ),
-            Self::DeviceRangeOutOfBounds {
-                offset,
-                len,
-                source_len,
-            } => write!(
-                f,
-                "device subrange [{offset}..{end}) is outside a {source_len}-element range",
-                end = offset.saturating_add(*len),
             ),
             Self::SystemMemoryUnsupported { device } => write!(
                 f,
@@ -640,9 +625,6 @@ pub unsafe trait DeviceAllocator {
     }
 }
 
-/// RMM-compatible name for [`DeviceAllocator`].
-pub use DeviceAllocator as DeviceMemoryResource;
-
 // Match `std::alloc::Allocator`: ownership and dispatch are properties of the
 // handle chosen by the caller, not requirements imposed by the allocator
 // trait. A borrowed handle carries the allocator lifetime in its type, while
@@ -1080,65 +1062,6 @@ unsafe impl DeviceAllocator for CudaPoolMemoryResource {
     }
 }
 
-/// Borrowed view of an existing private CUDA pool.
-///
-/// RMM exposes a non-owning raw-handle view. Rust represents that relationship
-/// as a borrow, preventing the source pool from being destroyed while a view
-/// or one of its resource-owned buffers is still live.
-///
-/// ```compile_fail
-/// use cuda_core::CudaContext;
-/// use rccl_memory::{CudaPoolMemoryResource, CudaPoolViewMemoryResource, DeviceBuffer, PoolConfig};
-///
-/// let context = CudaContext::new(0).unwrap();
-/// let stream = context.default_stream();
-/// let pool = CudaPoolMemoryResource::new(context, PoolConfig::default()).unwrap();
-/// let view = CudaPoolViewMemoryResource::new(&pool);
-/// let buffer = DeviceBuffer::<u8, _>::zeroed_in(view, &stream, 16).unwrap();
-/// drop(pool); // cannot move the pool while `buffer` owns a borrowed view
-/// drop(buffer);
-/// ```
-#[derive(Debug, Clone, Copy)]
-pub struct CudaPoolViewMemoryResource<'pool> {
-    pool: &'pool CudaPoolMemoryResource,
-}
-
-impl<'pool> CudaPoolViewMemoryResource<'pool> {
-    pub const fn new(pool: &'pool CudaPoolMemoryResource) -> Self {
-        Self { pool }
-    }
-
-    pub const fn pool(&self) -> &'pool CudaPoolMemoryResource {
-        self.pool
-    }
-
-    pub fn cu_memory_pool(&self) -> sys::CUmemoryPool {
-        self.pool.cu_memory_pool()
-    }
-}
-
-unsafe impl DeviceAllocator for CudaPoolViewMemoryResource<'_> {
-    fn context(&self) -> &Arc<CudaContext> {
-        self.pool.context()
-    }
-
-    fn properties(&self) -> MemoryProperties {
-        self.pool.properties()
-    }
-
-    fn allocate(&self, layout: Layout, stream: &CudaStream) -> Result<DeviceBlock, MemoryError> {
-        self.pool.allocate(layout, stream)
-    }
-
-    unsafe fn deallocate(
-        &self,
-        block: DeviceBlock,
-        stream: &CudaStream,
-    ) -> Result<(), MemoryError> {
-        unsafe { self.pool.deallocate(block, stream) }
-    }
-}
-
 /// Host-side statistics for a [`TrackingMemoryResource`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ResourceStats {
@@ -1236,26 +1159,10 @@ unsafe impl<U: DeviceAllocator> DeviceAllocator for TrackingMemoryResource<U> {
 ///
 /// The pointer must remain valid for `len()` contiguous `T` values for the
 /// lifetime of `self`, and it must belong to `context()`.
-pub unsafe trait DeviceSlice<T> {
+pub unsafe trait ContiguousDeviceRange<T> {
     fn len(&self) -> usize;
     fn cu_deviceptr(&self) -> sys::CUdeviceptr;
     fn context(&self) -> &Arc<CudaContext>;
-
-    /// Borrow the complete device range as a lifetime-bearing span.
-    fn span(&self) -> DeviceSpan<'_, T>
-    where
-        Self: Sized,
-    {
-        DeviceSpan::new(self)
-    }
-
-    /// Borrow one checked device subrange.
-    fn subspan(&self, offset: usize, len: usize) -> Result<DeviceSpan<'_, T>, MemoryError>
-    where
-        Self: Sized,
-    {
-        DeviceSpan::new(self).subspan(offset, len)
-    }
 
     fn is_empty(&self) -> bool {
         self.len() == 0
@@ -1271,246 +1178,15 @@ pub unsafe trait DeviceSlice<T> {
     }
 }
 
-/// Writable extension of [`DeviceSlice`].
+/// Writable extension of [`ContiguousDeviceRange`].
 ///
 /// # Safety
 ///
 /// Mutable access to the implementor must grant exclusive write access to all
 /// `len()` device elements for the submitted operation.
-pub unsafe trait DeviceSliceMut<T>: DeviceSlice<T> {
-    /// Exclusively borrow the complete device range as a mutable span.
-    fn span_mut(&mut self) -> DeviceSpanMut<'_, T>
-    where
-        Self: Sized,
-    {
-        DeviceSpanMut::new(self)
-    }
+pub unsafe trait ContiguousDeviceRangeMut<T>: ContiguousDeviceRange<T> {}
 
-    /// Exclusively borrow one checked device subrange.
-    fn subspan_mut(
-        &mut self,
-        offset: usize,
-        len: usize,
-    ) -> Result<DeviceSpanMut<'_, T>, MemoryError>
-    where
-        Self: Sized,
-    {
-        DeviceSpanMut::new(self).into_subspan(offset, len)
-    }
-}
-
-fn checked_device_subrange<T>(
-    pointer: sys::CUdeviceptr,
-    source_len: usize,
-    offset: usize,
-    len: usize,
-) -> Result<sys::CUdeviceptr, MemoryError> {
-    let end = offset.checked_add(len).ok_or(MemoryError::SizeOverflow)?;
-    if end > source_len {
-        return Err(MemoryError::DeviceRangeOutOfBounds {
-            offset,
-            len,
-            source_len,
-        });
-    }
-    let byte_offset = offset
-        .checked_mul(std::mem::size_of::<T>())
-        .ok_or(MemoryError::SizeOverflow)?;
-    let byte_offset =
-        sys::CUdeviceptr::try_from(byte_offset).map_err(|_| MemoryError::SizeOverflow)?;
-    pointer
-        .checked_add(byte_offset)
-        .ok_or(MemoryError::SizeOverflow)
-}
-
-/// A checked, read-only borrow of a contiguous device range.
-///
-/// Unlike a host `&[T]`, this value is not dereferenceable by the CPU. It
-/// carries the source allocation borrow and delegates context/stream-order
-/// validation to that source. CUB dispatch lowers it to CUDA pointer/length
-/// arguments; cuda-oxide kernels may then receive an ordinary device slice.
-#[derive(Clone, Copy)]
-pub struct DeviceSpan<'a, T> {
-    source: &'a dyn DeviceSlice<T>,
-    pointer: sys::CUdeviceptr,
-    len: usize,
-    _borrow: PhantomData<&'a T>,
-}
-
-impl<T> fmt::Debug for DeviceSpan<'_, T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("DeviceSpan")
-            .field("ptr", &self.pointer)
-            .field("len", &self.len)
-            .finish()
-    }
-}
-
-impl<'a, T> DeviceSpan<'a, T> {
-    pub fn new<B: DeviceSlice<T>>(source: &'a B) -> Self {
-        Self {
-            pointer: source.cu_deviceptr(),
-            len: source.len(),
-            source,
-            _borrow: PhantomData,
-        }
-    }
-
-    fn from_parts(source: &'a dyn DeviceSlice<T>, pointer: sys::CUdeviceptr, len: usize) -> Self {
-        Self {
-            source,
-            pointer,
-            len,
-            _borrow: PhantomData,
-        }
-    }
-
-    pub fn subspan(self, offset: usize, len: usize) -> Result<Self, MemoryError> {
-        let pointer = checked_device_subrange::<T>(self.pointer, self.len, offset, len)?;
-        Ok(Self::from_parts(self.source, pointer, len))
-    }
-
-    pub const fn len(&self) -> usize {
-        self.len
-    }
-
-    pub const fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    pub const fn cu_deviceptr(&self) -> sys::CUdeviceptr {
-        self.pointer
-    }
-}
-
-// SAFETY: construction borrows a DeviceSlice source and only admits checked
-// subranges within it. The source remains live and supplies context/ordering.
-unsafe impl<T> DeviceSlice<T> for DeviceSpan<'_, T> {
-    fn len(&self) -> usize {
-        self.len
-    }
-
-    fn cu_deviceptr(&self) -> sys::CUdeviceptr {
-        self.pointer
-    }
-
-    fn context(&self) -> &Arc<CudaContext> {
-        self.source.context()
-    }
-
-    fn ensure_usable_on(&self, stream: &CudaStream) -> Result<(), MemoryError> {
-        self.source.ensure_usable_on(stream)
-    }
-}
-
-/// A checked, exclusive borrow of a contiguous device range.
-///
-/// This value is intentionally neither `Copy` nor `Clone`. Consuming
-/// [`split_at`](Self::split_at) is the safe way to produce two simultaneous
-/// mutable spans.
-///
-/// ```compile_fail
-/// use rccl_memory::DeviceSliceMut;
-///
-/// fn overlapping<T, B: DeviceSliceMut<T>>(buffer: &mut B) {
-///     let first = buffer.span_mut();
-///     let second = buffer.span_mut();
-///     drop((first, second));
-/// }
-/// ```
-pub struct DeviceSpanMut<'a, T> {
-    source: &'a dyn DeviceSlice<T>,
-    pointer: sys::CUdeviceptr,
-    len: usize,
-    _borrow: PhantomData<&'a mut T>,
-}
-
-impl<T> fmt::Debug for DeviceSpanMut<'_, T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("DeviceSpanMut")
-            .field("ptr", &self.pointer)
-            .field("len", &self.len)
-            .finish()
-    }
-}
-
-impl<'a, T> DeviceSpanMut<'a, T> {
-    pub fn new<B: DeviceSliceMut<T>>(source: &'a mut B) -> Self {
-        let pointer = source.cu_deviceptr();
-        let len = source.len();
-        let source: &'a dyn DeviceSlice<T> = source;
-        Self::from_parts(source, pointer, len)
-    }
-
-    fn from_parts(source: &'a dyn DeviceSlice<T>, pointer: sys::CUdeviceptr, len: usize) -> Self {
-        Self {
-            source,
-            pointer,
-            len,
-            _borrow: PhantomData,
-        }
-    }
-
-    pub fn into_subspan(self, offset: usize, len: usize) -> Result<Self, MemoryError> {
-        let pointer = checked_device_subrange::<T>(self.pointer, self.len, offset, len)?;
-        Ok(Self::from_parts(self.source, pointer, len))
-    }
-
-    pub fn split_at(self, mid: usize) -> Result<(Self, Self), MemoryError> {
-        let right_pointer = checked_device_subrange::<T>(self.pointer, self.len, mid, 0)?;
-        let right_len = self.len - mid;
-        Ok((
-            Self::from_parts(self.source, self.pointer, mid),
-            Self::from_parts(self.source, right_pointer, right_len),
-        ))
-    }
-
-    pub fn as_read_only(&self) -> DeviceSpan<'_, T> {
-        DeviceSpan::from_parts(self.source, self.pointer, self.len)
-    }
-
-    pub fn into_read_only(self) -> DeviceSpan<'a, T> {
-        DeviceSpan::from_parts(self.source, self.pointer, self.len)
-    }
-
-    pub const fn len(&self) -> usize {
-        self.len
-    }
-
-    pub const fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    pub const fn cu_deviceptr(&self) -> sys::CUdeviceptr {
-        self.pointer
-    }
-}
-
-// SAFETY: as DeviceSpan, with the additional exclusive source borrow retained
-// by DeviceSpanMut for its complete lifetime.
-unsafe impl<T> DeviceSlice<T> for DeviceSpanMut<'_, T> {
-    fn len(&self) -> usize {
-        self.len
-    }
-
-    fn cu_deviceptr(&self) -> sys::CUdeviceptr {
-        self.pointer
-    }
-
-    fn context(&self) -> &Arc<CudaContext> {
-        self.source.context()
-    }
-
-    fn ensure_usable_on(&self, stream: &CudaStream) -> Result<(), MemoryError> {
-        self.source.ensure_usable_on(stream)
-    }
-}
-
-// SAFETY: safe constructors require an exclusive source borrow, and split_at
-// consumes that borrow while returning only disjoint subranges.
-unsafe impl<T> DeviceSliceMut<T> for DeviceSpanMut<'_, T> {}
-
-unsafe impl<T> DeviceSlice<T> for cuda_core::DeviceBuffer<T> {
+unsafe impl<T> ContiguousDeviceRange<T> for cuda_core::DeviceBuffer<T> {
     fn len(&self) -> usize {
         self.len()
     }
@@ -1524,7 +1200,7 @@ unsafe impl<T> DeviceSlice<T> for cuda_core::DeviceBuffer<T> {
     }
 }
 
-unsafe impl<T> DeviceSliceMut<T> for cuda_core::DeviceBuffer<T> {}
+unsafe impl<T> ContiguousDeviceRangeMut<T> for cuda_core::DeviceBuffer<T> {}
 
 /// Fixed-length typed device allocation owned with an allocator handle and
 /// bound to one borrowed CUDA stream.
@@ -1598,13 +1274,7 @@ impl<'stream, T: DeviceCopy, A: DeviceAllocator> DeviceBuffer<'stream, T, A> {
         Ok(Layout::from_size_align(size, std::mem::align_of::<T>())?)
     }
 
-    /// Allocate storage without initializing its elements.
-    ///
-    /// # Safety
-    ///
-    /// The caller must initialize every element before any operation reads it
-    /// or copies it to the host as `T`.
-    pub unsafe fn uninitialized_in(
+    fn allocate_in(
         allocator: A,
         stream: &'stream CudaStream,
         len: usize,
@@ -1626,7 +1296,7 @@ impl<'stream, T: DeviceCopy, A: DeviceAllocator> DeviceBuffer<'stream, T, A> {
         stream: &'stream CudaStream,
         len: usize,
     ) -> Result<Self, MemoryError> {
-        let buffer = unsafe { Self::uninitialized_in(allocator, stream, len)? };
+        let buffer = Self::allocate_in(allocator, stream, len)?;
         if buffer.num_bytes() > 0 {
             unsafe {
                 memset_d8_async(
@@ -1645,7 +1315,7 @@ impl<'stream, T: DeviceCopy, A: DeviceAllocator> DeviceBuffer<'stream, T, A> {
         stream: &'stream CudaStream,
         values: &[T],
     ) -> Result<Self, MemoryError> {
-        let buffer = unsafe { Self::uninitialized_in(allocator, stream, values.len())? };
+        let buffer = Self::allocate_in(allocator, stream, values.len())?;
         if buffer.num_bytes() > 0 {
             unsafe {
                 memcpy_htod_async(
@@ -1715,19 +1385,6 @@ impl<'stream, T: DeviceCopy, A: DeviceAllocator> DeviceBuffer<'stream, T, A> {
         Ok(())
     }
 
-    /// Change the logical length without initializing newly exposed elements.
-    ///
-    /// # Safety
-    ///
-    /// If `new_len` is greater than the old length, the caller must initialize
-    /// the new elements before an operation reads them or copies them to host
-    /// memory as `T`.
-    pub unsafe fn resize_uninitialized(&mut self, new_len: usize) -> Result<(), MemoryError> {
-        self.reserve(new_len)?;
-        self.len = new_len;
-        Ok(())
-    }
-
     /// Reallocate so capacity equals length while preserving current contents.
     pub fn shrink_to_fit(&mut self) -> Result<(), MemoryError> {
         if self.capacity != self.len {
@@ -1741,8 +1398,7 @@ impl<'stream, T: DeviceCopy, A: DeviceAllocator> DeviceBuffer<'stream, T, A> {
     where
         A: Clone,
     {
-        let copy =
-            unsafe { Self::uninitialized_in(self.allocator.clone(), self.stream, self.len)? };
+        let copy = Self::allocate_in(self.allocator.clone(), self.stream, self.len)?;
         if self.num_bytes() > 0 {
             unsafe {
                 memcpy_dtod_async(
@@ -1873,7 +1529,7 @@ impl<T: DeviceCopy, A: DeviceAllocator> Drop for DeviceBuffer<'_, T, A> {
     }
 }
 
-unsafe impl<T: DeviceCopy, A: DeviceAllocator> DeviceSlice<T> for DeviceBuffer<'_, T, A> {
+unsafe impl<T: DeviceCopy, A: DeviceAllocator> ContiguousDeviceRange<T> for DeviceBuffer<'_, T, A> {
     fn len(&self) -> usize {
         self.len
     }
@@ -1895,10 +1551,91 @@ unsafe impl<T: DeviceCopy, A: DeviceAllocator> DeviceSlice<T> for DeviceBuffer<'
     }
 }
 
-unsafe impl<T: DeviceCopy, A: DeviceAllocator> DeviceSliceMut<T> for DeviceBuffer<'_, T, A> {}
+unsafe impl<T: DeviceCopy, A: DeviceAllocator> ContiguousDeviceRangeMut<T>
+    for DeviceBuffer<'_, T, A>
+{
+}
 
-/// RMM-compatible name for an uninitialized typed device vector.
-pub type DeviceUVector<'stream, T, A> = DeviceBuffer<'stream, T, A>;
+/// Typed device storage whose elements may not yet be initialized.
+///
+/// This type deliberately does not implement `ContiguousDeviceRange<T>` and cannot copy
+/// values to the host as initialized `T`.
+///
+/// ```compile_fail
+/// use rccl_memory::{DeviceAllocator, ContiguousDeviceRangeMut, DeviceUninitBuffer};
+///
+/// fn needs_initialized<T, B: ContiguousDeviceRangeMut<T>>(_: &mut B) {}
+/// fn rejected<T, A: DeviceAllocator>(buffer: &mut DeviceUninitBuffer<'_, T, A>)
+/// where
+///     T: cuda_core::DeviceCopy,
+/// {
+///     needs_initialized(buffer);
+/// }
+/// ```
+pub struct DeviceUninitBuffer<'stream, T: DeviceCopy, A: DeviceAllocator> {
+    storage: DeviceBuffer<'stream, MaybeUninit<T>, A>,
+}
+
+impl<T: DeviceCopy, A: DeviceAllocator> fmt::Debug for DeviceUninitBuffer<'_, T, A> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DeviceUninitBuffer")
+            .field("ptr", &self.cu_deviceptr())
+            .field("len", &self.len())
+            .field("device", &self.context().ordinal())
+            .finish()
+    }
+}
+
+impl<'stream, T: DeviceCopy, A: DeviceAllocator> DeviceUninitBuffer<'stream, T, A> {
+    /// Allocate storage for `len` values without initializing them.
+    pub fn new_in(
+        allocator: A,
+        stream: &'stream CudaStream,
+        len: usize,
+    ) -> Result<Self, MemoryError> {
+        Ok(Self {
+            storage: DeviceBuffer::allocate_in(allocator, stream, len)?,
+        })
+    }
+
+    pub fn len(&self) -> usize {
+        self.storage.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.storage.is_empty()
+    }
+
+    pub fn cu_deviceptr(&self) -> sys::CUdeviceptr {
+        self.storage.cu_deviceptr()
+    }
+
+    pub fn context(&self) -> &Arc<CudaContext> {
+        self.storage.context()
+    }
+
+    pub fn ensure_usable_on(&self, stream: &CudaStream) -> Result<(), MemoryError> {
+        self.storage.ensure_usable_on(stream)
+    }
+
+    /// Treat every element as initialized.
+    ///
+    /// # Safety
+    ///
+    /// Every element must contain a valid `T`, and the writes establishing
+    /// initialization must be ordered before subsequent reads.
+    pub unsafe fn assume_init(self) -> DeviceBuffer<'stream, T, A> {
+        let storage = std::mem::ManuallyDrop::new(self.storage);
+        DeviceBuffer {
+            block: unsafe { std::ptr::read(&storage.block) },
+            len: storage.len,
+            capacity: storage.capacity,
+            allocator: unsafe { std::ptr::read(&storage.allocator) },
+            stream: storage.stream,
+            _marker: PhantomData,
+        }
+    }
+}
 
 /// One typed value in device memory with explicit stream ordering.
 #[derive(Debug)]
@@ -1914,20 +1651,6 @@ impl<'stream, T: DeviceCopy, A: DeviceAllocator> DeviceScalar<'stream, T, A> {
     ) -> Result<Self, MemoryError> {
         Ok(Self {
             storage: DeviceBuffer::from_host_in(allocator, stream, std::slice::from_ref(&value))?,
-        })
-    }
-
-    /// Allocate one value without initializing it.
-    ///
-    /// # Safety
-    ///
-    /// The caller must initialize the value before reading it.
-    pub unsafe fn uninitialized_in(
-        allocator: A,
-        stream: &'stream CudaStream,
-    ) -> Result<Self, MemoryError> {
-        Ok(Self {
-            storage: unsafe { DeviceBuffer::uninitialized_in(allocator, stream, 1)? },
         })
     }
 
@@ -1948,7 +1671,7 @@ impl<'stream, T: DeviceCopy, A: DeviceAllocator> DeviceScalar<'stream, T, A> {
     }
 }
 
-unsafe impl<T: DeviceCopy, A: DeviceAllocator> DeviceSlice<T> for DeviceScalar<'_, T, A> {
+unsafe impl<T: DeviceCopy, A: DeviceAllocator> ContiguousDeviceRange<T> for DeviceScalar<'_, T, A> {
     fn len(&self) -> usize {
         1
     }
@@ -1966,37 +1689,14 @@ unsafe impl<T: DeviceCopy, A: DeviceAllocator> DeviceSlice<T> for DeviceScalar<'
     }
 }
 
-unsafe impl<T: DeviceCopy, A: DeviceAllocator> DeviceSliceMut<T> for DeviceScalar<'_, T, A> {}
+unsafe impl<T: DeviceCopy, A: DeviceAllocator> ContiguousDeviceRangeMut<T>
+    for DeviceScalar<'_, T, A>
+{
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::mem::size_of;
-
-    struct FakeDeviceRange {
-        pointer: sys::CUdeviceptr,
-        len: usize,
-    }
-
-    // SAFETY: tests use only pointer/length arithmetic and never dereference
-    // the synthetic device address or ask for its CUDA context.
-    unsafe impl DeviceSlice<u32> for FakeDeviceRange {
-        fn len(&self) -> usize {
-            self.len
-        }
-
-        fn cu_deviceptr(&self) -> sys::CUdeviceptr {
-            self.pointer
-        }
-
-        fn context(&self) -> &Arc<CudaContext> {
-            panic!("synthetic span tests do not have a CUDA context")
-        }
-    }
-
-    // SAFETY: each test creates at most one exclusive borrow of the synthetic
-    // range, then uses split_at to produce only non-overlapping spans.
-    unsafe impl DeviceSliceMut<u32> for FakeDeviceRange {}
 
     #[test]
     fn typed_layout_uses_element_size_and_alignment() {
@@ -2010,86 +1710,6 @@ mod tests {
         assert!(matches!(
             DeviceBuffer::<u64, CudaMemoryResource>::layout_for(usize::MAX),
             Err(MemoryError::SizeOverflow)
-        ));
-    }
-
-    #[test]
-    fn immutable_subspan_offsets_pointer_and_checks_nested_ranges() {
-        let source = FakeDeviceRange {
-            pointer: 0x1000,
-            len: 16,
-        };
-        let middle = source.subspan(3, 8).expect("valid subspan");
-        assert_eq!(middle.cu_deviceptr(), 0x1000 + 3 * size_of::<u32>() as u64);
-        assert_eq!(middle.len(), 8);
-
-        let nested = middle.subspan(2, 3).expect("valid nested subspan");
-        assert_eq!(nested.cu_deviceptr(), 0x1000 + 5 * size_of::<u32>() as u64);
-        assert_eq!(nested.len(), 3);
-    }
-
-    #[test]
-    fn subspan_rejects_bounds_and_address_overflow() {
-        let source = FakeDeviceRange {
-            pointer: 0x1000,
-            len: 8,
-        };
-        let empty_end = source.subspan(8, 0).expect("empty end subspan");
-        assert_eq!(
-            empty_end.cu_deviceptr(),
-            0x1000 + 8 * size_of::<u32>() as u64
-        );
-        assert!(empty_end.is_empty());
-        assert!(matches!(
-            source.subspan(7, 2),
-            Err(MemoryError::DeviceRangeOutOfBounds {
-                offset: 7,
-                len: 2,
-                source_len: 8,
-            })
-        ));
-        assert!(matches!(
-            source.subspan(usize::MAX, 2),
-            Err(MemoryError::SizeOverflow)
-        ));
-
-        let address_edge = FakeDeviceRange {
-            pointer: sys::CUdeviceptr::MAX - 1,
-            len: 2,
-        };
-        assert!(matches!(
-            address_edge.subspan(1, 1),
-            Err(MemoryError::SizeOverflow)
-        ));
-    }
-
-    #[test]
-    fn mutable_span_split_is_disjoint_and_preserves_element_offsets() {
-        let mut source = FakeDeviceRange {
-            pointer: 0x2000,
-            len: 9,
-        };
-        let span = source.span_mut();
-        let (left, right) = span.split_at(4).expect("valid split point");
-        assert_eq!(left.cu_deviceptr(), 0x2000);
-        assert_eq!(left.len(), 4);
-        assert_eq!(right.cu_deviceptr(), 0x2000 + 4 * size_of::<u32>() as u64);
-        assert_eq!(right.len(), 5);
-    }
-
-    #[test]
-    fn mutable_span_split_rejects_out_of_bounds_midpoint() {
-        let mut source = FakeDeviceRange {
-            pointer: 0x2000,
-            len: 9,
-        };
-        assert!(matches!(
-            source.span_mut().split_at(10),
-            Err(MemoryError::DeviceRangeOutOfBounds {
-                offset: 10,
-                len: 0,
-                source_len: 9,
-            })
         ));
     }
 

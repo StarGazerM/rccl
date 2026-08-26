@@ -4,135 +4,17 @@ version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0 OR MIT"
 description = "Umbrella crate for RCCL's Thrust-shaped and CUB-level CUDA primitives"
-autoexamples = false
-
-[features]
-gpu-examples = ["dep:cuda-core", "dep:cuda-device", "dep:cuda-host"]
-
-[[bin]]
-name = "rccl"
-path = "src/main.rs"
-required-features = ["gpu-examples"]
-test = false
-
-# cargo-oxide's standalone-project workflow selects Cargo binaries rather than
-# Cargo examples. The source still lives under `examples/`, while these
-# feature-gated targets make each one available to `cargo oxide run --bin`.
-[[bin]]
-name = "rccl-example-sort"
-path = "examples/sort.rs"
-required-features = ["gpu-examples"]
-test = false
-
-[[bin]]
-name = "rccl-example-sort-by-key"
-path = "examples/sort-by-key.rs"
-required-features = ["gpu-examples"]
-test = false
-
-[[bin]]
-name = "rccl-example-span-sort"
-path = "examples/span-sort.rs"
-required-features = ["gpu-examples"]
-test = false
-
-[[bin]]
-name = "rccl-example-resource-sort"
-path = "examples/resource_sort.rs"
-required-features = ["gpu-examples"]
-test = false
-
-[[bin]]
-name = "rccl-example-automatic-sort"
-path = "examples/automatic-sort.rs"
-required-features = ["gpu-examples"]
-test = false
-
-[[bin]]
-name = "rccl-example-lexicographical-sort"
-path = "examples/lexicographical-sort.rs"
-required-features = ["gpu-examples"]
-test = false
-
-[[bin]]
-name = "rccl-example-warp-merge-sort"
-path = "examples/warp-merge-sort.rs"
-required-features = ["gpu-examples"]
-test = false
-
-[[bin]]
-name = "rccl-example-bucket-sort2d"
-path = "examples/bucket-sort2d.rs"
-required-features = ["gpu-examples"]
-test = false
-
-[[bin]]
-name = "rccl-example-mode"
-path = "examples/mode.rs"
-required-features = ["gpu-examples"]
-test = false
-
-[[bin]]
-name = "rccl-example-sorting-aos-vs-soa"
-path = "examples/sorting-aos-vs-soa.rs"
-required-features = ["gpu-examples"]
-test = false
-
-[[bin]]
-name = "rccl-example-find-non-trivial-runs"
-path = "examples/find-non-trivial-runs.rs"
-required-features = ["gpu-examples"]
-test = false
-
-[[bin]]
-name = "merge-benchmark"
-path = "src/bin/merge-benchmark.rs"
-required-features = ["gpu-examples"]
-test = false
-
-[[bin]]
-name = "warp-merge-sort-benchmark"
-path = "src/bin/warp-merge-sort-benchmark.rs"
-required-features = ["gpu-examples"]
-test = false
-
-[[bin]]
-name = "cccl-merge-tests"
-path = "src/bin/cccl-merge-tests.rs"
-required-features = ["gpu-examples"]
-test = false
-
-[[bin]]
-name = "cccl-sort-tests"
-path = "src/bin/cccl-sort-tests.rs"
-required-features = ["gpu-examples"]
-test = false
-
-[[bin]]
-name = "cccl-comparison-tests"
-path = "src/bin/cccl-comparison-tests.rs"
-required-features = ["gpu-examples"]
-test = false
-
-[[bin]]
-name = "cccl-warp-merge-sort-tests"
-path = "src/bin/cccl-warp-merge-sort-tests.rs"
-required-features = ["gpu-examples"]
-test = false
 
 [workspace]
 members = [
     "rccl-cub",
+    "rccl-cub-macros",
     "rccl-memory",
     "rccl-thrust",
-    "tests/fixtures/renamed-dependency",
-    "tests/fixtures/thrust-direct",
+    "rccl-thrust-macros",
 ]
 
 [dependencies]
-cuda-device = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "1f6a0fdd810d94275e1eb4e7e8d1158848092e4b", optional = true }
-cuda-host = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "1f6a0fdd810d94275e1eb4e7e8d1158848092e4b", optional = true }
-cuda-core = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "1f6a0fdd810d94275e1eb4e7e8d1158848092e4b", optional = true }
 rccl-cub = { path = "rccl-cub" }
 rccl-thrust = { path = "rccl-thrust" }
 

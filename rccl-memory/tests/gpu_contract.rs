@@ -1,11 +1,8 @@
 use cuda_core::IntoResult;
-use rccl_memory::registry::{
-    SharedDeviceAllocator, get_per_device_resource, set_per_device_resource,
-};
 use rccl_memory::{
-    AlignedMemoryResource, BinningMemoryResource, CallbackMemoryResource, CudaAsyncMemoryResource,
-    CudaMemoryResource, CudaPoolMemoryResource, CudaPoolViewMemoryResource, DeviceAllocator,
-    DeviceBuffer, DeviceScalar, DeviceSlice, FailureCallbackMemoryResource,
+    AlignedMemoryResource, BinningMemoryResource, CallbackMemoryResource, ContiguousDeviceRange,
+    CudaAsyncMemoryResource, CudaMemoryResource, CudaPoolMemoryResource, DeviceAllocator,
+    DeviceBuffer, DeviceScalar, DeviceUninitBuffer, FailureCallbackMemoryResource,
     FixedSizeMemoryResource, LimitingMemoryResource, LoggingMemoryResource, ManagedMemoryResource,
     MemoryError, PinnedHostMemoryResource, PoolConfig, PoolMemoryResource, PrefetchMemoryResource,
     SamHeadroomMemoryResource, StatisticsMemoryResource, SystemMemoryResource,
@@ -277,28 +274,6 @@ fn logging_adaptor_emits_rmm_compatible_csv_actions() -> Result<(), Box<dyn Erro
 }
 
 #[test]
-fn per_device_resource_can_be_replaced_and_restored() -> Result<(), Box<dyn Error>> {
-    let _guard = gpu_test_lock();
-    let Some(context) = context_or_skip() else {
-        return Ok(());
-    };
-    let original = get_per_device_resource(context.clone());
-    let tracking: SharedDeviceAllocator = Arc::new(TrackingMemoryResource::new(
-        CudaAsyncMemoryResource::new(context.clone()),
-    ));
-    let replaced = set_per_device_resource(context.clone(), tracking.clone())?;
-    assert!(Arc::ptr_eq(&original, &replaced));
-    assert!(Arc::ptr_eq(
-        &tracking,
-        &get_per_device_resource(context.clone())
-    ));
-    let current = set_per_device_resource(context.clone(), original.clone())?;
-    assert!(Arc::ptr_eq(&current, &tracking));
-    assert!(Arc::ptr_eq(&original, &get_per_device_resource(context)));
-    Ok(())
-}
-
-#[test]
 fn vector_capacity_clone_resize_and_scalar_contracts() -> Result<(), Box<dyn Error>> {
     let _guard = gpu_test_lock();
     let Some(context) = context_or_skip() else {
@@ -329,6 +304,30 @@ fn vector_capacity_clone_resize_and_scalar_contracts() -> Result<(), Box<dyn Err
 }
 
 #[test]
+fn uninitialized_buffer_requires_explicit_initialization_transition() -> Result<(), Box<dyn Error>>
+{
+    let _guard = gpu_test_lock();
+    let Some(context) = context_or_skip() else {
+        return Ok(());
+    };
+    let stream = context.default_stream();
+    let storage =
+        DeviceUninitBuffer::<u32, _>::new_in(CudaAsyncMemoryResource::new(context), &stream, 17)?;
+    unsafe {
+        cuda_core::memory::memset_d8_async(
+            storage.cu_deviceptr(),
+            0,
+            storage.len() * size_of::<u32>(),
+            stream.cu_stream(),
+        )?;
+    }
+    stream.synchronize()?;
+    let initialized = unsafe { storage.assume_init() };
+    assert_eq!(initialized.to_host_vec()?, vec![0; 17]);
+    Ok(())
+}
+
+#[test]
 fn private_cuda_pool_reports_usage_and_trims() -> Result<(), Box<dyn Error>> {
     let _guard = gpu_test_lock();
     let Some(context) = context_or_skip() else {
@@ -350,17 +349,14 @@ fn private_cuda_pool_reports_usage_and_trims() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn cuda_pool_view_borrows_and_uses_the_source_pool() -> Result<(), Box<dyn Error>> {
+fn borrowed_cuda_pool_is_an_allocator() -> Result<(), Box<dyn Error>> {
     let _guard = gpu_test_lock();
     let Some(context) = context_or_skip() else {
         return Ok(());
     };
     let stream = context.default_stream();
     let pool = CudaPoolMemoryResource::new(context, PoolConfig::default())?;
-    let handle = pool.cu_memory_pool();
-    let view = CudaPoolViewMemoryResource::new(&pool);
-    assert_eq!(view.cu_memory_pool(), handle);
-    let buffer = DeviceBuffer::from_host_in(view, &stream, &[8_u32, 6, 7, 5, 3, 0, 9])?;
+    let buffer = DeviceBuffer::from_host_in(&pool, &stream, &[8_u32, 6, 7, 5, 3, 0, 9])?;
     assert_eq!(buffer.to_host_vec()?, [8, 6, 7, 5, 3, 0, 9]);
     drop(buffer);
     stream.synchronize()?;

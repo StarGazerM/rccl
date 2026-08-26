@@ -3,6 +3,14 @@ baseline = "571f2fc3bc53cd710e306ad43d58995c1fe4219f"
 status_values = ["missing", "partial", "implemented", "native-rust", "backend-blocked"]
 
 [[surface]]
+id = "proc-macro-compiler-boundary"
+kind = "compiler-infrastructure"
+owner = "rccl-cub-macros/rccl-thrust-macros"
+status = "implemented"
+entries = ["cub.complete-public-catalog", "thrust.complete-public-catalog", "generated-rust-safety-audit"]
+evidence = ["RCCL_COMPILER_DSL.md", "rccl-cub-macros/src/cub.dsl", "rccl-thrust-macros/src/thrust.dsl", "scripts/test-gpu.sh"]
+
+[[surface]]
 id = "rust-support-values"
 kind = "semantic-support"
 owner = "rust/cuda-oxide"
@@ -13,10 +21,10 @@ evidence = ["CCCL_THRUST_CUB_COVERAGE_PLAN.md", "cuda-core DeviceCopy tuple/arra
 [[surface]]
 id = "device-span"
 kind = "semantic-support"
-owner = "rccl-memory"
-status = "partial"
+owner = "rust/cuda-oxide"
+status = "native-rust"
 entries = ["libcudacxx.span", "thrust.contiguous-subrange"]
-evidence = ["rccl-memory/src/lib.rs:DeviceSpan", "rccl-memory/src/lib.rs:DeviceSpanMut", "examples/span-sort.rs"]
+evidence = ["reviews/device-span.md", "cuda-oxide kernel slice and DisjointSlice lowering"]
 review = "reviews/device-span.md"
 
 [[surface]]
@@ -31,9 +39,9 @@ evidence = ["rccl-memory/src/lib.rs:DeviceBuffer", "rccl-memory/tests/gpu_contra
 id = "fancy-range-algebra"
 kind = "semantic-support"
 owner = "rccl-cub/rccl-thrust"
-status = "missing"
+status = "partial"
 entries = ["device.input", "device.output", "device.zip", "device.transform", "device.permutation"]
-evidence = ["CCCL_THRUST_CUB_COVERAGE_PLAN.md"]
+evidence = ["rccl-cub-macros/src/expand.rs", "rccl-thrust-macros/src/expand.rs", "STRICT_CCCL_API_AUDIT.md"]
 
 [[surface]]
 id = "thrust-algorithms-missing"
@@ -80,17 +88,17 @@ evidence = ["CCCL_THRUST_CUB_COVERAGE_PLAN.md"]
 id = "thrust-sort"
 kind = "thrust-public-header"
 owner = "rccl-thrust"
-status = "partial"
+status = "backend-blocked"
 entries = ["thrust/thrust/sort.h"]
-evidence = ["rccl-thrust/src/algorithm.rs", "STRICT_CCCL_API_AUDIT.md"]
+evidence = ["rccl-thrust-macros/src/thrust.dsl", "RCCL_COMPILER_DSL.md"]
 
 [[surface]]
 id = "thrust-merge"
 kind = "thrust-public-header"
 owner = "rccl-thrust"
-status = "partial"
+status = "backend-blocked"
 entries = ["thrust/thrust/merge.h"]
-evidence = ["rccl-thrust/src/merge.rs", "CCCL_MERGE_COMPATIBILITY.md", "STRICT_CCCL_API_AUDIT.md"]
+evidence = ["rccl-thrust-macros/src/thrust.dsl", "RCCL_COMPILER_DSL.md"]
 
 [[surface]]
 id = "thrust-support-native"
@@ -141,7 +149,7 @@ kind = "thrust-public-header"
 owner = "rccl-cub/rccl-thrust"
 status = "partial"
 entries = ["thrust/thrust/execution_policy.h", "thrust/thrust/functional.h"]
-evidence = ["rccl-thrust/src/cuda.rs", "rccl-cub/src/device.rs"]
+evidence = ["rccl-thrust-macros/src/thrust.dsl", "rccl-thrust-macros/src/expand.rs"]
 
 [[surface]]
 id = "thrust-support-missing-values"
@@ -155,7 +163,7 @@ evidence = ["CCCL_THRUST_CUB_COVERAGE_PLAN.md"]
 id = "thrust-iterators"
 kind = "thrust-public-header"
 owner = "rccl-thrust"
-status = "missing"
+status = "partial"
 entries = [
   "thrust/thrust/iterator/constant_iterator.h",
   "thrust/thrust/iterator/counting_iterator.h",
@@ -177,7 +185,7 @@ entries = [
   "thrust/thrust/iterator/transform_output_iterator.h",
   "thrust/thrust/iterator/zip_iterator.h",
 ]
-evidence = ["CCCL_THRUST_CUB_COVERAGE_PLAN.md"]
+evidence = ["rccl-thrust-macros/src/thrust.dsl", "rccl-thrust-macros/src/expand.rs", "STRICT_CCCL_API_AUDIT.md"]
 
 [[surface]]
 id = "thrust-memory-resources"
@@ -240,21 +248,21 @@ evidence = ["CCCL_THRUST_CUB_COVERAGE_PLAN.md"]
 id = "cub-warp-merge-sort"
 kind = "cub-public-header"
 owner = "rccl-cub"
-status = "implemented"
+status = "backend-blocked"
 entries = ["cub/cub/warp/warp_merge_sort.cuh"]
-evidence = ["rccl-cub/src/warp_merge_sort.rs", "CCCL_WARP_MERGE_SORT_COMPATIBILITY.md"]
+evidence = ["rccl-cub-macros/src/cub.dsl", "RCCL_COMPILER_DSL.md"]
 
 [[surface]]
 id = "cub-device-sort-merge"
 kind = "cub-public-header"
 owner = "rccl-cub"
-status = "partial"
+status = "backend-blocked"
 entries = [
   "cub/cub/device/device_merge.cuh",
   "cub/cub/device/device_merge_sort.cuh",
   "cub/cub/device/device_radix_sort.cuh",
 ]
-evidence = ["rccl-cub/src/merge.rs", "rccl-cub/src/comparison.rs", "rccl-cub/src/radix.rs"]
+evidence = ["rccl-cub-macros/src/cub.dsl", "RCCL_COMPILER_DSL.md"]
 
 [[surface]]
 id = "cub-public-missing"
@@ -321,10 +329,10 @@ entries = [
 evidence = ["CCCL_THRUST_CUB_COVERAGE_PLAN.md"]
 
 [[surface]]
-id = "cub-agents-partial"
+id = "cub-agents-rewrite"
 kind = "cub-internal-header"
 owner = "rccl-cub"
-status = "partial"
+status = "missing"
 entries = [
   "cub/cub/agent/agent_merge.cuh",
   "cub/cub/agent/agent_merge_sort.cuh",
@@ -334,7 +342,7 @@ entries = [
   "cub/cub/agent/agent_radix_sort_downsweep.cuh",
   "cub/cub/agent/agent_sub_warp_merge_sort.cuh",
 ]
-evidence = ["rccl-cub/src/merge.rs", "rccl-cub/src/comparison.rs", "rccl-cub/src/radix.rs", "rccl-cub/src/warp_merge_sort.rs"]
+evidence = ["rccl-cub-macros/src/cub.dsl", "CCCL_THRUST_CUB_COVERAGE_PLAN.md"]
 
 [[surface]]
 id = "cub-agents-missing"
