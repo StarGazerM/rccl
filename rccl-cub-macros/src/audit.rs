@@ -1,5 +1,4 @@
 use proc_macro2::TokenStream;
-#[cfg(test)]
 use syn::File;
 use syn::{
     Attribute, Error, Expr, ExprCast, ExprMethodCall, ExprRawAddr, ExprUnsafe, ItemForeignMod,
@@ -8,7 +7,7 @@ use syn::{
     visit::{self, Visit},
 };
 
-#[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn generated_rust(tokens: TokenStream) -> syn::Result<TokenStream> {
     let file = syn::parse2::<File>(tokens.clone())?;
     let mut audit = SafetyAudit::default();
@@ -43,6 +42,24 @@ impl SafetyAudit {
             self.error = Some(error);
         }
     }
+}
+
+fn is_trusted_cub_lowering(path: &Path) -> bool {
+    let segments = path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>();
+    matches!(
+        segments.as_slice(),
+        [crate_name, private, operation]
+            if crate_name == "rccl_cub"
+                && private == "__private"
+                && matches!(
+                    operation.as_str(),
+                    "__device_transform_kernels" | "__device_transform_repeat_in_place"
+                )
+    )
 }
 
 impl<'ast> Visit<'ast> for SafetyAudit {
@@ -172,18 +189,34 @@ impl<'ast> Visit<'ast> for SafetyAudit {
     }
 
     fn visit_macro(&mut self, invocation: &'ast Macro) {
-        self.reject(
-            invocation,
-            "generated RCCL output may not contain opaque nested macro invocations",
-        );
+        if !is_trusted_cub_lowering(&invocation.path) {
+            self.reject(
+                invocation,
+                "generated RCCL output may not contain opaque nested macro invocations",
+            );
+        }
         visit::visit_macro(self, invocation);
     }
 
     fn visit_attribute(&mut self, attribute: &'ast Attribute) {
-        let allowed = attribute.path().get_ident().is_some_and(|name| {
+        let name = attribute
+            .path()
+            .segments
+            .last()
+            .map(|segment| segment.ident.to_string());
+        let allowed = name.is_some_and(|name| {
             matches!(
-                name.to_string().as_str(),
-                "cfg" | "derive" | "doc" | "inline" | "repr" | "test"
+                name.as_str(),
+                "cfg"
+                    | "cuda_module"
+                    | "derive"
+                    | "doc"
+                    | "inline"
+                    | "kernel"
+                    | "launch_bounds"
+                    | "launch_contract"
+                    | "repr"
+                    | "test"
             )
         });
         if !allowed {
@@ -218,6 +251,14 @@ mod tests {
             crate::helper(value, |left, right| left + right)
         }})
         .expect("a safe operation expression must pass");
+    }
+
+    #[test]
+    fn trusted_cub_lowering_macro_passes() {
+        generated_rust(quote! {
+            ::rccl_cub::__private::__device_transform_kernels!(__test_kernels);
+        })
+        .expect("the audited Thrust-to-CUB macro edge must pass");
     }
 
     #[test]

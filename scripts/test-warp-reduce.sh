@@ -24,6 +24,7 @@ printf '%s  %s\n' \
 
 overview_example=rccl-cub/examples/warp_reduce.rs
 matrix_example=rccl-cub/examples/warp_reduce_catch2.rs
+float_matrix_example=rccl-cub/examples/warp_reduce_catch2_f32.rs
 unit_test=rccl-cub/tests/warp_reduce_upstream.rs
 for required in \
   'rccl_cub::warp_reduce!(32' \
@@ -41,14 +42,22 @@ for required in \
   'full_integer_operation!(operation, 1' \
   'items_integer_operation!(operation, 16' \
   'items_integer_operation!(operation, 1' \
-  'assert_eq!(executed, 150)' \
+  'assert_eq!(executed, 144)' \
   'u8_matrix' \
   'u16_matrix' \
   'i32_matrix' \
-  'i64_matrix' \
-  'f32_min_max'; do
+  'i64_matrix'; do
   if ! rg -q -F "$required" "$matrix_example"; then
     printf '%s\n' "WarpReduce Catch2 matrix lost required evidence: $required" >&2
+    exit 1
+  fi
+done
+for required in \
+  'f32_min_max_operation' \
+  'f32_min_max' \
+  'assert_eq!(executed, 6)'; do
+  if ! rg -q -F "$required" "$float_matrix_example"; then
+    printf '%s\n' "WarpReduce floating Catch2 port lost required evidence: $required" >&2
     exit 1
   fi
 done
@@ -80,11 +89,13 @@ cleanup_sidecars() {
     warp_reduce.options \
     warp_reduce.target \
     warp_reduce_catch2.options \
-    warp_reduce_catch2.target
+    warp_reduce_catch2.target \
+    warp_reduce_catch2_f32.options \
+    warp_reduce_catch2_f32.target
 }
 trap cleanup_sidecars EXIT
 
-for example in warp_reduce warp_reduce_catch2; do
+for example in warp_reduce warp_reduce_catch2 warp_reduce_catch2_f32; do
   cargo oxide build \
     --features cuda-oxide-example \
     -- \
@@ -95,5 +106,6 @@ done
 
 ./target/release/examples/warp_reduce
 ./target/release/examples/warp_reduce_catch2
+./target/release/examples/warp_reduce_catch2_f32
 
 printf '%s\n' 'Pinned CCCL WarpReduce Rust port through standard cuda-oxide build: PASS'

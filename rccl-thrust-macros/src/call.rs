@@ -48,6 +48,14 @@ macro_rules! algorithm_call {
 
 algorithm_call!(SortByCall, "sort_by!", execution, range, compare);
 algorithm_call!(
+    TransformRepeatInPlaceCall,
+    "transform!",
+    execution,
+    output,
+    repeated,
+    op,
+);
+algorithm_call!(
     StableSortByKeyCall,
     "stable_sort_by_key!",
     execution,
@@ -79,6 +87,17 @@ mod tests {
         assert!(matches!(call.keys, Expr::Reference(_)));
         assert!(matches!(call.values, Expr::Reference(_)));
         assert!(matches!(call.compare, Expr::Closure(_)));
+    }
+
+    #[test]
+    fn transform_repeat_in_place_keeps_the_closure_and_borrows_as_rust() {
+        let call: TransformRepeatInPlaceCall = syn::parse_quote! {
+            &exec, &mut values, RepeatN::new(10_i32, values.len()),
+            |left, right| left + right
+        };
+        assert!(matches!(call.output, Expr::Reference(_)));
+        assert!(matches!(call.repeated, Expr::Call(_)));
+        assert!(matches!(call.op, Expr::Closure(_)));
     }
 
     #[test]

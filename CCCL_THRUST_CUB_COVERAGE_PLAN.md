@@ -99,9 +99,10 @@ Other rules:
 ### Compiler DSL contract
 
 The complete contract is in `RCCL_COMPILER_DSL.md`. The CUB and Thrust DSLs
-are shallow user call-site macros parsed into operation-specific `syn` 2 ASTs.
-Their closed inventories and lowering tables are typed Rust compiler catalogs,
-not separate `.dsl` files and not user-authored syntax.
+are shallow user call-site macros parsed into operation-specific `syn` 3.0.4
+ASTs with `syn_derive` 0.2.0. Their closed inventories and lowering tables are
+typed Rust compiler catalogs, not separate `.dsl` files and not user-authored
+syntax.
 Expansion must:
 
 1. expose every operation requiring TMP, schedule selection, kernel
@@ -149,7 +150,7 @@ implementation.
 | universal and pinned-host vectors | `DeviceBuffer<T, ManagedMemoryResource>` and pinned-host resource/buffer types | memory | resources exist; container aliases and parity tests remain |
 | `device_ptr`, `universal_ptr`, raw pointer casts | unsafe typed device address plus safe lifetime-bearing range/view; raw address only at FFI/kernel internals | memory | replace current universal `cu_deviceptr` escape hatch |
 | `device_reference` and proxy references | no free-standing fake `&T`; range/read/write capabilities and adaptor-specific device lowering | CUB + Thrust | partial; minimal host capability traits cover cuda-core and allocator-aware device buffers but deliberately not host slices, while generated kernels remain |
-| iterator traits/categories/facade/adaptor | descriptor structs compose range/read/write/random-access capabilities without host execution methods | CUB + Thrust | partial; constant/counting/discard/subrange/permutation/reverse/stride/tabulate/transform/zip forms and semantic host tests are handwritten, while the cuda-oxide device composition matrix remains |
+| iterator traits/categories/facade/adaptor | descriptor structs compose range/read/write/random-access capabilities without host execution methods | CUB + Thrust | partial; finite constant input is operational for the binary in-place transform intersection; other handwritten descriptor forms remain non-operational planning vocabulary until their device lowering and upstream evidence exist |
 | `mdspan`, extents, layouts | typed multidimensional device view with shape, strides, and layout marker; contiguous 1-D case lowers to slice | CUB | missing; cuda-oxide checked 2-D views are reusable backend pieces |
 | functional objects | ordinary `Fn`/`FnMut` bounds plus `Copy` device-callable closures; specialization is emitted by `rccl-thrust-macros` | CUB + Thrust macros | catalogued; algorithm expansion is backend-blocked; no RCCL callable compatibility trait |
 | `complex<T>` | RCCL-owned `#[repr(C)] Complex<T>` or an upstream cuda-core `DeviceCopy` implementation for a standard Rust complex type | CUB value layer | missing |
@@ -196,14 +197,16 @@ already provide.
   `rccl-thrust-macros` validates all 34 algorithms and 19 iterator/adaptor
   headers. Support families are ordinary-library coverage rows, not compiler
   catalog entries.
-- `rccl-cub` currently exposes only handwritten safe support values. The old
-  pointer-heavy `WarpMergeSort`, radix, comparison, and merge implementations
-  were removed rather than hidden behind a runtime loader.
-- `rccl-thrust` currently exposes only handwritten `cuda::Execution`, borrowing
-  a stream and allocator. Sort and merge are backend-blocked and unexported.
-- Descriptor-only fancy-range algebra and the checked device temporary-storage
-  value protocol exist; device access lowering and every public CUB
-  thread/warp/block/device algorithm remain absent.
+- `rccl-cub` exposes handwritten safe support values plus the partial
+  `warp_reduce!` and `warp_reduce_items!` slice. The old pointer-heavy
+  `WarpMergeSort`, radix, comparison, and merge implementations were removed
+  rather than hidden behind a runtime loader.
+- `rccl-thrust` exposes handwritten `cuda::Execution`, borrowing a stream,
+  allocator, and program-local typed module, plus binary in-place `transform!`
+  over `RepeatN`. Sort and merge are backend-blocked and unexported.
+- Other descriptor-only fancy-range algebra and the checked device
+  temporary-storage value protocol remain support/planning vocabulary; they
+  are not counted as executable algorithm coverage.
 
 ### Slice and device-range contract
 
@@ -268,7 +271,7 @@ not confuse them with an owning vector container.
 
 | Family | Pinned headers and operation families | Current state | Main dependency |
 |---|---|---|---|
-| Elementwise traversal | `for_each`, `transform`, `tabulate`, `generate`, `sequence` | missing | range-expression algebra + DeviceFor/Transform |
+| Elementwise traversal | `for_each`, `transform`, `tabulate`, `generate`, `sequence` | partial: binary in-place transform with one finite constant range | range-expression algebra + DeviceFor/Transform |
 | Copy and initialization | `copy`, `fill`, `uninitialized_copy`, `uninitialized_fill` | missing | contiguous fast path + general read/write range path |
 | Gather/scatter | `gather`, `scatter` including conditional forms | missing | permutation/index range + bounds contract |
 | Reordering | `reverse`, `shuffle`, `swap`/`swap_ranges` | missing | indexed ranges + random engine |
@@ -375,7 +378,7 @@ uniform_real_distribution.h       xor_combine_engine.h
 | Block scan/reduce | `block_reduce`, `block_scan`, `block_adjacent_difference`, `block_discontinuity` | missing |
 | Block ordering | `block_merge_sort`, `block_radix_rank`, `block_radix_sort`, `radix_rank_sort_operations` | missing |
 | Block specialized | `block_histogram`, `block_run_length_decode`, `block_topk`, `block_raking_layout` | missing |
-| Device traversal/movement | `device_for`, `device_transform`, `device_copy`, `device_memcpy` | missing |
+| Device traversal/movement | `device_for`, `device_transform`, `device_copy`, `device_memcpy` | public CUB forms missing; a hidden device-transform lowering exists only as backend substrate for the implemented Thrust constant-range intersection |
 | Device queries/reduction | `device_find`, `device_reduce`, `device_scan`, `device_segmented_reduce`, `device_segmented_scan`, `device_adjacent_difference` | missing |
 | Device compaction | `device_select`, `device_partition`, `device_run_length_encode` | missing |
 | Device histogram | `device_histogram` | missing |

@@ -27,9 +27,9 @@ artifact control.
   32, eight groups for width 16, and all 128 groups for width 1. Other lanes
   are not checked because pinned CUB promises the aggregate only in logical
   lane zero.
-- The Catch2 matrix executable performs 150 GPU comparisons: all supported
+- The two Catch2 matrix executables perform 150 GPU comparisons: 144 supported
   `u8`/`u16`/`i32`/`i64` sum/max/min full, two-partial-extent, and
-  four-items-per-thread rows, plus supported `f32` max/min rows.
+  four-items-per-thread rows, plus six supported `f32` max/min rows.
 - The host oracle is an independent sequential fold and does not call RCCL.
   The overview also asserts CCCL's literal documented values `496`, `1520`,
   `2544`, and `3568` before comparing with the general oracle.
@@ -38,8 +38,16 @@ artifact control.
   registered upstream-oracle unit target.
 - Every injected implementation fault caused cargo-oxide to report that it
   recompiled `rccl-cub`, ruling out a stale executable for these checks.
+- The first full iteration proved the small overview can pass while a combined
+  integer/floating matrix fails at module load. The matrix is therefore split
+  into 144 integer and six floating executions, and the default gate requires
+  both; the overview can no longer mask failure of the broader type matrix.
 - RCCL emits Rust only. The gate uses cuda-oxide's standard build workflow and
   does not configure its compiler or output.
+- The full 32-lane `i32` addition closure selects the same hardware
+  `redux.sync.add.s32` collective as pinned CUB. The equal-work benchmark uses
+  identical element count, block geometry, in-place memory traffic, warm-ups,
+  samples, launches, synchronization, and complete result validation.
 
 ## Injected faults
 
@@ -52,6 +60,7 @@ All faults were temporary and removed before the final gate.
 | Shuffle the low 32 bits twice when reconstructing a 64-bit value | `i64` GPU comparison | exit 101; all four aggregates were corrupted, including `-6390930489259177520` vs `-1552004656` |
 | Truncate each `u16` lane to `u8` before shuffling | new builtin-type matrix | overview executable passed, then matrix exited 101 in case 0; first group was `1008` instead of `36080` |
 | Return the local `f32` value instead of shuffling a neighbor | new floating redux matrix | overview executable passed, then matrix exited 101 in floating case 0; first group was `-95.0` instead of `99.0` |
+| Make all four benchmark addition closures semantically equal but syntactically ineligible for the hardware-add specialization | equal-work performance gate | results remained exact, but the best-median RCCL/CCCL ratio was `2.011273`, exceeding the `1.001` measurement-equivalence limit |
 
 Parser negative tests independently reject runtime tile widths, unsupported
 widths `9` and `7`, missing operands, and extra operands. Generated-expression

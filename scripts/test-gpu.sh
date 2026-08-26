@@ -27,12 +27,12 @@ package_dependencies() {
     <<<"$metadata" | sort | paste -sd ' ' -
 }
 
-if [[ "$(package_dependencies rccl-cub)" != 'cuda-core cuda-device rccl-cub-macros rccl-memory' ]]; then
-  printf '%s\n' 'rccl-cub must use cuda-device and re-export only implemented operation macros' >&2
+if [[ "$(package_dependencies rccl-cub)" != 'cuda-core cuda-device cuda-host rccl-cub-macros rccl-memory' ]]; then
+  printf '%s\n' 'rccl-cub must own cuda-oxide device-transform kernel and launch lowering' >&2
   exit 1
 fi
-if [[ "$(package_dependencies rccl-thrust)" != 'cuda-core rccl-cub rccl-memory' ]]; then
-  printf '%s\n' 'rccl-thrust support must be ordinary Rust and depend on CUB, not a support macro' >&2
+if [[ "$(package_dependencies rccl-thrust)" != 'cuda-core cuda-device cuda-host rccl-cub rccl-memory rccl-thrust-macros' ]]; then
+  printf '%s\n' 'rccl-thrust must separate ordinary support from its operation macro and cuda-oxide kernel dependencies' >&2
   exit 1
 fi
 if [[ "$(package_dependencies rccl)" != 'rccl-cub rccl-thrust' ]]; then
@@ -48,8 +48,9 @@ if rg -n 'emit_support' rccl-cub rccl-thrust --glob '*.rs' --glob 'Cargo.toml'; 
   printf '%s\n' 'ordinary support code must not be emitted by a proc macro' >&2
   exit 1
 fi
-if ! rg -q '^pub use rccl_cub_macros::\{warp_reduce, warp_reduce_items\};$' rccl-cub/src/lib.rs; then
-  printf '%s\n' 'rccl-cub must re-export exactly the implemented WarpReduce operation macros' >&2
+if ! rg -q '^pub use rccl_cub_macros::\{warp_reduce, warp_reduce_items\};$' rccl-cub/src/lib.rs \
+  || ! rg -q '__device_transform_kernels, __device_transform_repeat_in_place' rccl-cub/src/lib.rs; then
+  printf '%s\n' 'rccl-cub must own the public WarpReduce and hidden device-transform operations' >&2
   exit 1
 fi
 
@@ -121,11 +122,21 @@ if rg -n 'emit_support' rccl-cub-macros/src rccl-thrust-macros/src --glob '*.rs'
   printf '%s\n' 'deleted support-generation syntax returned' >&2
   exit 1
 fi
-if [[ "$(rg -c '^#\[proc_macro\]$' rccl-cub-macros/src/lib.rs)" != 2 ]] \
+if [[ "$(rg -c '^#\[proc_macro\]$' rccl-cub-macros/src/lib.rs)" != 4 ]] \
   || ! rg -q '^pub fn warp_reduce\(' rccl-cub-macros/src/lib.rs \
   || ! rg -q '^pub fn warp_reduce_items\(' rccl-cub-macros/src/lib.rs \
-  || rg -n '^#\[proc_macro\]$' rccl-thrust-macros/src/lib.rs; then
-  printf '%s\n' 'only the two implemented CUB WarpReduce operation macros may be exported' >&2
+  || ! rg -q '^pub fn __device_transform_kernels\(' rccl-cub-macros/src/lib.rs \
+  || ! rg -q '^pub fn __device_transform_repeat_in_place\(' rccl-cub-macros/src/lib.rs \
+  || [[ "$(rg -c '^#\[proc_macro\]$' rccl-thrust-macros/src/lib.rs)" != 2 ]] \
+  || ! rg -q '^pub fn thrust_kernels\(' rccl-thrust-macros/src/lib.rs \
+  || ! rg -q '^pub fn transform\(' rccl-thrust-macros/src/lib.rs; then
+  printf '%s\n' 'exported proc macros must match the implemented CUB and Thrust slices' >&2
+  exit 1
+fi
+if rg -n 'cuda_module|#\[kernel' rccl-thrust-macros/src/lib.rs \
+  || ! rg -q '__device_transform_kernels' rccl-thrust-macros/src/lib.rs \
+  || ! rg -q '__device_transform_repeat_in_place' rccl-thrust-macros/src/lib.rs; then
+  printf '%s\n' 'Thrust must lower transform through CUB macros rather than own a CUDA kernel' >&2
   exit 1
 fi
 if ! rg -q 'pub\(crate\) const PRIMITIVES: &\[Primitive\]' rccl-cub-macros/src/catalog.rs \
@@ -153,7 +164,11 @@ mapfile -t rust_examples < <(
 )
 expected_rust_examples=(
   rccl-cub/examples/warp_reduce.rs
+  rccl-cub/examples/warp_reduce_benchmark.rs
   rccl-cub/examples/warp_reduce_catch2.rs
+  rccl-cub/examples/warp_reduce_catch2_f32.rs
+  rccl-thrust/examples/constant_iterator.rs
+  rccl-thrust/examples/constant_iterator_benchmark.rs
 )
 if ! diff -u \
   <(printf '%s\n' "${expected_rust_examples[@]}") \
@@ -170,6 +185,8 @@ RUSTFLAGS='-D warnings' cargo clippy --workspace --all-targets -- -D warnings
 RUSTFLAGS='-D warnings' cargo test --workspace --no-fail-fast
 RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
 scripts/test-warp-reduce.sh
+scripts/test-thrust-constant-iterator.sh
+scripts/test-current-performance-parity.sh
 
 printf '%s\n' 'RCCL proc-macro compiler and runtime-boundary gate: PASS'
-printf '%s\n' 'Pinned WarpReduce example/test matrix executed through cuda-oxide.'
+printf '%s\n' 'Pinned implemented CUB and Thrust examples plus result/performance parity executed.'

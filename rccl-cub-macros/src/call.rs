@@ -6,10 +6,63 @@
 #![allow(dead_code)]
 
 use syn::{
-    Expr, ExprLit, Lit, LitInt, Result, Token,
+    BinOp, Expr, ExprClosure, ExprLit, Lit, LitInt, Pat, Result, Token,
     parse::{Parse, ParseStream},
     punctuated::Punctuated,
 };
+
+pub(crate) fn is_addition_closure(expression: &Expr) -> bool {
+    let Expr::Closure(closure) = ungroup(expression) else {
+        return false;
+    };
+    let Some((left, right)) = closure_parameters(closure) else {
+        return false;
+    };
+    match ungroup(&closure.body) {
+        Expr::Binary(binary) if matches!(binary.op, BinOp::Add(_)) => {
+            is_identifier(&binary.left, left) && is_identifier(&binary.right, right)
+        }
+        Expr::MethodCall(call) if call.method == "wrapping_add" && call.args.len() == 1 => {
+            is_identifier(&call.receiver, left)
+                && call
+                    .args
+                    .first()
+                    .is_some_and(|argument| is_identifier(argument, right))
+        }
+        _ => false,
+    }
+}
+
+fn closure_parameters(closure: &ExprClosure) -> Option<(&syn::Ident, &syn::Ident)> {
+    let mut inputs = closure.inputs.iter();
+    let left = pattern_identifier(inputs.next()?)?;
+    let right = pattern_identifier(inputs.next()?)?;
+    inputs.next().is_none().then_some((left, right))
+}
+
+fn pattern_identifier(pattern: &Pat) -> Option<&syn::Ident> {
+    match pattern {
+        Pat::Ident(identifier) => Some(&identifier.ident),
+        Pat::Type(typed) => pattern_identifier(&typed.pat),
+        Pat::Paren(paren) => pattern_identifier(&paren.pat),
+        _ => None,
+    }
+}
+
+fn is_identifier(expression: &Expr, expected: &syn::Ident) -> bool {
+    let Expr::Path(path) = ungroup(expression) else {
+        return false;
+    };
+    path.qself.is_none() && path.path.is_ident(expected)
+}
+
+fn ungroup(expression: &Expr) -> &Expr {
+    match expression {
+        Expr::Group(group) => ungroup(&group.expr),
+        Expr::Paren(paren) => ungroup(&paren.expr),
+        other => other,
+    }
+}
 
 #[derive(Debug, syn_derive::Parse)]
 struct ExpressionList {
@@ -220,6 +273,19 @@ operation_call!(
     op,
 );
 
+// Internal CUB lowering target for the currently implemented Thrust
+// intersection. Thrust owns RepeatN validation; CUB owns the concrete kernel,
+// launch geometry, and typed cuda-oxide call.
+operation_call!(
+    DeviceTransformRepeatInPlaceCall,
+    "__device_transform_repeat_in_place!",
+    module,
+    stream,
+    output,
+    repeated,
+    op,
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,6 +342,20 @@ mod tests {
                 .unwrap(),
             8,
         );
+    }
+
+    #[test]
+    fn only_an_exact_addition_closure_selects_the_builtin_sum_path() {
+        let add: Expr = syn::parse_quote!(|left, right| left + right);
+        let typed: Expr = syn::parse_quote!(|left: i32, right: i32| (left + right));
+        let wrapping: Expr = syn::parse_quote!(|left, right| left.wrapping_add(right));
+        let reversed: Expr = syn::parse_quote!(|left, right| right + left);
+        let adjusted: Expr = syn::parse_quote!(|left, right| left + right + 1);
+        assert!(is_addition_closure(&add));
+        assert!(is_addition_closure(&typed));
+        assert!(is_addition_closure(&wrapping));
+        assert!(!is_addition_closure(&reversed));
+        assert!(!is_addition_closure(&adjusted));
     }
 
     #[test]

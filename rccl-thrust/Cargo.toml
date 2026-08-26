@@ -7,5 +7,23 @@ description = "Thrust-shaped host algorithm facade for RCCL"
 
 [dependencies]
 cuda-core = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "b22efa99e8383e2a349c4a3af60d8aa083973890" }
+cuda-device = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "b22efa99e8383e2a349c4a3af60d8aa083973890" }
+cuda-host = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "b22efa99e8383e2a349c4a3af60d8aa083973890" }
 rccl-cub = { path = "../rccl-cub" }
 rccl-memory = { path = "../rccl-memory" }
+rccl-thrust-macros = { path = "../rccl-thrust-macros" }
+
+[features]
+cuda-oxide-example = []
+
+[[example]]
+name = "constant_iterator"
+path = "examples/constant_iterator.rs"
+test = false
+required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "constant_iterator_benchmark"
+path = "examples/constant_iterator_benchmark.rs"
+test = false
+required-features = ["cuda-oxide-example"]

@@ -11,11 +11,9 @@ cuda-oxide-example = []
 [dependencies]
 cuda-core = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "b22efa99e8383e2a349c4a3af60d8aa083973890" }
 cuda-device = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "b22efa99e8383e2a349c4a3af60d8aa083973890" }
+cuda-host = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "b22efa99e8383e2a349c4a3af60d8aa083973890" }
 rccl-cub-macros = { path = "../rccl-cub-macros" }
 rccl-memory = { path = "../rccl-memory" }
-
-[dev-dependencies]
-cuda-host = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "b22efa99e8383e2a349c4a3af60d8aa083973890" }
 
 [[example]]
 name = "warp_reduce"
@@ -26,5 +24,17 @@ required-features = ["cuda-oxide-example"]
 [[example]]
 name = "warp_reduce_catch2"
 path = "examples/warp_reduce_catch2.rs"
+test = false
+required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "warp_reduce_catch2_f32"
+path = "examples/warp_reduce_catch2_f32.rs"
+test = false
+required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "warp_reduce_benchmark"
+path = "examples/warp_reduce_benchmark.rs"
 test = false
 required-features = ["cuda-oxide-example"]

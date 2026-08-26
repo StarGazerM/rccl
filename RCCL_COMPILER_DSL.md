@@ -46,12 +46,20 @@ let aggregate = warp_reduce!(
     thread_value,
     |left, right| left + right,
 );
+
+transform!(
+    &exec,
+    &mut values,
+    repeated,
+    |left, right| left + right,
+)?;
 ```
 
-`warp_reduce!` is implemented and exported by `rccl-cub`; the other snippets
-still specify intended syntax and remain absent until their cuda-oxide
-lowering and launch path exist. There is no compiling stub, compatibility
-wrapper, runtime error, or CPU fallback for an unavailable operation.
+`warp_reduce!` and the shown finite-constant `transform!` intersection are
+implemented and exported; the sort and reduce snippets still specify intended
+syntax and remain absent until their cuda-oxide lowering and launch path
+exist. There is no compiling stub, compatibility wrapper, runtime error, or
+CPU fallback for an unavailable operation.
 
 `sort_by!` has one mutable range. `stable_sort_by_key!` has separate key and
 value ranges and preserves the relative order of equal keys. The `_by_key`
@@ -167,7 +175,9 @@ Before returning tokens, each proc macro parses generated output into a
 if it contains `Arc`; raw pointer types, casts, extraction, or raw-address
 expressions; `NonNull`/`UnsafeCell`/`ptr`/`transmute`; unsafe blocks,
 signatures, traits, or impls; FFI blocks, unions, `static mut`; opaque nested
-macros; or unaudited attributes. A genuinely unavoidable CUDA FFI action
+macros; or unaudited attributes. The exact hidden Thrust-to-CUB operation
+edges are admitted only because the receiving CUB macros audit their final
+Rust with the identical pass. A genuinely unavoidable CUDA FFI action
 belongs in a tiny hand-audited backend primitive, never in generated algorithm
 code.
 
@@ -193,7 +203,7 @@ wrappers:
 | fancy iterator | zero-copy range-expression descriptor |
 | comparator/function object | ordinary Rust closure expression |
 | temporary storage query | checked `Layout` and exclusive allocation borrow |
-| execution policy | borrowed stream and allocator runtime values only |
+| execution policy | borrowed stream, allocator, and statically typed program-local module values only |
 
 Generated range descriptors contain no host `get`/`write` execution path.
 Construction records shape and closures but never evaluates device closures
@@ -209,7 +219,7 @@ pointers, broad unsafe, and compatibility aliases.
 Verification proceeds in these stages:
 
 1. Validate both complete typed Rust catalogs.
-2. Parse real shallow call syntax with `syn` 2 and compile-pass/compile-fail
+2. Parse real shallow call syntax with `syn` 3.0.4 and compile-pass/compile-fail
    consumers once each operation is exported.
 3. Audit generated syntax and ownership/capability boundaries.
 4. Add focused examples, unit tests, GPU reference tests, randomized tests,

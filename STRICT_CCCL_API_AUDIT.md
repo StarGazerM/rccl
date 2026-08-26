@@ -11,9 +11,9 @@ implementations are not retained evidence.
 |---|---|---|
 | A01 | fixed | `rccl-cub-macros` is the only author of CUB primitive dependencies, target schedules, kernel families, and specialization facts. Ordinary CUB support vocabulary is handwritten in `rccl-cub`. |
 | A02 | fixed | `rccl-thrust-macros` is the only author of Thrust-to-CUB selection rules. Ordinary range-adaptor and execution values are handwritten in `rccl-thrust`. |
-| A03 | fixed | Both user-facing operation DSLs are shallow call-site macros parsed as operation-specific `syn` 2 ASTs; the complete inventories are private typed Rust catalogs, not separate language files. |
+| A03 | fixed | Both user-facing operation DSLs are shallow call-site macros parsed as operation-specific `syn` 3.0.4 ASTs; the complete inventories are private typed Rust catalogs, not separate language files. |
 | A04 | fixed | `rccl-cub` and `rccl-thrust` contain ordinary Rust runtime values but no target schedule, kernel family, specialization table, or compiler registry. |
-| A05 | fixed | `Execution` borrows a stream and allocator only. It owns no module set, policy, type map, target, schedule, registry, or cache. |
+| A05 | fixed | `Execution` borrows a stream, allocator, and one statically typed cuda-oxide module value. It owns no module set, policy, type map, target, schedule, registry, or cache. |
 | A06 | fixed | `AotKernelSet`, `TargetSchedule`, build-script schedule generation, `TypeId`/`Any` registries, module caches, and handwritten dispatch traits are deleted. |
 | A07 | fixed | RCCL owns no compiler invocation/configuration, manual symbol lookup, or raw ABI argument-vector path; it emits Rust and cuda-oxide owns compilation. |
 | A08 | fixed | There are no compatibility `Comparator`, `Less`, `Greater`, `DeviceSpan`, legacy execution, or stable-sort aliases. |
@@ -34,7 +34,9 @@ Expansion rejects:
   bare function types;
 - FFI blocks, unions, `static mut`, and `UnsafeCell` plumbing;
 - opaque nested macro calls and unaudited attributes that could generate code
-  after the structural pass.
+  after the structural pass. The exact hidden Thrust-to-CUB kernel/operation
+  macro edges are allowlisted; the receiving CUB macros independently audit
+  their final Rust with the identical pass.
 
 Support code is not generated. A future generated CUDA operation that
 genuinely requires unsafe code must first be isolated as a small reviewed
@@ -57,12 +59,12 @@ identical structural auditors so this boundary cannot silently widen.
 | complete Thrust iterator catalog | implemented compiler input | the same typed catalog contains all 19 iterator/adaptor headers |
 | pinned CUB example/API-test input | implemented audit input | `CCCL_CUB_EXAMPLE_TEST_CONTRACT.md` and its checker track all 19 programs, 378 embedded regions, 49 API-test files, and 105 exercised methods |
 | shallow operation syntax | implemented parser boundary | `call.rs` in both macro crates retains positional Rust `Expr` nodes; DeviceReduce has distinct nominal shapes for its nine exercised methods and parser tests reject wrong arity and the deleted named-field syntax |
-| Rust support mappings | partial | handwritten `rccl-cub` code defines `KeyValue`, generic `DoubleBuffer`, checked `TempStorageLayout`/`TempStorage`, and range capabilities; handwritten `rccl-thrust` code defines descriptor-only range adaptors |
-| `cuda::Execution` | implemented runtime value | handwritten borrowed stream and allocator only |
-| CUB collectives/device algorithms | missing or backend-blocked | old pointer-heavy code deleted; no safe generated kernels yet |
-| Thrust algorithms | backend-blocked | deliberately unexported until their generated CUB lowering exists |
+| Rust support mappings | partial | handwritten `rccl-cub` code defines `KeyValue`, generic `DoubleBuffer`, checked `TempStorageLayout`/`TempStorage`, and range capabilities; `RepeatN` is operational only in the implemented transform intersection, while other handwritten descriptors remain non-operational planning vocabulary |
+| `cuda::Execution` | implemented runtime value | borrows the stream, allocator, and program-local typed cuda-oxide module; contains no runtime compiler or dispatch metadata |
+| CUB collectives/device algorithms | partial | `warp_reduce!` and `warp_reduce_items!` cover the documented overview and the 150-row supported pinned Catch2 matrix; all other rows remain missing or backend-blocked |
+| Thrust algorithms | partial | binary in-place `transform!` with one finite constant range executes the exact pinned `constant_iterator.cu` result; all other transform forms and algorithms remain unexported |
 | support tests | implemented | ordinary unit tests cover extent/bounds composition, capability propagation, invalid layouts, and prove adaptor construction never executes user closures on the host; test-only descriptors prevent host slices from masquerading as device memory |
-| public algorithm examples/runtime parity | missing | must be rebuilt after each public algorithm exists |
+| public algorithm examples/runtime parity | partial | pinned WarpReduce and constant-iterator transform executables, host oracles, source hashes, equal-work CCCL references, and masking reviews are in the default GPU gate |
 
 `backend-blocked` never means a runtime `CompilerUnavailable` error. It means
 the function is not exported and cannot be mistaken for a runnable operation.

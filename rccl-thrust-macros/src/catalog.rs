@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 pub(crate) enum Status {
     Planned,
     NativeRust,
-    Implemented,
+    ImplementedPartial,
     BackendBlocked,
 }
 
@@ -38,17 +38,17 @@ use RangeCapability as RC;
 pub(crate) const ADAPTORS: &[Adaptor] = &[
     Adaptor {
         name: "constant_iterator",
-        status: Implemented,
+        status: ImplementedPartial,
         capabilities: &[RC::Input, RC::RandomAccess],
     },
     Adaptor {
         name: "counting_iterator",
-        status: Implemented,
+        status: Planned,
         capabilities: &[RC::Input, RC::RandomAccess],
     },
     Adaptor {
         name: "discard_iterator",
-        status: Implemented,
+        status: Planned,
         capabilities: &[RC::Output, RC::RandomAccess],
     },
     Adaptor {
@@ -78,12 +78,12 @@ pub(crate) const ADAPTORS: &[Adaptor] = &[
     },
     Adaptor {
         name: "offset_iterator",
-        status: Implemented,
+        status: Planned,
         capabilities: &[RC::Input, RC::Output, RC::RandomAccess],
     },
     Adaptor {
         name: "permutation_iterator",
-        status: Implemented,
+        status: Planned,
         capabilities: &[RC::Input, RC::RandomAccess, RC::Permutation],
     },
     Adaptor {
@@ -93,42 +93,42 @@ pub(crate) const ADAPTORS: &[Adaptor] = &[
     },
     Adaptor {
         name: "reverse_iterator",
-        status: Implemented,
+        status: Planned,
         capabilities: &[RC::Input, RC::Output, RC::RandomAccess],
     },
     Adaptor {
         name: "shuffle_iterator",
-        status: Implemented,
+        status: Planned,
         capabilities: &[RC::Input, RC::RandomAccess, RC::Permutation],
     },
     Adaptor {
         name: "strided_iterator",
-        status: Implemented,
+        status: Planned,
         capabilities: &[RC::Input, RC::Output, RC::RandomAccess, RC::Strided],
     },
     Adaptor {
         name: "tabulate_output_iterator",
-        status: Implemented,
+        status: Planned,
         capabilities: &[RC::Output, RC::RandomAccess],
     },
     Adaptor {
         name: "transform_input_output_iterator",
-        status: Implemented,
+        status: Planned,
         capabilities: &[RC::Input, RC::Output, RC::RandomAccess],
     },
     Adaptor {
         name: "transform_iterator",
-        status: Implemented,
+        status: Planned,
         capabilities: &[RC::Input, RC::RandomAccess],
     },
     Adaptor {
         name: "transform_output_iterator",
-        status: Implemented,
+        status: Planned,
         capabilities: &[RC::Output, RC::RandomAccess],
     },
     Adaptor {
         name: "zip_iterator",
-        status: Implemented,
+        status: Planned,
         capabilities: &[RC::Input, RC::Output, RC::RandomAccess, RC::Product],
     },
 ];
@@ -218,7 +218,7 @@ pub(crate) const ALGORITHMS: &[Algorithm] = &[
     algorithm!("sort", BackendBlocked, InPlace, ["device_radix_sort", "device_merge_sort"], [NaturalRadixKey => "device_radix_sort", Otherwise => "device_merge_sort"]),
     algorithm!("swap", Planned, InputOutput, ["device_transform"], [Otherwise => "device_transform"]),
     algorithm!("tabulate", Planned, Output, ["device_for"], [Otherwise => "device_for"]),
-    algorithm!("transform", Planned, InputOutput, ["device_transform"], [Otherwise => "device_transform"]),
+    algorithm!("transform", ImplementedPartial, InputOutput, ["device_transform"], [Otherwise => "device_transform"]),
     algorithm!("transform_reduce", Planned, Reduction, ["device_transform", "device_reduce"], [Fused => "device_reduce", Otherwise => "device_transform"]),
     algorithm!("transform_scan", Planned, InputOutput, ["device_transform", "device_scan"], [Fused => "device_scan", Otherwise => "device_transform"]),
     algorithm!("uninitialized_copy", Planned, InputOutput, ["device_copy"], [Otherwise => "device_copy"]),

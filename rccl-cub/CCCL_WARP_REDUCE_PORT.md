@@ -9,8 +9,9 @@ This slice is tied to CCCL commit
   (`25bec1964bd85f8e9b1000af379b636218aebd713c42719cdf23e03b502c5295`).
 
 The runnable Rust ports are `examples/warp_reduce.rs` for the documented
-overview and focused cases and `examples/warp_reduce_catch2.rs` for the pinned
-Catch2 matrix. The ordinary Cargo unit target is
+overview and focused cases, `examples/warp_reduce_catch2.rs` for the 144
+integer Catch2 executions, and `examples/warp_reduce_catch2_f32.rs` for the
+six floating executions. The ordinary Cargo unit target is
 `tests/warp_reduce_upstream.rs`. The GPU ports use only the public operation
 macros:
 
@@ -42,12 +43,21 @@ accepted as compile-time syntax; runtime width expressions remain rejected.
 | built-in scalar matrix | `warp_reduce_catch2`: all `u8`, `u16`, `i32`, and `i64` sum/max/min rows at supported widths `32`, `16`, and `1` |
 | two generated partial extents | `warp_reduce_catch2`: two executions for every supported builtin type/operation/width row |
 | multiple-items matrix | `warp_reduce_catch2`: all supported builtin type/operation/width rows with `[T; 4]` |
-| floating redux matrix | `warp_reduce_catch2`: exact `f32` max/min comparisons at supported widths |
+| floating redux matrix | `warp_reduce_catch2_f32`: exact `f32` max/min comparisons at supported widths |
 
 The host oracle does not call RCCL code. Every GPU output checked here is read
 from a real device buffer, and every logical lane-zero result is compared, not
 a sample or checksum. RCCL emits only Rust; cuda-oxide exclusively owns
 everything after that Rust source.
+
+`examples/warp_reduce_benchmark.rs` and
+`benchmarks/warp-reduce-reference.cu` execute an identical 8,388,608-value,
+256-thread-block, four-independent-reductions-per-value, 20-warm-up,
+21-sample, 100-launch-per-sample workload. The
+addition closure is recognized structurally by the operation macro and the
+safe Rust backend lowers the full 32-lane `i32` sum to the same single
+`redux.sync.add.s32` collective used by pinned CUB on SM80 and newer. Both
+benchmarks independently validate every lane-zero result after timing.
 
 ## Explicitly not claimed yet
 
@@ -63,4 +73,5 @@ stands in for them.
 Use `scripts/test-warp-reduce.sh` to build the feature-gated target through the
 standard cuda-oxide workflow and execute it. The feature keeps the device
 example out of ordinary host-only Cargo target discovery; it is always enabled
-by the GPU gate and is not a skip path.
+by the GPU gate and is not a skip path. The equal-work comparison is part of
+`scripts/test-current-performance-parity.sh`.
