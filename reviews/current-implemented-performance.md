@@ -12,10 +12,16 @@ CCCL reference programs. Each pair has identical element type, element count,
 initialization, launch work, warm-ups, samples, repeated launches, event
 synchronization, and full result oracle.
 
-| Implemented intersection | RCCL minimum median | CCCL minimum median | RCCL / CCCL | Gate |
+| Implemented intersection | RCCL minimum median | CCCL minimum median | RCCL / CCCL | Gate result |
 |---|---:|---:|---:|---:|
-| CUB 32-lane `i32` WarpReduce sum, four independent reductions per value | 0.017395 ms | 0.017379 ms | 1.000921 | at most 1.001 |
-| Thrust binary in-place transform plus constant range | 0.013955 ms | 0.017046 ms | 0.818667 | at most 1.001 |
+| CUB 32-lane `i32` WarpReduce sum, four independent reductions per value | 0.017582 ms | 0.017551 ms | 1.001766 | **fail**, limit 1.001 |
+| Thrust binary in-place transform plus constant range | 0.014121 ms | 2.256660 ms | 0.006257 | not evaluated after prior failure; raw samples retained |
+
+The current baseline gate therefore exits nonzero. The WarpReduce excess is
+0.0766 percentage points beyond the measurement band; it is not rounded into
+a pass. The transform row records the samples already collected by the same
+run, but `set -e` correctly prevents the later assertion from being reported
+as executed after WarpReduce fails.
 
 The same strict gate now measures every implemented ordering path. The table
 records the median of five independently measured per-process medians for
@@ -24,22 +30,22 @@ the public borrowed `DoubleBuffer` forms directly.
 
 | Implemented ordering intersection | RCCL / CCCL | Gate result |
 |---|---:|---:|
-| CUB DeviceMerge keys | 1.002967 | **fail** |
-| CUB DeviceMerge pairs | 1.000958 | pass |
-| CUB DeviceMergeSort keys | 0.989863 | pass |
-| CUB DeviceMergeSort pairs | 1.005833 | **fail** |
+| CUB DeviceMerge keys | 1.000000 | pass |
+| CUB DeviceMerge pairs | 0.999043 | pass |
+| CUB DeviceMergeSort keys | 0.991762 | pass |
+| CUB DeviceMergeSort pairs | 0.998429 | pass |
 | CUB DeviceRadixSort keys | 1.057996 | **fail** |
-| CUB DeviceRadixSort pairs | 1.010049 | **fail** |
-| CUB DeviceRadixSort keys `DoubleBuffer` 0..24 | 1.082600 | **fail** |
-| CUB DeviceRadixSort pairs `DoubleBuffer` 0..24 | 1.017727 | **fail** |
-| CUB DeviceRadixSort keys, exact Policy800 single tile | 1.020752 | **fail** |
-| CUB DeviceRadixSort pairs, exact Policy800 single tile | 1.010958 | **fail** |
-| Thrust merge | 1.000000 | pass |
-| Thrust merge-by-key | 1.000000 | pass |
+| CUB DeviceRadixSort pairs | 1.011468 | **fail** |
+| CUB DeviceRadixSort keys `DoubleBuffer` 0..24 | 1.082687 | **fail** |
+| CUB DeviceRadixSort pairs `DoubleBuffer` 0..24 | 1.018789 | **fail** |
+| CUB DeviceRadixSort keys, exact Policy800 single tile | 1.021850 | **fail** |
+| CUB DeviceRadixSort pairs, exact Policy800 single tile | 1.009212 | **fail** |
+| Thrust merge | 1.000394 | pass |
+| Thrust merge-by-key | 0.999692 | pass |
 | Thrust sort | 1.030604 | **fail** |
-| Thrust sort-by-key | 0.992057 | pass |
+| Thrust sort-by-key | 0.989220 | pass |
 
-Five of fourteen ordering paths are inside the 1.001 measurement-equivalence
+Eight of fourteen ordering paths are inside the 1.001 measurement-equivalence
 band in this run. Some repeated-run ratios move across the boundary even when
 the normalized cuda-oxide kernel instructions are unchanged, but the gate
 does not classify that observation as a pass or widen its band. The key-only
@@ -87,15 +93,18 @@ parity is exact: both benchmarks validate every output element after timing.
 The Rust kernel follows pinned CUB's Policy800 topology: 384 threads, 21 keys
 per thread, warp-private histograms, early counts, raking-memoize scan,
 eight-ballot `MatchAny`, decoupled lookback, short-circuiting, and direct
-scatter. Its accepted SM89 one-sweep key kernel uses 77 registers, 34,304
-bytes of shared storage, no spills, and one barrier; pinned CCCL uses the same
-shared-storage extent and 75 registers.
+scatter. Its current Rust-qualified SM89 one-sweep key kernel uses 99 registers
+and 34,304 bytes of dynamic shared storage with no spills; the pair kernel uses
+80 registers and 28,160 bytes. Pinned CCCL uses 75 and 65 registers
+respectively with the same extents in static shared storage. A historical
+77-register Rust kernel was an incomplete raw-pointer implementation: it
+predated the exact full/partial graph and the reviewed Rust ownership boundary,
+so it is not a valid performance target to restore.
 
-The remaining emitted-code differences have safe-backend ownership boundaries:
+The remaining source-level differences have safe-backend ownership boundaries:
 
 - pinned CUB's `MatchAny<8>` uses an inline-PTX predicated `not`; the same
-  eight-ballot algorithm expressed in safe Rust lowers through cuda-oxide to
-  2,568 SASS instructions with 156 `SEL`s, versus 2,392 instructions for CCCL;
+  eight-ballot algorithm is expressed with cuda-oxide's safe warp operations;
 - pinned CUB uses `__syncthreads_or`; the current cuda-oxide safe device API
   exposes only the plain CTA barrier, so RCCL uses one cell from CUB's otherwise
   idle guard allocation plus a barrier; and
@@ -103,14 +112,15 @@ The remaining emitted-code differences have safe-backend ownership boundaries:
   synchronous cuda-oxide launcher accepts whole `DeviceBuffer`s, so RCCL keeps
   two uniform offsets as kernel arguments.
 
-The rejected alternatives are part of the regression evidence. A branch-free
-Rust arithmetic mask reduced `SEL` count from 156 to 9, but raised register use
-from 77 to 79, replaced the selects with 168 additional integer additions, and
-measured 0.587936 ms versus the accepted form's 0.586752 ms sample. Hardware
-`match.any`, handwritten assembly, raw pointer views, async/`Arc` launch
-plumbing, deleting the short-circuit, and relaxing the ratio are all rejected:
-they change the pinned algorithm, the Rust safety boundary, or the test rather
-than repairing the implementation.
+The rejected alternatives are part of the regression evidence. Replacing the
+explicit register loads with `core::array::from_fn` raised the key kernel from
+99 to 101 registers; narrowing uniform bin/counter offsets from `usize` to
+`u32` produced the same 101-register result. A one-word memory escape hatch,
+u32 shared-coordinate surface, branch-free match masks, hardware `match.any`,
+handwritten assembly, raw pointer views, async/`Arc` launch plumbing, deleting
+the short-circuit, and relaxing the ratio are all rejected: they change the
+pinned algorithm, the Rust safety boundary, or the test rather than repairing
+the implementation.
 
 ## Policy800 single-tile backend boundary
 

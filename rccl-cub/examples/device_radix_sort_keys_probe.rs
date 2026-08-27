@@ -511,10 +511,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     ))?;
     assert_eq!(no_op_buffers.current().to_host_vec(&stream)?, no_op_input);
 
+    let invalid_begin = 25u32;
+    let invalid_end = 17u32;
     let invalid = rccl_cub::device_radix_sort_keys_buffer!(::<u32, sm_89>(
         &exec,
         &mut no_op_buffers,
-        25u32..17u32,
+        invalid_begin..invalid_end,
         &mut no_bins,
         &mut no_lookback,
         &mut no_counters,

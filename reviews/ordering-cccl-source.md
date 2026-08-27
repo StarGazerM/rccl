@@ -113,8 +113,8 @@ used to hide that missing TMP input.
   failing, so result parity cannot be misreported as CCCL performance parity.
   The direct bit-window and Policy800 single-tile additions bring the gate to
   fourteen paths. Its latest median-of-medians run still fails, including
-  key-only radix at 1.057996x, bit-window keys at 1.082600x, single-tile keys
-  at 1.020752x, and Thrust sort at 1.030604x; the gate still exits nonzero with
+  key-only radix at 1.057996x, bit-window keys at 1.082687x, single-tile keys
+  at 1.021850x, and Thrust sort at 1.030604x; the gate still exits nonzero with
   `implementation gap is not masked`. The complete ratios and backend-boundary
   diagnosis are recorded in
   `reviews/current-implemented-performance.md`.
@@ -150,6 +150,24 @@ layout flag is rejected by the source test. Two performance experiments were
 also rejected and removed: widening all hot shared-memory indices through a
 new u32 access surface, and replacing the safe shuffle validity branch with an
 arithmetic mask. Neither may be reintroduced merely because result tests pass.
+
+The multi-block Policy800 mapping now also fixes histogram width at the
+macro-selected 128 threads, reads the CUDA lane register instead of deriving a
+lane from `threadIdx.x`, computes one pass digit mask for the named
+`ShiftDigitExtractor` equivalent, keeps key and rank register arrays
+uninitialized until their fully unrolled writes, and uses the exact guarded
+`bin = threadIdx.x` coordinate rather than clamping inactive threads to bin
+255. The operation macros end `DoubleBuffer` borrows with lexical scopes; a
+forced `drop` on a non-`Drop` carrier is source-rejected. Generated CUDA entry
+points may carry only the exact `clippy::too_many_arguments` ABI annotation,
+and the macro safety audit rejects broader lint suppression such as
+`clippy::all`.
+
+Two further code-shape experiments were measured and removed: constructing
+the register key array with `core::array::from_fn`, and narrowing the uniform
+bin/counter offsets from `usize` to `u32`. Each increased the key one-sweep
+kernel from 99 to 101 registers while leaving the pair kernel at 80, so neither
+is allowed back as a result-only cleanup.
 
 ## Remaining upstream product
 

@@ -502,7 +502,7 @@ fn merge_keys_tile<
     // BlockStore aliases the merge tile storage, so all shared reads must be
     // complete before the blocked-to-warp-striped exchange begins.
     thread::sync_threads();
-    let lane = thread_index & 31;
+    let lane = warp::lane_id();
     let warp_index = thread_index >> 5;
     let warp_offset = warp_index * 32 * ITEMS as u32;
     for_each_thread_item!(ITEMS, item, {
@@ -959,7 +959,7 @@ where
     ValueSource: WarpStripedSource<V>,
 {
     let thread_index = thread::threadIdx_x();
-    let lane = thread_index & 31;
+    let lane = warp::lane_id();
     let warp_index = thread_index >> 5;
     let warp_offset = warp_index * 32 * ITEMS as u32;
     let shared_memory = BlockSharedMemory::new(SHARED_BYTES);
@@ -1028,7 +1028,7 @@ fn merge_sort_block_pairs_loaded<
     F: Fn(&K, &K) -> core::cmp::Ordering + Copy,
 {
     let thread_index = thread::threadIdx_x();
-    let lane = thread_index & 31;
+    let lane = warp::lane_id();
     let warp_index = thread_index >> 5;
     let warp_offset = warp_index * 32 * ITEMS as u32;
     let tile_items = THREADS * ITEMS;
@@ -1172,7 +1172,7 @@ fn merge_sort_block_keys_tile<
     F: Fn(&K, &K) -> core::cmp::Ordering + Copy,
 {
     let thread_index = thread::threadIdx_x();
-    let lane = thread_index & 31;
+    let lane = warp::lane_id();
     let warp_index = thread_index >> 5;
     let warp_offset = warp_index * 32 * ITEMS as u32;
     // The host lowering launches exactly ceil(len / tile_items) blocks for a
@@ -1228,7 +1228,7 @@ fn merge_sort_block_keys_in_place_tile<
     F: Fn(&K, &K) -> core::cmp::Ordering + Copy,
 {
     let thread_index = thread::threadIdx_x();
-    let lane = thread_index & 31;
+    let lane = warp::lane_id();
     let warp_index = thread_index >> 5;
     let warp_offset = warp_index * 32 * ITEMS as u32;
     let fallback = input.first();
@@ -1282,7 +1282,7 @@ fn merge_sort_block_keys_loaded<
     F: Fn(&K, &K) -> core::cmp::Ordering + Copy,
 {
     let thread_index = thread::threadIdx_x();
-    let lane = thread_index & 31;
+    let lane = warp::lane_id();
     let warp_index = thread_index >> 5;
     let warp_offset = warp_index * 32 * ITEMS as u32;
     let tile_items = THREADS * ITEMS;
@@ -1805,7 +1805,7 @@ fn merge_sort_merge_keys_tile<
     });
 
     thread::sync_threads();
-    let lane = thread_index & 31;
+    let lane = warp::lane_id();
     let warp_index = thread_index >> 5;
     let warp_offset = warp_index * 32 * ITEMS as u32;
     for_each_thread_item!(ITEMS, item, {
@@ -2014,7 +2014,7 @@ fn merge_sort_merge_pairs_tile<
     });
 
     thread::sync_threads();
-    let lane = thread_index & 31;
+    let lane = warp::lane_id();
     let warp_index = thread_index >> 5;
     let warp_offset = warp_index * 32 * ITEMS as u32;
     for_each_thread_item!(ITEMS, item, {
@@ -2229,7 +2229,7 @@ fn merge_pairs_tile<
 
     // Key BlockStore aliases the key merge tile.
     thread::sync_threads();
-    let lane = thread_index & 31;
+    let lane = warp::lane_id();
     let warp_index = thread_index >> 5;
     let warp_offset = warp_index * 32 * ITEMS as u32;
     for_each_thread_item!(ITEMS, item, {
@@ -2621,6 +2621,12 @@ pub fn radix_digit_u32(ordered: u32, bit: u32, bits: u32) -> u32 {
 
 #[doc(hidden)]
 #[inline(always)]
+pub fn radix_digit_masked_u32(ordered: u32, bit: u32, mask: u32) -> u32 {
+    (ordered >> bit) & mask
+}
+
+#[doc(hidden)]
+#[inline(always)]
 pub fn radix_rank_digit_u32(ordered: u32, bit: u32, bits: u32) -> u32 {
     radix_digit_u32(ordered, bit, bits)
 }
@@ -2634,6 +2640,17 @@ pub fn radix_float_digit_u32(ordered: u32, bit: u32, bits: u32) -> u32 {
         ordered
     };
     radix_digit_u32(zero_ordered, bit, bits)
+}
+
+#[doc(hidden)]
+#[inline(always)]
+pub fn radix_float_digit_masked_u32(ordered: u32, bit: u32, mask: u32) -> u32 {
+    let zero_ordered = if ordered == 0x7fff_ffff {
+        0x8000_0000
+    } else {
+        ordered
+    };
+    radix_digit_masked_u32(zero_ordered, bit, mask)
 }
 
 #[doc(hidden)]
@@ -2655,6 +2672,12 @@ pub fn radix_digit_u64(ordered: u64, bit: u32, bits: u32) -> u32 {
 
 #[doc(hidden)]
 #[inline(always)]
+pub fn radix_digit_masked_u64(ordered: u64, bit: u32, mask: u32) -> u32 {
+    ((ordered >> bit) & mask as u64) as u32
+}
+
+#[doc(hidden)]
+#[inline(always)]
 pub fn radix_rank_digit_u64(ordered: u64, bit: u32, bits: u32) -> u32 {
     radix_digit_u64(ordered, bit, bits)
 }
@@ -2668,6 +2691,17 @@ pub fn radix_float_digit_u64(ordered: u64, bit: u32, bits: u32) -> u32 {
         ordered
     };
     radix_digit_u64(zero_ordered, bit, bits)
+}
+
+#[doc(hidden)]
+#[inline(always)]
+pub fn radix_float_digit_masked_u64(ordered: u64, bit: u32, mask: u32) -> u32 {
+    let zero_ordered = if ordered == 0x7fff_ffff_ffff_ffff {
+        0x8000_0000_0000_0000
+    } else {
+        ordered
+    };
+    radix_digit_masked_u64(zero_ordered, bit, mask)
 }
 
 #[doc(hidden)]
@@ -3068,6 +3102,7 @@ pub fn radix_histogram_agent<
     DefaultKey,
     ToOrdered,
     Digit,
+    const THREADS: usize,
     const ITEMS: usize,
     const MAX_PASSES: usize,
 >(
@@ -3087,8 +3122,7 @@ pub fn radix_histogram_agent<
 {
     const RADIX_DIGITS: usize = 256;
     let thread_index = thread::threadIdx_x() as usize;
-    let block_threads = thread::blockDim_x() as usize;
-    let tile_items = block_threads * ITEMS;
+    let tile_items = THREADS * ITEMS;
     let shared_memory =
         BlockSharedMemory::new(MAX_PASSES * RADIX_DIGITS * core::mem::size_of::<u32>());
     let mut shared = shared_memory.region::<u32>(0, MAX_PASSES * RADIX_DIGITS);
@@ -3096,7 +3130,7 @@ pub fn radix_histogram_agent<
     let num_passes = (end_bit - begin_bit).div_ceil(8) as usize;
     let sentinel = default_key();
 
-    for bin in (thread_index..RADIX_DIGITS).step_by(block_threads) {
+    for bin in (thread_index..RADIX_DIGITS).step_by(THREADS) {
         let mut pass = 0usize;
         while pass < num_passes {
             shared.write(pass * RADIX_DIGITS + bin, 0);
@@ -3110,7 +3144,7 @@ pub fn radix_histogram_agent<
     while tile_offset < keys.len() {
         let mut ordered_keys = [MaybeUninit::<B>::uninit(); ITEMS];
         for_each_thread_item!(ITEMS, item, {
-            let index = tile_offset + thread_index + item * block_threads;
+            let index = tile_offset + thread_index + item * THREADS;
             // CUB fills the final striped tile with its transformed maximum
             // sentinel, then twiddles every register before any histogram
             // pass begins.
@@ -3126,11 +3160,12 @@ pub fn radix_histogram_agent<
         let mut pass = 0usize;
         while current_bit < end_bit {
             let num_bits = (end_bit - current_bit).min(8);
+            let digit_mask = (1u32 << num_bits) - 1;
             for_each_thread_item!(ITEMS, item, {
                 let bin = digit(
                     initialized_value(&ordered_keys[item]),
                     current_bit,
-                    num_bits,
+                    digit_mask,
                 ) as usize;
                 shared.fetch_add_block(pass * RADIX_DIGITS + bin, 1);
             });
@@ -3141,7 +3176,7 @@ pub fn radix_histogram_agent<
     }
     thread::sync_threads();
 
-    for bin in (thread_index..RADIX_DIGITS).step_by(block_threads) {
+    for bin in (thread_index..RADIX_DIGITS).step_by(THREADS) {
         let mut pass = 0usize;
         while pass < num_passes {
             let count = shared.read(pass * RADIX_DIGITS + bin);
@@ -3324,7 +3359,7 @@ fn block_exclusive_sum_raking_memoize_384_i32(value: i32, grid: &mut SharedRegio
 
 #[inline(always)]
 fn radix_lookback_global(
-    bin: usize,
+    bin: u32,
     block_index: i32,
     local_count: i32,
     lookback: &mut DeviceRegion<'_, i32>,
@@ -3337,7 +3372,7 @@ fn radix_lookback_global(
     let mut wanted = u32::MAX;
     let mut previous = block_index - 1;
     while previous >= 0 {
-        let location = previous as usize * RADIX_DIGITS + bin;
+        let location = previous as usize * RADIX_DIGITS + bin as usize;
         let mut value;
         loop {
             // This is CUB's anti-hoisting fence immediately before its
@@ -3357,9 +3392,12 @@ fn radix_lookback_global(
         previous -= 1;
     }
     let publication = inclusive | GLOBAL_MASK;
-    lookback.write_volatile(block_index as usize * RADIX_DIGITS + bin, publication);
-    let current = global_offsets.read(bin);
-    global_offsets.write(bin, current + (inclusive - local_count) as u64);
+    lookback.write_volatile(
+        block_index as usize * RADIX_DIGITS + bin as usize,
+        publication,
+    );
+    let current = global_offsets.read(bin as usize);
+    global_offsets.write(bin as usize, current + (inclusive - local_count) as u64);
     let _ = wanted;
 }
 
@@ -3376,7 +3414,6 @@ pub fn radix_onesweep_keys_agent<
     ToOrdered,
     FromOrdered,
     Digit,
-    RankDigit,
     const THREADS: usize,
     const ITEMS: usize,
     const UNION_BYTES: usize,
@@ -3384,7 +3421,7 @@ pub fn radix_onesweep_keys_agent<
     storage: (DisjointSlice<i32>, DisjointSlice<i32>, &[u64]),
     buffers: (&[K], DisjointSlice<K>),
     pass: (usize, usize, u32, u32),
-    transforms: (DefaultKey, ToOrdered, FromOrdered, Digit, RankDigit),
+    transforms: (DefaultKey, ToOrdered, FromOrdered, Digit),
 ) where
     K: Copy,
     B: Copy,
@@ -3392,15 +3429,15 @@ pub fn radix_onesweep_keys_agent<
     ToOrdered: Fn(K) -> B + Copy,
     FromOrdered: Fn(B) -> K + Copy,
     Digit: FnMut(B, u32, u32) -> u32 + Copy,
-    RankDigit: FnMut(B, u32, u32) -> u32 + Copy,
 {
     let (lookback, counter, bins) = storage;
     let (input, output) = buffers;
     let (bin_offset, counter_offset, current_bit, num_bits) = pass;
-    let (default_key, to_ordered, from_ordered, mut digit, mut rank_digit) = transforms;
+    let (default_key, to_ordered, from_ordered, mut digit) = transforms;
+    let digit_mask = (1u32 << num_bits) - 1;
     const RADIX_DIGITS: usize = 256;
     let thread_index = thread::threadIdx_x();
-    let lane = thread_index & 31;
+    let lane = warp::lane_id();
     let warp_index = thread_index >> 5;
     let tile_items = (THREADS * ITEMS) as u32;
     let num_items = input.len() as u32;
@@ -3409,19 +3446,6 @@ pub fn radix_onesweep_keys_agent<
     let prefix_storage_offset = warp_offsets_bytes + RADIX_DIGITS * core::mem::size_of::<u32>();
     let prefix_grid_offset = prefix_storage_offset + 16;
     let shared_memory = BlockSharedMemory::new(shared_bytes);
-    let mut warp_offsets = shared_memory.region::<i32>(0, (THREADS / 32) * RADIX_DIGITS);
-    // CUB retains one guard allocation of `match_masks[1][RADIX_DIGITS]`
-    // even for WARP_MATCH_ANY. Use that otherwise-idle region to lower the
-    // block-vote result without aliasing the following `prefix_tmp` storage.
-    let mut short_flags = shared_memory.region::<u32>(warp_offsets_bytes, RADIX_DIGITS);
-    let mut prefix_grid = shared_memory.region::<i32>(
-        prefix_grid_offset,
-        (UNION_BYTES - prefix_grid_offset) / core::mem::size_of::<i32>(),
-    );
-    let mut keys_shared = shared_memory
-        .region::<MaybeUninit<B>>(0, UNION_BYTES / core::mem::size_of::<MaybeUninit<B>>());
-    let mut global_offsets = shared_memory.region::<u64>(UNION_BYTES, RADIX_DIGITS);
-    let mut block_index_slot = shared_memory.region::<i32>(UNION_BYTES, 1);
     let mut lookback = DeviceRegion::new(lookback);
     let mut counter = DeviceRegion::new(counter);
     let mut output = DeviceRegion::new(output);
@@ -3437,25 +3461,22 @@ pub fn radix_onesweep_keys_agent<
         // CUB aliases `block_idx` with `global_offsets` and broadcasts it with
         // a block barrier. Retain that phase change instead of assuming CUDA's
         // physical block order is the one-sweep tile order.
+        let mut block_index_slot = shared_memory.region::<i32>(UNION_BYTES, 1);
         block_index_slot.write(0, dynamic_block);
     }
     thread::sync_threads();
-    let block_index = block_index_slot.read(0);
+    let block_index = shared_memory.region::<i32>(UNION_BYTES, 1).read(0);
     if thread_index == 0 {
         // cuda-oxide does not yet expose CUDA's `__syncthreads_or`. Reserve
         // one cell in CUB's guard match-mask allocation; the histogram's
         // later block barrier publishes this initialization before the vote.
+        let mut short_flags = shared_memory.region::<u32>(warp_offsets_bytes, RADIX_DIGITS);
         short_flags.write(0, 0);
     }
     let tile_base = block_index as u32 * tile_items;
     let full_block = tile_base + tile_items <= num_items;
-    let valid_items = if full_block {
-        tile_items
-    } else {
-        num_items - tile_base
-    };
 
-    let mut keys = [sentinel; ITEMS];
+    let mut keys = [MaybeUninit::<B>::uninit(); ITEMS];
     let warp_base = warp_index * 32 * ITEMS as u32 + lane;
     let warp_group_base = tile_base as usize + warp_index as usize * 32usize * ITEMS;
     if full_block {
@@ -3468,7 +3489,7 @@ pub fn radix_onesweep_keys_agent<
         };
         for_each_thread_item!(ITEMS, item, {
             let source_index = lane as usize + item * 32usize;
-            keys[item] = to_ordered(warp_group[source_index]);
+            keys[item].write(to_ordered(warp_group[source_index]));
         });
     } else {
         // Only the final tile is partial. A warp whose band starts beyond the
@@ -3478,65 +3499,78 @@ pub fn radix_onesweep_keys_agent<
         let warp_group = input.get(warp_group_base..).unwrap_or(empty_input);
         for_each_thread_item!(ITEMS, item, {
             let source_index = lane as usize + item * 32usize;
-            keys[item] = warp_group
-                .get(source_index)
-                .copied()
-                .map(to_ordered)
-                .unwrap_or(sentinel);
+            keys[item].write(
+                warp_group
+                    .get(source_index)
+                    .copied()
+                    .map(to_ordered)
+                    .unwrap_or(sentinel),
+            );
         });
     }
 
     // One private warp histogram, exactly `NUM_PARTS == 1` for the pinned
     // SM80 policy. The warp-strided input arrangement preserves source order.
-    for_each_radix_warp_bin!(slot, {
-        let bin = (lane + slot * 32) as usize;
-        warp_offsets.write(warp_index as usize * RADIX_DIGITS + bin, 0);
-    });
-    warp::sync_mask(u32::MAX);
-    for_each_thread_item!(ITEMS, item, {
-        warp_offsets.fetch_add_block(
-            warp_index as usize * RADIX_DIGITS + digit(keys[item], current_bit, num_bits) as usize,
-            1,
-        );
-    });
+    {
+        let mut warp_offsets = shared_memory.region::<i32>(0, (THREADS / 32) * RADIX_DIGITS);
+        for_each_radix_warp_bin!(slot, {
+            let bin = (lane + slot * 32) as usize;
+            warp_offsets.write((warp_index * RADIX_DIGITS as u32 + bin as u32) as usize, 0);
+        });
+        warp::sync_mask(u32::MAX);
+        for_each_thread_item!(ITEMS, item, {
+            let ordered = initialized_value(&keys[item]);
+            warp_offsets.fetch_add_block(
+                (warp_index * RADIX_DIGITS as u32 + digit(ordered, current_bit, digit_mask))
+                    as usize,
+                1,
+            );
+        });
+    }
     thread::sync_threads();
 
     let active_bin = thread_index < RADIX_DIGITS as u32;
-    let bin = thread_index.min(RADIX_DIGITS as u32 - 1) as usize;
+    let bin = thread_index;
     let mut local_count = 0i32;
     if active_bin {
+        let mut warp_offsets = shared_memory.region::<i32>(0, (THREADS / 32) * RADIX_DIGITS);
         for_each_policy800_warp!(source_warp, {
-            let location = source_warp * RADIX_DIGITS + bin;
-            let count = warp_offsets.read(location);
-            warp_offsets.write(location, local_count);
+            let location = source_warp as u32 * RADIX_DIGITS as u32 + bin;
+            let count = warp_offsets.read(location as usize);
+            warp_offsets.write(location as usize, local_count);
             local_count += count;
         });
         let partial = local_count | 0x4000_0000;
-        lookback.write_volatile(block_index as usize * RADIX_DIGITS + bin, partial);
+        lookback.write_volatile(block_index as usize * RADIX_DIGITS + bin as usize, partial);
     }
 
     // CUB invokes `__syncthreads_or` in the lookback callback. At most one
     // digit can own the whole tile, so its bin thread uniquely publishes the
     // true case into the otherwise-idle guard match-mask cell.
     if active_bin && local_count == tile_items as i32 {
+        let mut short_flags = shared_memory.region::<u32>(warp_offsets_bytes, RADIX_DIGITS);
         short_flags.write(0, 1);
     }
     thread::sync_threads();
     // A same-address shared load is a warp multicast. Every thread consumes
     // the block-wide result directly, which is the safe cuda-oxide capability
     // replacement for CUB's currently unavailable `__syncthreads_or` result.
-    let short_circuit = short_flags.read(0) != 0;
+    let short_circuit = shared_memory
+        .region::<u32>(warp_offsets_bytes, RADIX_DIGITS)
+        .read(0)
+        != 0;
 
     // CUB performs the short-circuit from its counts callback, before the
     // block-wide exclusive scan and rank downsweep. A uniform digit tile must
     // therefore never execute those later phases merely because the result
     // would still be correct.
     if short_circuit {
-        let common_bin = digit(keys[0], current_bit, num_bits) as usize;
+        let common_bin = digit(initialized_value(&keys[0]), current_bit, digit_mask);
+        let mut global_offsets = shared_memory.region::<u64>(UNION_BYTES, RADIX_DIGITS);
         if active_bin {
             global_offsets.write(
-                bin,
-                pass_bins[bin]
+                bin as usize,
+                pass_bins[bin as usize]
                     - if bin > common_bin {
                         tile_items as u64
                     } else {
@@ -3552,18 +3586,19 @@ pub fn radix_onesweep_keys_agent<
             );
         }
         thread::sync_threads();
-        let output_base = global_offsets.read(common_bin) as usize;
+        let output_base = global_offsets.read(common_bin as usize) as usize;
         if full_block {
             for_each_thread_item!(ITEMS, item, {
                 let local_index = warp_base + item as u32 * 32;
-                let value = from_ordered(keys[item]);
+                let value = from_ordered(initialized_value(&keys[item]));
                 output.write(output_base + local_index as usize, value);
             });
         } else {
+            let tile_items = num_items - tile_base;
             for_each_thread_item!(ITEMS, item, {
                 let local_index = warp_base + item as u32 * 32;
-                if local_index < valid_items {
-                    let value = from_ordered(keys[item]);
+                if local_index < tile_items {
+                    let value = from_ordered(initialized_value(&keys[item]));
                     output.write(output_base + local_index as usize, value);
                 }
             });
@@ -3571,13 +3606,19 @@ pub fn radix_onesweep_keys_agent<
         return;
     }
 
-    let exclusive_digit_prefix =
-        block_exclusive_sum_raking_memoize_384_i32(local_count, &mut prefix_grid);
+    let exclusive_digit_prefix = {
+        let mut prefix_grid = shared_memory.region::<i32>(
+            prefix_grid_offset,
+            (UNION_BYTES - prefix_grid_offset) / core::mem::size_of::<i32>(),
+        );
+        block_exclusive_sum_raking_memoize_384_i32(local_count, &mut prefix_grid)
+    };
     if active_bin {
+        let mut warp_offsets = shared_memory.region::<i32>(0, (THREADS / 32) * RADIX_DIGITS);
         for_each_policy800_warp!(source_warp, {
-            let location = source_warp * RADIX_DIGITS + bin;
-            let prior_warps = warp_offsets.read(location);
-            warp_offsets.write(location, prior_warps + exclusive_digit_prefix);
+            let location = source_warp as u32 * RADIX_DIGITS as u32 + bin;
+            let prior_warps = warp_offsets.read(location as usize);
+            warp_offsets.write(location as usize, prior_warps + exclusive_digit_prefix);
         });
     }
     thread::sync_threads();
@@ -3586,31 +3627,36 @@ pub fn radix_onesweep_keys_agent<
     // step writes its slot before the scatter reads it. Initializing all 21
     // registers here would hide an unnecessary instruction path behind the
     // same functional result.
-    let mut ranks = [0i32; ITEMS];
-    for_each_thread_item!(ITEMS, item, {
-        let item_bin = rank_digit(keys[item], current_bit, num_bits);
-        let matching = radix_match_any_8(item_bin);
-        let leader = 31 - matching.leading_zeros();
-        let within_match = (matching & warp::lanemask_le()).count_ones() as i32;
-        let mut warp_offset = 0i32;
-        if lane == leader {
-            warp_offset = warp_offsets.fetch_add_block(
-                warp_index as usize * RADIX_DIGITS + item_bin as usize,
-                within_match,
-            );
-        }
-        warp_offset = warp::shuffle_sync(u32::MAX, warp_offset as u32, leader) as i32;
-        ranks[item] = warp_offset + within_match - 1;
-    });
+    let mut ranks = [MaybeUninit::<i32>::uninit(); ITEMS];
+    {
+        let mut warp_offsets = shared_memory.region::<i32>(0, (THREADS / 32) * RADIX_DIGITS);
+        for_each_thread_item!(ITEMS, item, {
+            let item_bin = digit(initialized_value(&keys[item]), current_bit, digit_mask);
+            let matching = radix_match_any_8(item_bin);
+            let leader = 31 - matching.leading_zeros();
+            let within_match = (matching & warp::lanemask_le()).count_ones() as i32;
+            let mut warp_offset = 0i32;
+            if lane == leader {
+                warp_offset = warp_offsets.fetch_add_block(
+                    (warp_index * RADIX_DIGITS as u32 + item_bin) as usize,
+                    within_match,
+                );
+            }
+            warp_offset = warp::shuffle_sync(u32::MAX, warp_offset as u32, leader) as i32;
+            ranks[item].write(warp_offset + within_match - 1);
+        });
+    }
 
     // `rank_temp_storage` and `keys_out` are the same CUB union. Every warp
     // must finish consuming its rank offsets before any thread starts the key
     // scatter phase and overwrites that storage.
     thread::sync_threads();
 
+    let mut keys_shared = shared_memory
+        .region::<MaybeUninit<B>>(0, UNION_BYTES / core::mem::size_of::<MaybeUninit<B>>());
     for_each_thread_item!(ITEMS, item, {
-        let ordered = keys[item];
-        let rank = ranks[item];
+        let ordered = initialized_value(&keys[item]);
+        let rank = initialized_value(&ranks[item]);
         keys_shared.write(rank as usize, MaybeUninit::new(ordered));
     });
 
@@ -3618,8 +3664,12 @@ pub fn radix_onesweep_keys_agent<
     // barrier after lookback publishes both keys and global offsets before
     // any thread reads either; inserting an earlier barrier serializes the
     // phases and changes the one-sweep schedule.
+    let mut global_offsets = shared_memory.region::<u64>(UNION_BYTES, RADIX_DIGITS);
     if active_bin {
-        global_offsets.write(bin, pass_bins[bin] - exclusive_digit_prefix as u64);
+        global_offsets.write(
+            bin as usize,
+            pass_bins[bin as usize] - exclusive_digit_prefix as u64,
+        );
         radix_lookback_global(
             bin,
             block_index,
@@ -3634,18 +3684,21 @@ pub fn radix_onesweep_keys_agent<
         for_each_thread_item!(ITEMS, item, {
             let blocked_index = thread_index + item as u32 * THREADS as u32;
             let ordered = keys_shared.read_initialized(blocked_index as usize);
-            let item_bin = digit(ordered, current_bit, num_bits) as usize;
-            let output_index = blocked_index as usize + global_offsets.read(item_bin) as usize;
+            let item_bin = digit(ordered, current_bit, digit_mask);
+            let output_index =
+                blocked_index as usize + global_offsets.read(item_bin as usize) as usize;
             output.write(output_index, from_ordered(ordered));
             warp::sync_mask(u32::MAX);
         });
     } else {
+        let tile_items = num_items - tile_base;
         for_each_thread_item!(ITEMS, item, {
             let blocked_index = thread_index + item as u32 * THREADS as u32;
-            if blocked_index < valid_items {
+            if blocked_index < tile_items {
                 let ordered = keys_shared.read_initialized(blocked_index as usize);
-                let item_bin = digit(ordered, current_bit, num_bits) as usize;
-                let output_index = blocked_index as usize + global_offsets.read(item_bin) as usize;
+                let item_bin = digit(ordered, current_bit, digit_mask);
+                let output_index =
+                    blocked_index as usize + global_offsets.read(item_bin as usize) as usize;
                 output.write(output_index, from_ordered(ordered));
             }
             warp::sync_mask(u32::MAX);
@@ -3668,7 +3721,6 @@ pub fn radix_onesweep_pairs_agent<
     ToOrdered,
     FromOrdered,
     Digit,
-    RankDigit,
     const THREADS: usize,
     const ITEMS: usize,
     const UNION_BYTES: usize,
@@ -3676,7 +3728,7 @@ pub fn radix_onesweep_pairs_agent<
     storage: (DisjointSlice<i32>, DisjointSlice<i32>, &[u64]),
     buffers: (&[K], &[V], DisjointSlice<K>, DisjointSlice<V>),
     pass: (usize, usize, u32, u32),
-    transforms: (DefaultKey, ToOrdered, FromOrdered, Digit, RankDigit),
+    transforms: (DefaultKey, ToOrdered, FromOrdered, Digit),
 ) where
     K: Copy,
     V: Copy,
@@ -3685,15 +3737,15 @@ pub fn radix_onesweep_pairs_agent<
     ToOrdered: Fn(K) -> B + Copy,
     FromOrdered: Fn(B) -> K + Copy,
     Digit: FnMut(B, u32, u32) -> u32 + Copy,
-    RankDigit: FnMut(B, u32, u32) -> u32 + Copy,
 {
     let (lookback, counter, bins) = storage;
     let (input_keys, input_values, output_keys, output_values) = buffers;
     let (bin_offset, counter_offset, current_bit, num_bits) = pass;
-    let (default_key, to_ordered, from_ordered, mut digit, mut rank_digit) = transforms;
+    let (default_key, to_ordered, from_ordered, mut digit) = transforms;
+    let digit_mask = (1u32 << num_bits) - 1;
     const RADIX_DIGITS: usize = 256;
     let thread_index = thread::threadIdx_x();
-    let lane = thread_index & 31;
+    let lane = warp::lane_id();
     let warp_index = thread_index >> 5;
     let tile_items = (THREADS * ITEMS) as u32;
     let num_items = input_keys.len() as u32;
@@ -3702,18 +3754,6 @@ pub fn radix_onesweep_pairs_agent<
     let prefix_storage_offset = warp_offsets_bytes + RADIX_DIGITS * core::mem::size_of::<u32>();
     let prefix_grid_offset = prefix_storage_offset + 16;
     let shared_memory = BlockSharedMemory::new(shared_bytes);
-    let mut warp_offsets = shared_memory.region::<i32>(0, (THREADS / 32) * RADIX_DIGITS);
-    let mut short_flags = shared_memory.region::<u32>(warp_offsets_bytes, RADIX_DIGITS);
-    let mut prefix_grid = shared_memory.region::<i32>(
-        prefix_grid_offset,
-        (UNION_BYTES - prefix_grid_offset) / core::mem::size_of::<i32>(),
-    );
-    let mut keys_shared = shared_memory
-        .region::<MaybeUninit<B>>(0, UNION_BYTES / core::mem::size_of::<MaybeUninit<B>>());
-    let mut values_shared = shared_memory
-        .region::<MaybeUninit<V>>(0, UNION_BYTES / core::mem::size_of::<MaybeUninit<V>>());
-    let mut global_offsets = shared_memory.region::<u64>(UNION_BYTES, RADIX_DIGITS);
-    let mut block_index_slot = shared_memory.region::<i32>(UNION_BYTES, 1);
     let mut lookback = DeviceRegion::new(lookback);
     let mut counter = DeviceRegion::new(counter);
     let mut output_keys = DeviceRegion::new(output_keys);
@@ -3725,22 +3765,19 @@ pub fn radix_onesweep_pairs_agent<
 
     if thread_index == 0 {
         let dynamic_block = counter.fetch_add_device(counter_offset, 1);
+        let mut block_index_slot = shared_memory.region::<i32>(UNION_BYTES, 1);
         block_index_slot.write(0, dynamic_block);
     }
     thread::sync_threads();
-    let block_index = block_index_slot.read(0);
+    let block_index = shared_memory.region::<i32>(UNION_BYTES, 1).read(0);
     if thread_index == 0 {
+        let mut short_flags = shared_memory.region::<u32>(warp_offsets_bytes, RADIX_DIGITS);
         short_flags.write(0, 0);
     }
     let tile_base = block_index as u32 * tile_items;
     let full_block = tile_base + tile_items <= num_items;
-    let valid_items = if full_block {
-        tile_items
-    } else {
-        num_items - tile_base
-    };
 
-    let mut keys = [sentinel; ITEMS];
+    let mut keys = [MaybeUninit::<B>::uninit(); ITEMS];
     let warp_base = warp_index * 32 * ITEMS as u32 + lane;
     let warp_group_base = tile_base as usize + warp_index as usize * 32usize * ITEMS;
     if full_block {
@@ -3749,60 +3786,73 @@ pub fn radix_onesweep_pairs_agent<
             return;
         };
         for_each_thread_item!(ITEMS, item, {
-            keys[item] = to_ordered(warp_group[lane as usize + item * 32usize]);
+            keys[item].write(to_ordered(warp_group[lane as usize + item * 32usize]));
         });
     } else {
         let empty_input = &input_keys[..0];
         let warp_group = input_keys.get(warp_group_base..).unwrap_or(empty_input);
         for_each_thread_item!(ITEMS, item, {
-            keys[item] = warp_group
-                .get(lane as usize + item * 32usize)
-                .copied()
-                .map(to_ordered)
-                .unwrap_or(sentinel);
+            keys[item].write(
+                warp_group
+                    .get(lane as usize + item * 32usize)
+                    .copied()
+                    .map(to_ordered)
+                    .unwrap_or(sentinel),
+            );
         });
     }
 
-    for_each_radix_warp_bin!(slot, {
-        let bin = (lane + slot * 32) as usize;
-        warp_offsets.write(warp_index as usize * RADIX_DIGITS + bin, 0);
-    });
-    warp::sync_mask(u32::MAX);
-    for_each_thread_item!(ITEMS, item, {
-        warp_offsets.fetch_add_block(
-            warp_index as usize * RADIX_DIGITS + digit(keys[item], current_bit, num_bits) as usize,
-            1,
-        );
-    });
+    {
+        let mut warp_offsets = shared_memory.region::<i32>(0, (THREADS / 32) * RADIX_DIGITS);
+        for_each_radix_warp_bin!(slot, {
+            let bin = (lane + slot * 32) as usize;
+            warp_offsets.write((warp_index * RADIX_DIGITS as u32 + bin as u32) as usize, 0);
+        });
+        warp::sync_mask(u32::MAX);
+        for_each_thread_item!(ITEMS, item, {
+            let ordered = initialized_value(&keys[item]);
+            warp_offsets.fetch_add_block(
+                (warp_index * RADIX_DIGITS as u32 + digit(ordered, current_bit, digit_mask))
+                    as usize,
+                1,
+            );
+        });
+    }
     thread::sync_threads();
 
     let active_bin = thread_index < RADIX_DIGITS as u32;
-    let bin = thread_index.min(RADIX_DIGITS as u32 - 1) as usize;
+    let bin = thread_index;
     let mut local_count = 0i32;
     if active_bin {
+        let mut warp_offsets = shared_memory.region::<i32>(0, (THREADS / 32) * RADIX_DIGITS);
         for_each_policy800_warp!(source_warp, {
-            let location = source_warp * RADIX_DIGITS + bin;
-            let count = warp_offsets.read(location);
-            warp_offsets.write(location, local_count);
+            let location = source_warp as u32 * RADIX_DIGITS as u32 + bin;
+            let count = warp_offsets.read(location as usize);
+            warp_offsets.write(location as usize, local_count);
             local_count += count;
         });
         lookback.write_volatile(
-            block_index as usize * RADIX_DIGITS + bin,
+            block_index as usize * RADIX_DIGITS + bin as usize,
             local_count | 0x4000_0000,
         );
     }
     if active_bin && local_count == tile_items as i32 {
+        let mut short_flags = shared_memory.region::<u32>(warp_offsets_bytes, RADIX_DIGITS);
         short_flags.write(0, 1);
     }
     thread::sync_threads();
-    let short_circuit = short_flags.read(0) != 0;
+    let short_circuit = shared_memory
+        .region::<u32>(warp_offsets_bytes, RADIX_DIGITS)
+        .read(0)
+        != 0;
 
     if short_circuit {
-        let common_bin = digit(keys[0], current_bit, num_bits) as usize;
+        let common_bin = digit(initialized_value(&keys[0]), current_bit, digit_mask);
+        let mut global_offsets = shared_memory.region::<u64>(UNION_BYTES, RADIX_DIGITS);
         if active_bin {
             global_offsets.write(
-                bin,
-                pass_bins[bin]
+                bin as usize,
+                pass_bins[bin as usize]
                     - if bin > common_bin {
                         tile_items as u64
                     } else {
@@ -3818,13 +3868,27 @@ pub fn radix_onesweep_pairs_agent<
             );
         }
         thread::sync_threads();
-        let output_base = global_offsets.read(common_bin) as usize;
-        for_each_thread_item!(ITEMS, item, {
-            let local_index = warp_base + item as u32 * 32;
-            if full_block || local_index < valid_items {
-                output_keys.write(output_base + local_index as usize, from_ordered(keys[item]));
-            }
-        });
+        let output_base = global_offsets.read(common_bin as usize) as usize;
+        if full_block {
+            for_each_thread_item!(ITEMS, item, {
+                let local_index = warp_base + item as u32 * 32;
+                output_keys.write(
+                    output_base + local_index as usize,
+                    from_ordered(initialized_value(&keys[item])),
+                );
+            });
+        } else {
+            let tile_items = num_items - tile_base;
+            for_each_thread_item!(ITEMS, item, {
+                let local_index = warp_base + item as u32 * 32;
+                if local_index < tile_items {
+                    output_keys.write(
+                        output_base + local_index as usize,
+                        from_ordered(initialized_value(&keys[item])),
+                    );
+                }
+            });
+        }
 
         let mut values = [MaybeUninit::<V>::uninit(); ITEMS];
         let empty_values = &input_values[..0];
@@ -3842,56 +3906,86 @@ pub fn radix_onesweep_pairs_agent<
                 values[item].write(value);
             }
         });
-        for_each_thread_item!(ITEMS, item, {
-            let local_index = warp_base + item as u32 * 32;
-            if full_block || local_index < valid_items {
+        if full_block {
+            for_each_thread_item!(ITEMS, item, {
+                let local_index = warp_base + item as u32 * 32;
                 output_values.write(
                     output_base + local_index as usize,
                     initialized_value(&values[item]),
                 );
-            }
-        });
+            });
+        } else {
+            let tile_items = num_items - tile_base;
+            for_each_thread_item!(ITEMS, item, {
+                let local_index = warp_base + item as u32 * 32;
+                if local_index < tile_items {
+                    output_values.write(
+                        output_base + local_index as usize,
+                        initialized_value(&values[item]),
+                    );
+                }
+            });
+        }
         return;
     }
 
-    let exclusive_digit_prefix =
-        block_exclusive_sum_raking_memoize_384_i32(local_count, &mut prefix_grid);
+    let exclusive_digit_prefix = {
+        let mut prefix_grid = shared_memory.region::<i32>(
+            prefix_grid_offset,
+            (UNION_BYTES - prefix_grid_offset) / core::mem::size_of::<i32>(),
+        );
+        block_exclusive_sum_raking_memoize_384_i32(local_count, &mut prefix_grid)
+    };
     if active_bin {
+        let mut warp_offsets = shared_memory.region::<i32>(0, (THREADS / 32) * RADIX_DIGITS);
         for_each_policy800_warp!(source_warp, {
-            let location = source_warp * RADIX_DIGITS + bin;
-            let prior_warps = warp_offsets.read(location);
-            warp_offsets.write(location, prior_warps + exclusive_digit_prefix);
+            let location = source_warp as u32 * RADIX_DIGITS as u32 + bin;
+            let prior_warps = warp_offsets.read(location as usize);
+            warp_offsets.write(location as usize, prior_warps + exclusive_digit_prefix);
         });
     }
     thread::sync_threads();
 
-    let mut ranks = [0i32; ITEMS];
-    for_each_thread_item!(ITEMS, item, {
-        let item_bin = rank_digit(keys[item], current_bit, num_bits);
-        let matching = radix_match_any_8(item_bin);
-        let leader = 31 - matching.leading_zeros();
-        let within_match = (matching & warp::lanemask_le()).count_ones() as i32;
-        let mut warp_offset = 0i32;
-        if lane == leader {
-            warp_offset = warp_offsets.fetch_add_block(
-                warp_index as usize * RADIX_DIGITS + item_bin as usize,
-                within_match,
-            );
-        }
-        warp_offset = warp::shuffle_sync(u32::MAX, warp_offset as u32, leader) as i32;
-        ranks[item] = warp_offset + within_match - 1;
-    });
+    let mut ranks = [MaybeUninit::<i32>::uninit(); ITEMS];
+    {
+        let mut warp_offsets = shared_memory.region::<i32>(0, (THREADS / 32) * RADIX_DIGITS);
+        for_each_thread_item!(ITEMS, item, {
+            let item_bin = digit(initialized_value(&keys[item]), current_bit, digit_mask);
+            let matching = radix_match_any_8(item_bin);
+            let leader = 31 - matching.leading_zeros();
+            let within_match = (matching & warp::lanemask_le()).count_ones() as i32;
+            let mut warp_offset = 0i32;
+            if lane == leader {
+                warp_offset = warp_offsets.fetch_add_block(
+                    (warp_index * RADIX_DIGITS as u32 + item_bin) as usize,
+                    within_match,
+                );
+            }
+            warp_offset = warp::shuffle_sync(u32::MAX, warp_offset as u32, leader) as i32;
+            ranks[item].write(warp_offset + within_match - 1);
+        });
+    }
     thread::sync_threads();
 
+    let mut keys_shared = shared_memory
+        .region::<MaybeUninit<B>>(0, UNION_BYTES / core::mem::size_of::<MaybeUninit<B>>());
     for_each_thread_item!(ITEMS, item, {
-        keys_shared.write(ranks[item] as usize, MaybeUninit::new(keys[item]));
+        let rank = initialized_value(&ranks[item]);
+        keys_shared.write(
+            rank as usize,
+            MaybeUninit::new(initialized_value(&keys[item])),
+        );
     });
 
     // Match CUB's overlap: bin threads may perform lookback after their key
     // scatter while the rest of the block finishes scattering. The following
     // barrier is the sole join before global key reads.
+    let mut global_offsets = shared_memory.region::<u64>(UNION_BYTES, RADIX_DIGITS);
     if active_bin {
-        global_offsets.write(bin, pass_bins[bin] - exclusive_digit_prefix as u64);
+        global_offsets.write(
+            bin as usize,
+            pass_bins[bin as usize] - exclusive_digit_prefix as u64,
+        );
         radix_lookback_global(
             bin,
             block_index,
@@ -3906,18 +4000,21 @@ pub fn radix_onesweep_pairs_agent<
         for_each_thread_item!(ITEMS, item, {
             let blocked_index = thread_index + item as u32 * THREADS as u32;
             let ordered = keys_shared.read_initialized(blocked_index as usize);
-            let item_bin = digit(ordered, current_bit, num_bits) as usize;
-            let output_index = blocked_index as usize + global_offsets.read(item_bin) as usize;
+            let item_bin = digit(ordered, current_bit, digit_mask);
+            let output_index =
+                blocked_index as usize + global_offsets.read(item_bin as usize) as usize;
             output_keys.write(output_index, from_ordered(ordered));
             warp::sync_mask(u32::MAX);
         });
     } else {
+        let tile_items = num_items - tile_base;
         for_each_thread_item!(ITEMS, item, {
             let blocked_index = thread_index + item as u32 * THREADS as u32;
-            if blocked_index < valid_items {
+            if blocked_index < tile_items {
                 let ordered = keys_shared.read_initialized(blocked_index as usize);
-                let item_bin = digit(ordered, current_bit, num_bits) as usize;
-                let output_index = blocked_index as usize + global_offsets.read(item_bin) as usize;
+                let item_bin = digit(ordered, current_bit, digit_mask);
+                let output_index =
+                    blocked_index as usize + global_offsets.read(item_bin as usize) as usize;
                 output_keys.write(output_index, from_ordered(ordered));
             }
             warp::sync_mask(u32::MAX);
@@ -3928,7 +4025,7 @@ pub fn radix_onesweep_pairs_agent<
     for_each_thread_item!(ITEMS, item, {
         let blocked_index = thread_index + item as u32 * THREADS as u32;
         let ordered = keys_shared.read_initialized(blocked_index as usize);
-        value_digits[item] = digit(ordered, current_bit, num_bits);
+        value_digits[item] = digit(ordered, current_bit, digit_mask);
     });
 
     let mut values = [MaybeUninit::<V>::uninit(); ITEMS];
@@ -3948,42 +4045,58 @@ pub fn radix_onesweep_pairs_agent<
         }
     });
     thread::sync_threads();
+    let mut values_shared = shared_memory
+        .region::<MaybeUninit<V>>(0, UNION_BYTES / core::mem::size_of::<MaybeUninit<V>>());
     for_each_thread_item!(ITEMS, item, {
-        values_shared.write(ranks[item] as usize, values[item]);
+        let rank = initialized_value(&ranks[item]);
+        values_shared.write(rank as usize, values[item]);
     });
     thread::sync_threads();
 
-    for_each_thread_item!(ITEMS, item, {
-        let blocked_index = thread_index + item as u32 * THREADS as u32;
-        if full_block || blocked_index < valid_items {
+    if full_block {
+        for_each_thread_item!(ITEMS, item, {
+            let blocked_index = thread_index + item as u32 * THREADS as u32;
             let value = values_shared.read_initialized(blocked_index as usize);
             let output_index =
                 blocked_index as usize + global_offsets.read(value_digits[item] as usize) as usize;
             output_values.write(output_index, value);
-        }
-        warp::sync_mask(u32::MAX);
-    });
+            warp::sync_mask(u32::MAX);
+        });
+    } else {
+        let tile_items = num_items - tile_base;
+        for_each_thread_item!(ITEMS, item, {
+            let blocked_index = thread_index + item as u32 * THREADS as u32;
+            if blocked_index < tile_items {
+                let value = values_shared.read_initialized(blocked_index as usize);
+                let output_index = blocked_index as usize
+                    + global_offsets.read(value_digits[item] as usize) as usize;
+                output_values.write(output_index, value);
+            }
+            warp::sync_mask(u32::MAX);
+        });
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         block_exchange_index, block_exchange_storage_items, load_to_shared_buffer_bytes,
-        local_merge_path_begin, radix_digit_u32, radix_digit_u64, radix_f32_from_ordered_ascending,
-        radix_f32_from_ordered_descending, radix_f32_to_ordered_ascending,
-        radix_f32_to_ordered_descending, radix_f64_from_ordered_ascending,
-        radix_f64_from_ordered_descending, radix_f64_to_ordered_ascending,
-        radix_f64_to_ordered_descending, radix_float_digit_u32, radix_float_digit_u64,
-        radix_float_rank_digit_u32, radix_float_rank_digit_u64, radix_i32_from_ordered_ascending,
-        radix_i32_from_ordered_descending, radix_i32_to_ordered_ascending,
-        radix_i32_to_ordered_descending, radix_i64_from_ordered_ascending,
-        radix_i64_from_ordered_descending, radix_i64_to_ordered_ascending,
-        radix_i64_to_ordered_descending, radix_min_ordered_u32, radix_min_ordered_u64,
-        radix_rank_digit_u32, radix_rank_digit_u64, radix_u32_from_ordered_ascending,
-        radix_u32_from_ordered_descending, radix_u32_to_ordered_ascending,
-        radix_u32_to_ordered_descending, radix_u64_from_ordered_ascending,
-        radix_u64_from_ordered_descending, radix_u64_to_ordered_ascending,
-        radix_u64_to_ordered_descending,
+        local_merge_path_begin, radix_digit_masked_u32, radix_digit_masked_u64, radix_digit_u32,
+        radix_digit_u64, radix_f32_from_ordered_ascending, radix_f32_from_ordered_descending,
+        radix_f32_to_ordered_ascending, radix_f32_to_ordered_descending,
+        radix_f64_from_ordered_ascending, radix_f64_from_ordered_descending,
+        radix_f64_to_ordered_ascending, radix_f64_to_ordered_descending,
+        radix_float_digit_masked_u32, radix_float_digit_masked_u64, radix_float_digit_u32,
+        radix_float_digit_u64, radix_float_rank_digit_u32, radix_float_rank_digit_u64,
+        radix_i32_from_ordered_ascending, radix_i32_from_ordered_descending,
+        radix_i32_to_ordered_ascending, radix_i32_to_ordered_descending,
+        radix_i64_from_ordered_ascending, radix_i64_from_ordered_descending,
+        radix_i64_to_ordered_ascending, radix_i64_to_ordered_descending, radix_min_ordered_u32,
+        radix_min_ordered_u64, radix_rank_digit_u32, radix_rank_digit_u64,
+        radix_u32_from_ordered_ascending, radix_u32_from_ordered_descending,
+        radix_u32_to_ordered_ascending, radix_u32_to_ordered_descending,
+        radix_u64_from_ordered_ascending, radix_u64_from_ordered_descending,
+        radix_u64_to_ordered_ascending, radix_u64_to_ordered_descending,
     };
 
     #[test]
@@ -4295,6 +4408,26 @@ mod tests {
     }
 
     #[test]
+    fn warp_specializations_read_the_lane_register_instead_of_rederiving_it() {
+        let source = include_str!("ordering_backend.rs");
+        let backend = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("device backend must precede its host tests");
+
+        assert!(backend.contains("let lane = warp::lane_id()"));
+        for forbidden in [
+            "let lane = thread_index & 31",
+            "let lane = thread_index % 32",
+        ] {
+            assert!(
+                !backend.contains(forbidden),
+                "fixed-width warp algorithms must use cuda-oxide's safe lane-register API: {forbidden}"
+            );
+        }
+    }
+
+    #[test]
     fn policy800_onesweep_keeps_signed_counts_and_checked_slice_bands() {
         let source = include_str!("ordering_backend.rs");
         let begin = source
@@ -4310,7 +4443,12 @@ mod tests {
             "let num_items = input.len() as u32",
             "let mut warp_offsets =",
             "let mut local_count = 0i32",
-            "let mut ranks = [0i32; ITEMS]",
+            "let bin = thread_index",
+            "let mut keys = [MaybeUninit::<B>::uninit(); ITEMS]",
+            "let mut ranks = [MaybeUninit::<i32>::uninit(); ITEMS]",
+            "let rank = initialized_value(&ranks[item])",
+            "let tile_items = num_items - tile_base",
+            "let digit_mask = (1u32 << num_bits) - 1",
             "bins.get(bin_offset..bin_offset + RADIX_DIGITS)",
             "input.get(warp_group_base..warp_group_base + 32usize * ITEMS)",
             ".get(source_index)",
@@ -4320,7 +4458,16 @@ mod tests {
                 "missing one-sweep contract: {required}"
             );
         }
-        for forbidden in ["num_items: u32", "input[source_index", "bins[bin_offset"] {
+        for forbidden in [
+            "num_items: u32",
+            "input[source_index",
+            "bins[bin_offset",
+            "let mut ranks = [0i32; ITEMS]",
+            "let mut keys = [sentinel; ITEMS]",
+            "let valid_items =",
+            "thread_index.min(RADIX_DIGITS as u32 - 1)",
+            "digit(keys[item], current_bit, num_bits)",
+        ] {
             assert!(
                 !agent.contains(forbidden),
                 "one-sweep must not duplicate a slice extent or its bounds checks: {forbidden}"
@@ -4342,7 +4489,10 @@ mod tests {
             "the pinned AgentRadixSortOnesweep constructor has exactly one CTA barrier"
         );
 
-        for scatter_marker in ["MaybeUninit::new(ordered)", "MaybeUninit::new(keys[item])"] {
+        for scatter_marker in [
+            "MaybeUninit::new(ordered)",
+            "MaybeUninit::new(initialized_value(&keys[item]))",
+        ] {
             let scatter = agent
                 .find(scatter_marker)
                 .expect("both one-sweep agents must scatter keys into their shared union");
@@ -4354,6 +4504,35 @@ mod tests {
                 !after_scatter[..lookback].contains("thread::sync_threads()"),
                 "an extra barrier must not serialize CUB's key-scatter/lookback overlap"
             );
+        }
+    }
+
+    #[test]
+    fn masked_digit_extractors_match_the_bit_count_forms() {
+        for bits in 1..=8 {
+            let mask = (1u32 << bits) - 1;
+            for bit in [0, 1, 7, 13, 24] {
+                let value = 0xa5c3_791eu32;
+                assert_eq!(
+                    radix_digit_masked_u32(value, bit, mask),
+                    radix_digit_u32(value, bit, bits)
+                );
+                assert_eq!(
+                    radix_float_digit_masked_u32(value, bit, mask),
+                    radix_float_digit_u32(value, bit, bits)
+                );
+            }
+            for bit in [0, 1, 17, 41, 56] {
+                let value = 0xa5c3_791e_d62b_480fu64;
+                assert_eq!(
+                    radix_digit_masked_u64(value, bit, mask),
+                    radix_digit_u64(value, bit, bits)
+                );
+                assert_eq!(
+                    radix_float_digit_masked_u64(value, bit, mask),
+                    radix_float_digit_u64(value, bit, bits)
+                );
+            }
         }
     }
 
@@ -4370,9 +4549,13 @@ mod tests {
         let histogram = &source[begin..end];
 
         for required in [
+            "const THREADS: usize",
             "const MAX_PASSES: usize",
             "let num_passes = (end_bit - begin_bit).div_ceil(8) as usize",
+            "let index = tile_offset + thread_index + item * THREADS",
+            "if index < keys.len()",
             "while current_bit < end_bit",
+            "let digit_mask = (1u32 << num_bits) - 1",
             "for_each_thread_item!(ITEMS, item",
         ] {
             assert!(
@@ -4388,6 +4571,14 @@ mod tests {
         assert!(
             !histogram.contains("for_each_radix_pass"),
             "the pinned histogram pass traversal is runtime agent state, not TMP expansion"
+        );
+        assert!(
+            !histogram.contains("blockDim_x"),
+            "Policy800 histogram block width is proc-macro TMP, not runtime agent state"
+        );
+        assert!(
+            !histogram.contains("digit(\n                    initialized_value(&ordered_keys[item]),\n                    current_bit,\n                    num_bits,"),
+            "the extractor mask must be constructed once per pass, as in CUB's ShiftDigitExtractor"
         );
     }
 

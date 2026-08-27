@@ -251,7 +251,7 @@ fn primitive_radix_lowering(
                 default_key: quote!(::rccl_cub::__private::radix_default_u32),
                 to_ordered,
                 from_ordered,
-                digit: quote!(::rccl_cub::__private::radix_digit_u32),
+                digit: quote!(::rccl_cub::__private::radix_digit_masked_u32),
                 rank_digit: quote!(::rccl_cub::__private::radix_rank_digit_u32),
             })
         }
@@ -273,7 +273,7 @@ fn primitive_radix_lowering(
                 default_key: quote!(::rccl_cub::__private::radix_default_u32),
                 to_ordered,
                 from_ordered,
-                digit: quote!(::rccl_cub::__private::radix_digit_u32),
+                digit: quote!(::rccl_cub::__private::radix_digit_masked_u32),
                 rank_digit: quote!(::rccl_cub::__private::radix_rank_digit_u32),
             })
         }
@@ -295,7 +295,7 @@ fn primitive_radix_lowering(
                 default_key: quote!(::rccl_cub::__private::radix_default_u32),
                 to_ordered,
                 from_ordered,
-                digit: quote!(::rccl_cub::__private::radix_float_digit_u32),
+                digit: quote!(::rccl_cub::__private::radix_float_digit_masked_u32),
                 rank_digit: quote!(::rccl_cub::__private::radix_float_rank_digit_u32),
             })
         }
@@ -317,7 +317,7 @@ fn primitive_radix_lowering(
                 default_key: quote!(::rccl_cub::__private::radix_default_u64),
                 to_ordered,
                 from_ordered,
-                digit: quote!(::rccl_cub::__private::radix_digit_u64),
+                digit: quote!(::rccl_cub::__private::radix_digit_masked_u64),
                 rank_digit: quote!(::rccl_cub::__private::radix_rank_digit_u64),
             })
         }
@@ -339,7 +339,7 @@ fn primitive_radix_lowering(
                 default_key: quote!(::rccl_cub::__private::radix_default_u64),
                 to_ordered,
                 from_ordered,
-                digit: quote!(::rccl_cub::__private::radix_digit_u64),
+                digit: quote!(::rccl_cub::__private::radix_digit_masked_u64),
                 rank_digit: quote!(::rccl_cub::__private::radix_rank_digit_u64),
             })
         }
@@ -361,7 +361,7 @@ fn primitive_radix_lowering(
                 default_key: quote!(::rccl_cub::__private::radix_default_u64),
                 to_ordered,
                 from_ordered,
-                digit: quote!(::rccl_cub::__private::radix_float_digit_u64),
+                digit: quote!(::rccl_cub::__private::radix_float_digit_masked_u64),
                 rank_digit: quote!(::rccl_cub::__private::radix_float_rank_digit_u64),
             })
         }
@@ -496,6 +496,10 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
 
         #[::rccl_cub::__private::cuda_device::cuda_module]
         #[doc(hidden)]
+        // Device entry points preserve the pinned CUB agent ABI. Grouping
+        // unrelated launch operands into a host-style options struct would
+        // change that ABI and obscure which values are uniform kernel inputs.
+        #[allow(clippy::too_many_arguments)]
         mod #module {
             use ::rccl_cub::__private::cuda_device::{
                 DisjointSlice, LinearTiles, Uniform, kernel, launch_bounds, launch_contract, thread,
@@ -1341,6 +1345,7 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                     DefaultKey,
                     ToOrdered,
                     Digit,
+                    128,
                     ITEMS,
                     MAX_PASSES,
                 >(keys, begin_bit, end_bit, default_key, to_ordered, digit, bins);
@@ -1378,7 +1383,6 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                 ToOrdered,
                 FromOrdered,
                 Digit,
-                RankDigit,
                 const ITEMS: usize,
                 const UNION_BYTES: usize,
             >(
@@ -1395,7 +1399,6 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                 to_ordered: ToOrdered,
                 from_ordered: FromOrdered,
                 mut digit: Digit,
-                mut rank_digit: RankDigit,
             ) where
                 K: Copy,
                 B: Copy,
@@ -1403,7 +1406,6 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                 ToOrdered: Fn(K) -> B + Copy,
                 FromOrdered: Fn(B) -> K + Copy,
                 Digit: FnMut(B, u32, u32) -> u32 + Copy,
-                RankDigit: FnMut(B, u32, u32) -> u32 + Copy,
             {
                 ::rccl_cub::__private::radix_onesweep_keys_agent::<
                     K,
@@ -1412,7 +1414,6 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                     ToOrdered,
                     FromOrdered,
                     Digit,
-                    RankDigit,
                     384,
                     ITEMS,
                     UNION_BYTES,
@@ -1425,7 +1426,7 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                         current_bit.get(),
                         num_bits.get(),
                     ),
-                    (default_key, to_ordered, from_ordered, digit, rank_digit),
+                    (default_key, to_ordered, from_ordered, digit),
                 );
             }
 
@@ -1446,7 +1447,6 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                 ToOrdered,
                 FromOrdered,
                 Digit,
-                RankDigit,
                 const ITEMS: usize,
                 const UNION_BYTES: usize,
             >(
@@ -1465,7 +1465,6 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                 to_ordered: ToOrdered,
                 from_ordered: FromOrdered,
                 mut digit: Digit,
-                mut rank_digit: RankDigit,
             ) where
                 K: Copy,
                 V: Copy,
@@ -1474,7 +1473,6 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                 ToOrdered: Fn(K) -> B + Copy,
                 FromOrdered: Fn(B) -> K + Copy,
                 Digit: FnMut(B, u32, u32) -> u32 + Copy,
-                RankDigit: FnMut(B, u32, u32) -> u32 + Copy,
             {
                 ::rccl_cub::__private::radix_onesweep_pairs_agent::<
                     K,
@@ -1484,7 +1482,6 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                     ToOrdered,
                     FromOrdered,
                     Digit,
-                    RankDigit,
                     384,
                     ITEMS,
                     UNION_BYTES,
@@ -1497,7 +1494,7 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                         current_bit.get(),
                         num_bits.get(),
                     ),
-                    (default_key, to_ordered, from_ordered, digit, rank_digit),
+                    (default_key, to_ordered, from_ordered, digit),
                 );
             }
 
@@ -3325,7 +3322,6 @@ fn expand_device_radix_sort_keys_buffer_order(
                 let __rccl_to_ordered = #to_ordered;
                 let __rccl_from_ordered = #from_ordered;
                 let __rccl_digit = #digit;
-                let __rccl_rank_digit = #rank_digit;
                 let __rccl_key_witness: #key_type = 0 as #key_type;
                 let __rccl_bit_witness: #bit_type = #sentinel;
                 let __rccl_histogram_probe_launch =
@@ -3444,7 +3440,6 @@ fn expand_device_radix_sort_keys_buffer_order(
                         _,
                         _,
                         _,
-                        _,
                         #onesweep_items,
                         #union_bytes,
                     >(
@@ -3454,7 +3449,6 @@ fn expand_device_radix_sort_keys_buffer_order(
                         &__rccl_to_ordered,
                         &__rccl_from_ordered,
                         &__rccl_digit,
-                        &__rccl_rank_digit,
                         __rccl_onesweep_launch,
                     )
                     .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
@@ -3481,7 +3475,6 @@ fn expand_device_radix_sort_keys_buffer_order(
                                 _,
                                 _,
                                 _,
-                                _,
                                 #onesweep_items,
                                 #union_bytes,
                             >(
@@ -3500,7 +3493,6 @@ fn expand_device_radix_sort_keys_buffer_order(
                                 __rccl_to_ordered,
                                 __rccl_from_ordered,
                                 __rccl_digit,
-                                __rccl_rank_digit,
                             )
                     };
                     __rccl_pass_result
@@ -3558,43 +3550,45 @@ fn expand_device_radix_sort_keys_via_buffer(
             let __rccl_counters = #counters;
             let __rccl_len = __rccl_keys.len();
             (|| -> ::core::result::Result<(), ::rccl_cub::DeviceAlgorithmError> {
-                let __rccl_scratch_len = __rccl_scratch_keys.len();
-                let mut __rccl_buffers = ::rccl_cub::DoubleBuffer::new(
-                    &mut *__rccl_keys,
-                    &mut *__rccl_scratch_keys,
-                )
-                .ok_or(::rccl_cub::DeviceAlgorithmError::LengthMismatch {
-                    role: "radix scratch keys",
-                    expected: __rccl_len,
-                    actual: __rccl_scratch_len,
-                })?;
-                let __rccl_blocks = __rccl_len.div_ceil(#tile_items);
-                for (__rccl_role, __rccl_expected, __rccl_actual) in [
-                    ("radix bins", #max_passes * 256usize, __rccl_bins.len()),
-                    (
-                        "radix lookback",
-                        __rccl_blocks * 256usize,
-                        __rccl_lookback.len(),
-                    ),
-                    (
-                        "radix pass counters",
-                        #max_passes,
-                        __rccl_counters.len(),
-                    ),
-                ] {
-                    if __rccl_actual != __rccl_expected {
-                        return ::core::result::Result::Err(
-                            ::rccl_cub::DeviceAlgorithmError::LengthMismatch {
-                                role: __rccl_role,
-                                expected: __rccl_expected,
-                                actual: __rccl_actual,
-                            },
-                        );
+                let (__rccl_result, __rccl_current_is_first) = {
+                    let __rccl_scratch_len = __rccl_scratch_keys.len();
+                    let mut __rccl_buffers = ::rccl_cub::DoubleBuffer::new(
+                        &mut *__rccl_keys,
+                        &mut *__rccl_scratch_keys,
+                    )
+                    .ok_or(::rccl_cub::DeviceAlgorithmError::LengthMismatch {
+                        role: "radix scratch keys",
+                        expected: __rccl_len,
+                        actual: __rccl_scratch_len,
+                    })?;
+                    let __rccl_blocks = __rccl_len.div_ceil(#tile_items);
+                    for (__rccl_role, __rccl_expected, __rccl_actual) in [
+                        ("radix bins", #max_passes * 256usize, __rccl_bins.len()),
+                        (
+                            "radix lookback",
+                            __rccl_blocks * 256usize,
+                            __rccl_lookback.len(),
+                        ),
+                        (
+                            "radix pass counters",
+                            #max_passes,
+                            __rccl_counters.len(),
+                        ),
+                    ] {
+                        if __rccl_actual != __rccl_expected {
+                            return ::core::result::Result::Err(
+                                ::rccl_cub::DeviceAlgorithmError::LengthMismatch {
+                                    role: __rccl_role,
+                                    expected: __rccl_expected,
+                                    actual: __rccl_actual,
+                                },
+                            );
+                        }
                     }
-                }
-                let __rccl_result = #operation;
-                let __rccl_current_is_first = __rccl_buffers.current_is_first();
-                ::core::mem::drop(__rccl_buffers);
+                    let __rccl_result = #operation;
+                    let __rccl_current_is_first = __rccl_buffers.current_is_first();
+                    (__rccl_result, __rccl_current_is_first)
+                };
                 __rccl_result?;
                 if !__rccl_current_is_first {
                     ::core::mem::swap(__rccl_keys, __rccl_scratch_keys);
@@ -3844,7 +3838,6 @@ fn expand_device_radix_sort_pairs_buffer_order(
                 let __rccl_to_ordered = #to_ordered;
                 let __rccl_from_ordered = #from_ordered;
                 let __rccl_digit = #digit;
-                let __rccl_rank_digit = #rank_digit;
                 let __rccl_key_witness: #key_type = 0 as #key_type;
                 let __rccl_value_witness: #value_type = ::core::default::Default::default();
                 let __rccl_bit_witness: #bit_type = #sentinel;
@@ -3965,7 +3958,6 @@ fn expand_device_radix_sort_pairs_buffer_order(
                         _,
                         _,
                         _,
-                        _,
                         #onesweep_items,
                         #union_bytes,
                     >(
@@ -3976,7 +3968,6 @@ fn expand_device_radix_sort_pairs_buffer_order(
                         &__rccl_to_ordered,
                         &__rccl_from_ordered,
                         &__rccl_digit,
-                        &__rccl_rank_digit,
                         __rccl_onesweep_launch,
                     )
                     .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
@@ -4006,7 +3997,6 @@ fn expand_device_radix_sort_pairs_buffer_order(
                                 _,
                                 _,
                                 _,
-                                _,
                                 #onesweep_items,
                                 #union_bytes,
                             >(
@@ -4027,7 +4017,6 @@ fn expand_device_radix_sort_pairs_buffer_order(
                                 __rccl_to_ordered,
                                 __rccl_from_ordered,
                                 __rccl_digit,
-                                __rccl_rank_digit,
                             )
                     };
                     __rccl_pass_result
@@ -4109,42 +4098,44 @@ fn expand_device_radix_sort_pairs_via_buffer(
                         );
                     }
                 }
-                let mut __rccl_buffers = ::rccl_cub::DoubleBuffer::paired(
-                    (&mut *__rccl_keys, &mut *__rccl_values),
-                    (&mut *__rccl_scratch_keys, &mut *__rccl_scratch_values),
-                )
-                .ok_or(::rccl_cub::DeviceAlgorithmError::LengthMismatch {
-                    role: "radix key/value buffers",
-                    expected: __rccl_len,
-                    actual: __rccl_len,
-                })?;
-                let __rccl_blocks = __rccl_len.div_ceil(#tile_items);
-                for (__rccl_role, __rccl_expected, __rccl_actual) in [
-                    ("radix bins", #max_passes * 256usize, __rccl_bins.len()),
-                    (
-                        "radix lookback",
-                        __rccl_blocks * 256usize,
-                        __rccl_lookback.len(),
-                    ),
-                    (
-                        "radix pass counters",
-                        #max_passes,
-                        __rccl_counters.len(),
-                    ),
-                ] {
-                    if __rccl_actual != __rccl_expected {
-                        return ::core::result::Result::Err(
-                            ::rccl_cub::DeviceAlgorithmError::LengthMismatch {
-                                role: __rccl_role,
-                                expected: __rccl_expected,
-                                actual: __rccl_actual,
-                            },
-                        );
+                let (__rccl_result, __rccl_current_is_first) = {
+                    let mut __rccl_buffers = ::rccl_cub::DoubleBuffer::paired(
+                        (&mut *__rccl_keys, &mut *__rccl_values),
+                        (&mut *__rccl_scratch_keys, &mut *__rccl_scratch_values),
+                    )
+                    .ok_or(::rccl_cub::DeviceAlgorithmError::LengthMismatch {
+                        role: "radix key/value buffers",
+                        expected: __rccl_len,
+                        actual: __rccl_len,
+                    })?;
+                    let __rccl_blocks = __rccl_len.div_ceil(#tile_items);
+                    for (__rccl_role, __rccl_expected, __rccl_actual) in [
+                        ("radix bins", #max_passes * 256usize, __rccl_bins.len()),
+                        (
+                            "radix lookback",
+                            __rccl_blocks * 256usize,
+                            __rccl_lookback.len(),
+                        ),
+                        (
+                            "radix pass counters",
+                            #max_passes,
+                            __rccl_counters.len(),
+                        ),
+                    ] {
+                        if __rccl_actual != __rccl_expected {
+                            return ::core::result::Result::Err(
+                                ::rccl_cub::DeviceAlgorithmError::LengthMismatch {
+                                    role: __rccl_role,
+                                    expected: __rccl_expected,
+                                    actual: __rccl_actual,
+                                },
+                            );
+                        }
                     }
-                }
-                let __rccl_result = #operation;
-                let __rccl_current_is_first = __rccl_buffers.current_is_first();
-                ::core::mem::drop(__rccl_buffers);
+                    let __rccl_result = #operation;
+                    let __rccl_current_is_first = __rccl_buffers.current_is_first();
+                    (__rccl_result, __rccl_current_is_first)
+                };
                 __rccl_result?;
                 if !__rccl_current_is_first {
                     ::core::mem::swap(__rccl_keys, __rccl_scratch_keys);
@@ -4461,6 +4452,7 @@ mod tests {
         let kernel_text = kernels.to_string();
         assert!(kernel_text.contains("transform_repeat_in_place"));
         assert!(kernel_text.contains("grid_stride_runs32"));
+        assert!(kernel_text.contains("allow (clippy :: too_many_arguments)"));
 
         let call: call::DeviceTransformRepeatInPlaceCall = syn::parse_quote! {
             module, stream, &mut output, repeated, |left, right| left + right
@@ -4540,9 +4532,10 @@ mod tests {
             "device_radix_sort_histogram :: < i32 , u32 , _ , _ , _ , 16usize , 4usize , >"
         ));
         assert!(operation.contains(
-            "prepare_device_radix_sort_onesweep_keys_for :: < i32 , u32 , _ , _ , _ , _ , _ , 21usize"
+            "prepare_device_radix_sort_onesweep_keys_for :: < i32 , u32 , _ , _ , _ , _ , 21usize"
         ));
-        assert!(operation.contains("let __rccl_rank_digit ="));
+        assert!(operation.contains("let __rccl_single_rank_digit ="));
+        assert!(!operation.contains("let __rccl_rank_digit ="));
         assert!(operation.contains("radix_rank_digit_u32"));
         assert!(!operation.contains("| __rccl_ordered"));
         assert!(operation.contains("LaunchConfig1D :: new (__rccl_passes as u32 , 256 , 0"));
@@ -4552,7 +4545,8 @@ mod tests {
         );
         assert_eq!(operation.matches("zero_radix_lookback").count(), 1);
         assert!(operation.contains("core :: mem :: swap (__rccl_keys , __rccl_scratch_keys)"));
-        assert!(operation.contains("core :: mem :: drop (__rccl_buffers)"));
+        assert!(!operation.contains("core :: mem :: drop (__rccl_buffers)"));
+        assert!(operation.contains("let (__rccl_result , __rccl_current_is_first) ="));
         assert!(operation.contains("while __rccl_pass < __rccl_passes"));
         assert!(operation.contains("let __rccl_bin_offset = __rccl_pass * 256usize"));
         assert!(
@@ -4670,7 +4664,7 @@ mod tests {
             .expect("the pinned 64-bit Policy800 graph must lower")
             .to_string();
         assert!(operation.contains(
-            "prepare_device_radix_sort_onesweep_keys_for :: < u64 , u64 , _ , _ , _ , _ , _ , 10usize"
+            "prepare_device_radix_sort_onesweep_keys_for :: < u64 , u64 , _ , _ , _ , _ , 10usize"
         ));
         assert!(operation.contains("let __rccl_blocks = __rccl_len . div_ceil (3840usize)"));
         assert!(operation.contains("if __rccl_len <= 2304usize"));
@@ -4712,12 +4706,13 @@ mod tests {
         assert!(operation.contains("prepare_device_radix_sort_histogram"));
         assert!(operation.contains("prepare_device_radix_sort_exclusive_sum"));
         assert!(operation.contains(
-            "prepare_device_radix_sort_onesweep_pairs_for :: < f32 , i32 , u32 , _ , _ , _ , _ , _ , 17usize , 26112usize"
+            "prepare_device_radix_sort_onesweep_pairs_for :: < f32 , i32 , u32 , _ , _ , _ , _ , 17usize , 26112usize"
         ));
         assert!(operation.contains("let __rccl_blocks = __rccl_len . div_ceil (6528usize)"));
         assert!(operation.contains("28160usize as u32"));
-        assert!(operation.contains("radix_float_digit_u32"));
+        assert!(operation.contains("radix_float_digit_masked_u32"));
         assert!(operation.contains("radix_float_rank_digit_u32"));
+        assert!(!operation.contains("let __rccl_rank_digit ="));
         assert!(!operation.contains("| __rccl_ordered"));
         assert_eq!(
             operation
@@ -4727,6 +4722,8 @@ mod tests {
         );
         assert!(operation.contains("DoubleBuffer :: paired"));
         assert!(operation.contains("current_and_alternate_mut"));
+        assert!(!operation.contains("core :: mem :: drop (__rccl_buffers)"));
+        assert!(operation.contains("let (__rccl_result , __rccl_current_is_first) ="));
         assert!(!operation.contains("device_merge_sort"));
         assert!(!operation.contains("DeviceBuffer :: zeroed"));
         assert!(!operation.contains("unsafe"));

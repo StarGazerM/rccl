@@ -70,7 +70,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let second_i16 = (0..6_346)
         .map(|index| (index * 2 + 1) as i16)
         .collect::<Vec<_>>();
-    let first_i16_values = (0..3_623).map(|index| index as i32).collect::<Vec<_>>();
+    let first_i16_values = (0..3_623).collect::<Vec<_>>();
     let second_i16_values = (0..6_346).map(|index| 10_000 + index).collect::<Vec<_>>();
     let first_i16_device = DeviceBuffer::from_host(&stream, &first_i16)?;
     let second_i16_device = DeviceBuffer::from_host(&stream, &second_i16)?;

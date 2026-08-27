@@ -95,7 +95,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .copied()
         .zip(values.iter().copied())
         .collect::<Vec<_>>();
-    descending_reference.sort_by(|left, right| right.0.cmp(&left.0));
+    descending_reference.sort_by_key(|entry| std::cmp::Reverse(entry.0));
     let mut descending_keys = DeviceBuffer::from_host(&stream, &keys)?;
     let mut descending_values = DeviceBuffer::from_host(&stream, &values)?;
     rccl_cub::device_radix_sort_pairs_descending!(::<u32, i32, sm_89>(
@@ -259,7 +259,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .zip(window_values.iter().copied())
             .collect::<Vec<_>>();
         if descending {
-            expected.sort_by(|left, right| (right.0 & 0x00ff_ffff).cmp(&(left.0 & 0x00ff_ffff)));
+            expected.sort_by_key(|entry| std::cmp::Reverse(entry.0 & 0x00ff_ffff));
         } else {
             expected.sort_by_key(|pair| pair.0 & 0x00ff_ffff);
         }

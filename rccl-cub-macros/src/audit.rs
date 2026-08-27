@@ -407,21 +407,28 @@ impl<'ast> Visit<'ast> for SafetyAudit {
             .segments
             .last()
             .map(|segment| segment.ident.to_string());
-        let allowed = name.is_some_and(|name| {
-            matches!(
-                name.as_str(),
-                "cfg"
-                    | "cuda_module"
-                    | "derive"
-                    | "doc"
-                    | "inline"
-                    | "kernel"
-                    | "launch_bounds"
-                    | "launch_contract"
-                    | "repr"
-                    | "test"
-            )
-        });
+        let exact_device_abi_lint = attribute.path().is_ident("allow")
+            && attribute.parse_args::<Path>().is_ok_and(|path| {
+                path.segments.len() == 2
+                    && path.segments[0].ident == "clippy"
+                    && path.segments[1].ident == "too_many_arguments"
+            });
+        let allowed = exact_device_abi_lint
+            || name.is_some_and(|name| {
+                matches!(
+                    name.as_str(),
+                    "cfg"
+                        | "cuda_module"
+                        | "derive"
+                        | "doc"
+                        | "inline"
+                        | "kernel"
+                        | "launch_bounds"
+                        | "launch_contract"
+                        | "repr"
+                        | "test"
+                )
+            });
         if !allowed {
             self.reject(
                 attribute,
@@ -589,6 +596,29 @@ mod tests {
             ::rccl_cub::__private::__device_kernels!(__test_kernels);
         })
         .expect("the audited Thrust-to-CUB macro edge must pass");
+    }
+
+    #[test]
+    fn only_the_device_abi_arity_lint_may_be_allowed() {
+        generated_rust(quote! {
+            #[allow(clippy::too_many_arguments)]
+            fn device_entry(a: u32, b: u32, c: u32, d: u32, e: u32, f: u32, g: u32, h: u32) {
+                let _ = (a, b, c, d, e, f, g, h);
+            }
+        })
+        .expect("the explicit CUDA entry ABI exception must pass");
+
+        let error = generated_rust(quote! {
+            #[allow(clippy::all)]
+            fn hidden_warning() {}
+        })
+        .expect_err("broad lint suppression must remain rejected");
+        assert!(
+            error
+                .into_compile_error()
+                .to_string()
+                .contains("audited built-in attributes")
+        );
     }
 
     #[test]
