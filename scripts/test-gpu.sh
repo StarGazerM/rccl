@@ -146,6 +146,8 @@ if ! rg -q '^pub fn warp_reduce\(' rccl-cub-macros/src/lib.rs \
   || ! rg -q '^pub fn __device_transform_repeat_in_place\(' rccl-cub-macros/src/lib.rs \
   || ! rg -q 'device_merge_keys' rccl-cub-macros/src/lib.rs \
   || ! rg -q 'device_radix_sort_keys' rccl-cub-macros/src/lib.rs \
+  || ! rg -q 'device_radix_sort_keys_buffer' rccl-cub-macros/src/lib.rs \
+  || ! rg -q 'device_radix_sort_pairs_buffer' rccl-cub-macros/src/lib.rs \
   || ! rg -q '^pub fn thrust_kernels\(' rccl-thrust-macros/src/lib.rs \
   || ! rg -q '^pub fn transform\(' rccl-thrust-macros/src/lib.rs \
   || ! rg -qF 'algorithm_macro!(sort' rccl-thrust-macros/src/lib.rs \
@@ -195,9 +197,9 @@ expected_rust_examples=(
   rccl-cub/examples/warp_reduce_benchmark.rs
   rccl-cub/examples/warp_reduce_catch2.rs
   rccl-cub/examples/warp_reduce_catch2_f32.rs
+  rccl-thrust/examples/comparison_sort.rs
   rccl-thrust/examples/constant_iterator.rs
   rccl-thrust/examples/constant_iterator_benchmark.rs
-  rccl-thrust/examples/comparison_sort.rs
   rccl-thrust/examples/merge.rs
   rccl-thrust/examples/ordering_benchmark.rs
   rccl-thrust/examples/sort.rs

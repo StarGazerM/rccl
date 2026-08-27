@@ -161,7 +161,7 @@ performance gate remains red until the upstream kernels are reproduced.
 | random engines/distributions | small copyable RNG state values with Rust methods; exact pinned sequences tested against Thrust | Thrust | missing |
 | memory construction/destruction and unique allocation | `MaybeUninit<T>`, RAII owners, `Drop`, and explicit stream-ordered destruction/release | memory + Thrust | partial; unique object/array helpers and nontrivial device construction remain |
 | Thrust memory resources and allocators | `DeviceAllocator` values/references plus existing concrete/adaptor resources | memory | strong partial coverage; public mapping and allocator propagation matrix remain |
-| CUB `Uninitialized`, `KeyValuePair`, `DoubleBuffer`, `FutureValue`, `NullType` | `MaybeUninit`, named key/value record, typed two-buffer selector, device scalar/future input, and `()`/enum absence markers | CUB | partial; handwritten `MaybeUninit` storage, `KeyValue`, and borrowed `DoubleBuffer` are public and tested, while future/device-scalar and absence forms remain |
+| CUB `Uninitialized`, `KeyValuePair`, `DoubleBuffer`, `FutureValue`, `NullType` | `MaybeUninit`, named key/value record, typed two-buffer selector, device scalar/future input, and `()`/enum absence markers | CUB | partial; handwritten `MaybeUninit` storage and `KeyValue` are public; borrowed `DoubleBuffer` is operational for primitive radix keys/pairs, uses affine split borrows, and represents pairs as one selector over a key/value tuple; future/device-scalar and absence forms remain |
 | CUB temporary-storage query/execute | checked `Layout` plus a borrow of caller-owned `DeviceBlock` whose recorded size/alignment satisfies it; collective shared storage stays explicit and typed | CUB macros + runtime | safe handwritten layout/storage protocol exists; macro-emitted operation formulas and public request forms are missing |
 | CUB chained policies and architecture traits | typed target rows owned only by `rccl-cub-macros`, then emitted as literal kernel operands | CUB macros | catalogued; no runtime or public policy language |
 | CUDA atomics, barriers, warp operations, shared memory, vector loads | reuse canonical `cuda-device` types and intrinsics | cuda-oxide backend | available in part; missing backend operations should be fixed upstream, not re-exported through RCCL paths |
@@ -202,7 +202,10 @@ already provide.
   headers. Support families are ordinary-library coverage rows, not compiler
   catalog entries.
 - `rccl-cub` exposes handwritten safe support values, WarpReduce, DeviceMerge,
-  DeviceMergeSort, and primitive integer/`f32`/`f64` DeviceRadixSort. The old pointer-heavy registry
+  DeviceMergeSort, and primitive integer/`f32`/`f64` DeviceRadixSort. Its
+  32/64-bit Policy800 radix path includes runtime bit windows and borrowed
+  key/pair DoubleBuffers; pair buffers have one structural selector rather
+  than synchronized C++ selector integers. The old pointer-heavy registry
   implementations were removed rather than hidden behind a runtime loader;
   the current ordering kernels remain performance-incomplete.
 - `rccl-thrust` exposes handwritten `cuda::Execution`, borrowing a stream,
@@ -287,7 +290,7 @@ not confuse them with an owning vector container.
 | Compaction | `remove`, `unique`, `partition` including copy, stable, by-key, and point/query forms | missing | scan + select/partition agents |
 | Replacement | `replace` and copy/predicate variants | missing | elementwise traversal |
 | Merge and sets | `merge`, `set_operations` including key/value forms | merge keys/pairs implemented for contiguous buffers; sets and general iterators missing; performance gate failing | general iterators + exact DeviceMerge kernel |
-| Sorting | `sort` including stable/key/value/query forms | primitive integer/`f32`/`f64` contiguous keys/pairs implemented with macro-visible TMP smart selection and signed-zero handling; half/bfloat/decomposer/bit-range/general iterator forms missing; performance gate failing | exact radix/merge-sort agents, offsets, decomposers, iterators |
+| Sorting | `sort` including stable/key/value/query forms | primitive integer/`f32`/`f64` contiguous keys/pairs implemented with macro-visible TMP smart selection and signed-zero handling; direct CUB 32/64-bit Policy800 bit-window/DoubleBuffer forms are implemented, while Thrust exposure, 8/16-bit keys, half/bfloat/decomposer/general iterator forms are missing; performance gate failing | exact radix/merge-sort agents, offsets, decomposers, iterators |
 
 This table covers exactly these 34 headers:
 
@@ -387,7 +390,7 @@ uniform_real_distribution.h       xor_combine_engine.h
 | Device queries/reduction | `device_find`, `device_reduce`, `device_scan`, `device_segmented_reduce`, `device_segmented_scan`, `device_adjacent_difference` | missing |
 | Device compaction | `device_select`, `device_partition`, `device_run_length_encode` | missing |
 | Device histogram | `device_histogram` | missing |
-| Device ordered | `device_merge`, `device_merge_sort`, `device_radix_sort`, `device_segmented_radix_sort`, `device_segmented_sort` | contiguous merge/merge-sort and primitive integer/`f32`/`f64` radix result semantics are partial and performance-incomplete; segmented families missing |
+| Device ordered | `device_merge`, `device_merge_sort`, `device_radix_sort`, `device_segmented_radix_sort`, `device_segmented_sort` | contiguous merge/merge-sort and primitive integer/`f32`/`f64` radix result semantics are partial and performance-incomplete; the 32/64-bit Policy800 borrowed-DoubleBuffer path supports runtime bit windows and zero-width selection preservation; pointer-output windows, range-specific storage query, small-key/other-architecture policies, and segmented families remain |
 | Device top-k | `device_topk`, `device_batched_topk` | missing |
 | CUB iterators | `arg_index_input_iterator`, `cache_modified_input_iterator`, `cache_modified_output_iterator`, `tex_obj_input_iterator` | missing; cache/texture semantics need cuda-oxide backend checks |
 

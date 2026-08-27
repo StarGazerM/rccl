@@ -15,10 +15,13 @@ pub use rccl_cub_macros::{
     cub_kernels, device_merge_keys, device_merge_keys_partition_count, device_merge_pairs,
     device_merge_pairs_partition_count, device_merge_sort_keys, device_merge_sort_keys_copy,
     device_merge_sort_pairs, device_merge_sort_pairs_copy, device_merge_sort_partition_count,
-    device_radix_sort_keys, device_radix_sort_keys_descending, device_radix_sort_pairs,
-    device_radix_sort_pairs_descending, device_radix_sort_pairs_workspace,
-    device_radix_sort_workspace, device_stable_merge_sort_keys, device_stable_merge_sort_keys_copy,
-    device_stable_merge_sort_pairs, warp_reduce, warp_reduce_items,
+    device_radix_sort_keys, device_radix_sort_keys_buffer,
+    device_radix_sort_keys_buffer_descending, device_radix_sort_keys_descending,
+    device_radix_sort_pairs, device_radix_sort_pairs_buffer,
+    device_radix_sort_pairs_buffer_descending, device_radix_sort_pairs_descending,
+    device_radix_sort_pairs_workspace, device_radix_sort_workspace, device_stable_merge_sort_keys,
+    device_stable_merge_sort_keys_copy, device_stable_merge_sort_pairs, warp_reduce,
+    warp_reduce_items,
 };
 
 /// Runtime extents for the typed buffers borrowed by a radix-sort operation.
@@ -83,6 +86,16 @@ pub enum DeviceAlgorithmError {
         expected: usize,
         actual: usize,
     },
+    WorkspaceTooSmall {
+        role: &'static str,
+        required: usize,
+        actual: usize,
+    },
+    InvalidBitRange {
+        begin: u32,
+        end: u32,
+        key_bits: u32,
+    },
     SizeOverflow,
     Memory(rccl_memory::MemoryError),
     Driver(cuda_core::DriverError),
@@ -100,6 +113,22 @@ impl core::fmt::Display for DeviceAlgorithmError {
                 formatter,
                 "{role} length {actual} does not match required length {expected}"
             ),
+            Self::WorkspaceTooSmall {
+                role,
+                required,
+                actual,
+            } => write!(
+                formatter,
+                "{role} length {actual} is smaller than required length {required}"
+            ),
+            Self::InvalidBitRange {
+                begin,
+                end,
+                key_bits,
+            } => write!(
+                formatter,
+                "radix bit range {begin}..{end} is outside 0..={key_bits} or reversed"
+            ),
             Self::SizeOverflow => formatter.write_str("combined device range length overflowed"),
             Self::Memory(error) => error.fmt(formatter),
             Self::Driver(error) => error.fmt(formatter),
@@ -114,7 +143,10 @@ impl std::error::Error for DeviceAlgorithmError {
             Self::Driver(error) => Some(error),
             Self::Memory(error) => Some(error),
             Self::Launch(error) => Some(error),
-            Self::LengthMismatch { .. } | Self::SizeOverflow => None,
+            Self::LengthMismatch { .. }
+            | Self::WorkspaceTooSmall { .. }
+            | Self::InvalidBitRange { .. }
+            | Self::SizeOverflow => None,
         }
     }
 }
@@ -315,7 +347,25 @@ impl<R: DeviceRange> DoubleBuffer<R> {
             len,
         })
     }
+}
 
+impl<K: DeviceRange, V: DeviceRange> DoubleBuffer<(K, V)> {
+    /// Construct one selector over paired key/value ranges.
+    ///
+    /// A single selector makes key/value synchronization structural rather
+    /// than a convention between independently mutable selector integers.
+    pub fn paired(first: (K, V), second: (K, V)) -> Option<Self> {
+        let len = first.0.len();
+        (first.1.len() == len && second.0.len() == len && second.1.len() == len).then_some(Self {
+            first,
+            second,
+            current_is_first: true,
+            len,
+        })
+    }
+}
+
+impl<R> DoubleBuffer<R> {
     pub fn len(&self) -> usize {
         self.len
     }
@@ -345,6 +395,20 @@ impl<R: DeviceRange> DoubleBuffer<R> {
             &mut self.second
         } else {
             &mut self.first
+        }
+    }
+
+    /// Borrow the selected input and alternate output together.
+    ///
+    /// The two references are disjoint because they come from different
+    /// fields. This is the Rust replacement for CUB's pointer/selector pair:
+    /// generated algorithms never recover either address or manufacture an
+    /// alias.
+    pub fn current_and_alternate_mut(&mut self) -> (&mut R, &mut R) {
+        if self.current_is_first {
+            (&mut self.first, &mut self.second)
+        } else {
+            (&mut self.second, &mut self.first)
         }
     }
 
@@ -439,6 +503,7 @@ mod tests {
 
     struct TestRange<T> {
         len: usize,
+        tag: usize,
         item: PhantomData<T>,
     }
 
@@ -446,6 +511,7 @@ mod tests {
         fn new(len: usize) -> Self {
             Self {
                 len,
+                tag: 0,
                 item: PhantomData,
             }
         }
@@ -490,6 +556,49 @@ mod tests {
         assert_eq!(DeviceRange::len(buffers.alternate_mut()), 3);
         let _parts = buffers.into_parts();
         assert!(DoubleBuffer::new(TestRange::<i32>::new(1), TestRange::new(2)).is_none());
+    }
+
+    #[test]
+    fn double_buffer_split_borrow_follows_the_selected_side() {
+        let mut buffers = DoubleBuffer::new(TestRange::<u32>::new(1), TestRange::new(1))
+            .expect("equal ranges must construct");
+        let (current, alternate) = buffers.current_and_alternate_mut();
+        current.tag = 3;
+        alternate.tag = 4;
+        assert_eq!(buffers.current().tag, 3);
+
+        buffers.swap();
+        let (current, alternate) = buffers.current_and_alternate_mut();
+        current.tag = 5;
+        alternate.tag = 6;
+        assert_eq!(buffers.current().tag, 5);
+        let (first, second) = buffers.into_parts();
+        assert_eq!((first.tag, second.tag), (6, 5));
+    }
+
+    #[test]
+    fn paired_double_buffer_rejects_every_shape_mismatch() {
+        assert!(
+            DoubleBuffer::paired(
+                (TestRange::<u32>::new(3), TestRange::<i32>::new(3)),
+                (TestRange::<u32>::new(3), TestRange::<i32>::new(3)),
+            )
+            .is_some()
+        );
+        assert!(
+            DoubleBuffer::paired(
+                (TestRange::<u32>::new(3), TestRange::<i32>::new(2)),
+                (TestRange::<u32>::new(3), TestRange::<i32>::new(3)),
+            )
+            .is_none()
+        );
+        assert!(
+            DoubleBuffer::paired(
+                (TestRange::<u32>::new(3), TestRange::<i32>::new(3)),
+                (TestRange::<u32>::new(2), TestRange::<i32>::new(3)),
+            )
+            .is_none()
+        );
     }
 
     #[test]

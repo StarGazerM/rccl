@@ -167,6 +167,113 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     assert_eq!(float_values.to_host_vec(&stream)?, [0, 1, 2, 3, 4, 5]);
 
+    // Pinned `example_device_radix_sort.cu` presents its public pair API with
+    // two DoubleBuffers. Rust uses one DoubleBuffer over the key/value tuple,
+    // so the selector cannot become desynchronized between the two ranges.
+    let mut example_keys = DeviceBuffer::from_host(&stream, &float_input)?;
+    let mut example_values = DeviceBuffer::from_host(&stream, &float_input_values)?;
+    let mut example_alt_keys = DeviceBuffer::<f32>::zeroed(&stream, float_input.len())?;
+    let mut example_alt_values = DeviceBuffer::<i32>::zeroed(&stream, float_input.len())?;
+    let mut example_buffers = rccl_cub::DoubleBuffer::paired(
+        (&mut example_keys, &mut example_values),
+        (&mut example_alt_keys, &mut example_alt_values),
+    )
+    .expect("all four pair ranges must have the same extent");
+    rccl_cub::device_radix_sort_pairs_buffer!(::<f32, i32, sm_89>(
+        &exec,
+        &mut example_buffers,
+        0u32..32u32,
+        &mut float_bins,
+        &mut float_lookback,
+        &mut float_counters,
+    ))?;
+    let (example_output_keys, example_output_values) = example_buffers.current();
+    assert_eq!(
+        example_output_keys
+            .to_host_vec(&stream)?
+            .iter()
+            .map(|key| key.to_bits())
+            .collect::<Vec<_>>(),
+        [
+            f32::NEG_INFINITY.to_bits(),
+            (-3.5_f32).to_bits(),
+            (-0.0_f32).to_bits(),
+            0.0_f32.to_bits(),
+            1.25_f32.to_bits(),
+            f32::INFINITY.to_bits(),
+        ]
+    );
+    assert_eq!(
+        example_output_values.to_host_vec(&stream)?,
+        [0, 1, 2, 3, 4, 5]
+    );
+
+    // Catch2's bit-window grid includes u32 0..24. Three passes force the
+    // result into the alternate tuple. Duplicate 24-bit fields plus monotonic
+    // payloads make both wrong selection and unstable scatter fail exactly.
+    let pair_window = 0u32..24u32;
+    let window_keys = (0..10_003u32)
+        .map(|index| ((index & 0xff) << 24) | (index.wrapping_mul(97) & 0x3ff))
+        .collect::<Vec<_>>();
+    let window_values = (0..window_keys.len())
+        .map(|index| index as i32)
+        .collect::<Vec<_>>();
+    let window_workspace = rccl_cub::device_radix_sort_pairs_workspace!(::<u32, i32, sm_89>(
+        window_keys.len()
+    ));
+    let mut window_bins = DeviceBuffer::<u64>::zeroed(&stream, window_workspace.bins)?;
+    let mut window_lookback = DeviceBuffer::<i32>::zeroed(&stream, window_workspace.lookback)?;
+    let mut window_counters = DeviceBuffer::<i32>::zeroed(&stream, window_workspace.counters)?;
+    for descending in [false, true] {
+        let mut first_keys = DeviceBuffer::from_host(&stream, &window_keys)?;
+        let mut first_values = DeviceBuffer::from_host(&stream, &window_values)?;
+        let mut second_keys = DeviceBuffer::<u32>::zeroed(&stream, window_keys.len())?;
+        let mut second_values = DeviceBuffer::<i32>::zeroed(&stream, window_values.len())?;
+        let mut buffers = rccl_cub::DoubleBuffer::paired(
+            (&mut first_keys, &mut first_values),
+            (&mut second_keys, &mut second_values),
+        )
+        .expect("all four pair ranges must have the same extent");
+        if descending {
+            rccl_cub::device_radix_sort_pairs_buffer_descending!(::<u32, i32, sm_89>(
+                &exec,
+                &mut buffers,
+                pair_window.clone(),
+                &mut window_bins,
+                &mut window_lookback,
+                &mut window_counters,
+            ))?;
+        } else {
+            rccl_cub::device_radix_sort_pairs_buffer!(::<u32, i32, sm_89>(
+                &exec,
+                &mut buffers,
+                pair_window.clone(),
+                &mut window_bins,
+                &mut window_lookback,
+                &mut window_counters,
+            ))?;
+        }
+        let mut expected = window_keys
+            .iter()
+            .copied()
+            .zip(window_values.iter().copied())
+            .collect::<Vec<_>>();
+        if descending {
+            expected.sort_by(|left, right| (right.0 & 0x00ff_ffff).cmp(&(left.0 & 0x00ff_ffff)));
+        } else {
+            expected.sort_by_key(|pair| pair.0 & 0x00ff_ffff);
+        }
+        let (output_keys, output_values) = buffers.current();
+        assert_eq!(
+            output_keys.to_host_vec(&stream)?,
+            expected.iter().map(|pair| pair.0).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            output_values.to_host_vec(&stream)?,
+            expected.iter().map(|pair| pair.1).collect::<Vec<_>>()
+        );
+    }
+
     println!("pinned CUB DeviceRadixSort pair cases: PASS");
     Ok(())
 }

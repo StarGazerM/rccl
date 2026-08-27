@@ -1,9 +1,9 @@
 use proc_macro2::TokenStream;
 use syn::File;
 use syn::{
-    Attribute, Error, Expr, ExprCast, ExprMethodCall, ExprRawAddr, ExprUnsafe, ItemForeignMod,
-    ItemImpl, ItemStatic, ItemTrait, ItemUnion, Macro, Path, Signature, StaticMutability,
-    TypeFnPtr, TypePtr,
+    Attribute, Error, Expr, ExprCast, ExprLit, ExprMethodCall, ExprRawAddr, ExprUnsafe,
+    ItemForeignMod, ItemImpl, ItemStatic, ItemTrait, ItemUnion, Lit, Macro, Path, Signature,
+    StaticMutability, TypeFnPtr, TypePtr,
     visit::{self, Visit},
 };
 
@@ -104,7 +104,42 @@ impl<'ast> Visit<'ast> for SafetyAudit {
                 "generated RCCL code may not use raw-pointer or unsafe-interior plumbing",
             );
         }
+        if path.segments.iter().any(|segment| {
+            matches!(
+                segment.ident.to_string().as_str(),
+                "nvrtc"
+                    | "compile_ptx"
+                    | "load_ptx"
+                    | "load_cubin"
+                    | "materialized_cubin"
+                    | "ptxas"
+                    | "cuModuleLoadData"
+                    | "cuModuleLoadDataEx"
+            )
+        }) {
+            self.reject(
+                path,
+                "generated RCCL code may not compile, embed, or load PTX/cubin artifacts; emit pure Rust for cuda-oxide",
+            );
+        }
         visit::visit_path(self, path);
+    }
+
+    fn visit_expr_lit(&mut self, expression: &'ast ExprLit) {
+        if let Lit::Str(literal) = &expression.lit {
+            let value = literal.value();
+            if value.contains(".ptx")
+                || value.contains(".cubin")
+                || value.contains(".version ")
+                || value.contains(".target sm_")
+            {
+                self.reject(
+                    expression,
+                    "generated RCCL code may not contain CUDA assembly or materialized PTX/cubin paths; emit pure Rust for cuda-oxide",
+                );
+            }
+        }
+        visit::visit_expr_lit(self, expression);
     }
 
     fn visit_type_ptr(&mut self, pointer: &'ast TypePtr) {
@@ -173,13 +208,23 @@ impl<'ast> Visit<'ast> for SafetyAudit {
     }
 
     fn visit_expr_method_call(&mut self, expression: &'ast ExprMethodCall) {
+        let method = expression.method.to_string();
         if matches!(
-            expression.method.to_string().as_str(),
+            method.as_str(),
             "as_ptr" | "as_mut_ptr" | "as_ptr_range" | "cast_mut" | "cast_const"
         ) {
             self.reject(
                 expression,
                 "generated RCCL code may not extract raw pointers from safe values",
+            );
+        }
+        if matches!(
+            method.as_str(),
+            "compile_ptx" | "load_ptx" | "load_cubin" | "materialized_cubin" | "ptxas"
+        ) {
+            self.reject(
+                expression,
+                "generated RCCL code may not compile, embed, or load PTX/cubin artifacts; emit pure Rust for cuda-oxide",
             );
         }
         visit::visit_expr_method_call(self, expression);
@@ -295,5 +340,16 @@ mod tests {
         assert!(message.contains("unsafe blocks"));
         assert!(message.contains("extract raw pointers"));
         assert!(message.contains("opaque nested macro"));
+    }
+
+    #[test]
+    fn generated_cuda_artifact_and_jit_paths_are_rejected() {
+        let error = generated_expression(quote! {{
+            loader.load_cubin("kernel.cubin")
+        }})
+        .expect_err("Thrust expansion must emit Rust, never a CUDA artifact route");
+        let message = error.into_compile_error().to_string();
+        assert!(message.contains("load PTX/cubin"));
+        assert!(message.contains("materialized PTX/cubin paths"));
     }
 }

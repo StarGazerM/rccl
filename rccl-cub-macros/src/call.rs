@@ -497,6 +497,18 @@ typed_operation_call!(
 );
 
 typed_operation_call!(
+    DeviceRadixSortKeysBufferCall,
+    "device_radix_sort_keys_buffer!",
+    [key_type, target],
+    execution,
+    buffers,
+    bit_range,
+    bins,
+    lookback,
+    counters,
+);
+
+typed_operation_call!(
     DeviceRadixSortWorkspaceCall,
     "device_radix_sort_workspace!",
     [key_type, target],
@@ -519,6 +531,18 @@ typed_operation_call!(
     values,
     scratch_keys,
     scratch_values,
+    bins,
+    lookback,
+    counters,
+);
+
+typed_operation_call!(
+    DeviceRadixSortPairsBufferCall,
+    "device_radix_sort_pairs_buffer!",
+    [key_type, value_type, target],
+    execution,
+    buffers,
+    bit_range,
     bins,
     lookback,
     counters,

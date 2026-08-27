@@ -6,6 +6,17 @@ use std::error::Error;
 
 rccl_cub::cub_kernels!();
 
+fn u32_field(value: u32, bits: core::ops::Range<u32>) -> u32 {
+    let width = bits.end - bits.start;
+    if width == u32::BITS {
+        value
+    } else if width == 0 {
+        0
+    } else {
+        (value >> bits.start) & ((1u32 << width) - 1)
+    }
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let context = CudaContext::new(0)?;
     let stream = context.default_stream();
@@ -425,6 +436,116 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         assert_eq!(uniform_keys.to_host_vec(&stream)?, uniform_input);
     }
+
+    // Pinned CUB Catch2 enumerates begin/end bit windows and separately tests
+    // its DoubleBuffer overload. Combine those contracts here: 0..24 is one
+    // of the pinned u32 windows and takes three passes, so reading the original
+    // allocation would fail even when its stale contents happen to be sorted.
+    let window = 0u32..24u32;
+    let window_input = (0..10_003u32)
+        .map(|index| {
+            let low = index.wrapping_mul(2_654_435_761) & 0x00ff_ffff;
+            let high = (index & 0xff) << 24;
+            high | low
+        })
+        .collect::<Vec<_>>();
+    let window_workspace =
+        rccl_cub::device_radix_sort_workspace!(::<u32, sm_89>(window_input.len()));
+    let mut window_bins = DeviceBuffer::<u64>::zeroed(&stream, window_workspace.bins)?;
+    let mut window_lookback = DeviceBuffer::<i32>::zeroed(&stream, window_workspace.lookback)?;
+    let mut window_counters = DeviceBuffer::<i32>::zeroed(&stream, window_workspace.counters)?;
+    for descending in [false, true] {
+        let mut first = DeviceBuffer::from_host(&stream, &window_input)?;
+        let mut second = DeviceBuffer::<u32>::zeroed(&stream, window_input.len())?;
+        let mut buffers = rccl_cub::DoubleBuffer::new(&mut first, &mut second)
+            .expect("equal device ranges must construct");
+        if descending {
+            rccl_cub::device_radix_sort_keys_buffer_descending!(::<u32, sm_89>(
+                &exec,
+                &mut buffers,
+                window.clone(),
+                &mut window_bins,
+                &mut window_lookback,
+                &mut window_counters,
+            ))?;
+        } else {
+            rccl_cub::device_radix_sort_keys_buffer!(::<u32, sm_89>(
+                &exec,
+                &mut buffers,
+                window.clone(),
+                &mut window_bins,
+                &mut window_lookback,
+                &mut window_counters,
+            ))?;
+        }
+        let mut expected_window = window_input.clone();
+        if descending {
+            expected_window.sort_by(|left, right| {
+                u32_field(*right, window.clone()).cmp(&u32_field(*left, window.clone()))
+            });
+        } else {
+            expected_window.sort_by_key(|value| u32_field(*value, window.clone()));
+        }
+        assert_eq!(buffers.current().to_host_vec(&stream)?, expected_window);
+    }
+
+    // CUB's overwrite-okay DoubleBuffer path returns without changing its
+    // selection for an empty bit window. Distinct buffer contents make a
+    // spurious swap observable; zero-sized workspace proves no hidden launch
+    // or workspace touch is used to make this case pass.
+    let no_op_input = [9u32, 1, 7, 3];
+    let mut no_op_first = DeviceBuffer::from_host(&stream, &no_op_input)?;
+    let mut no_op_second = DeviceBuffer::from_host(&stream, &[99u32, 99, 99, 99])?;
+    let mut no_op_buffers = rccl_cub::DoubleBuffer::new(&mut no_op_first, &mut no_op_second)
+        .expect("equal device ranges must construct");
+    let mut no_bins = DeviceBuffer::<u64>::zeroed(&stream, 0)?;
+    let mut no_lookback = DeviceBuffer::<i32>::zeroed(&stream, 0)?;
+    let mut no_counters = DeviceBuffer::<i32>::zeroed(&stream, 0)?;
+    rccl_cub::device_radix_sort_keys_buffer!(::<u32, sm_89>(
+        &exec,
+        &mut no_op_buffers,
+        12u32..12u32,
+        &mut no_bins,
+        &mut no_lookback,
+        &mut no_counters,
+    ))?;
+    assert_eq!(no_op_buffers.current().to_host_vec(&stream)?, no_op_input);
+
+    let undersized = rccl_cub::device_radix_sort_keys_buffer!(::<u32, sm_89>(
+        &exec,
+        &mut no_op_buffers,
+        0u32..8u32,
+        &mut no_bins,
+        &mut no_lookback,
+        &mut no_counters,
+    ));
+    assert!(matches!(
+        undersized,
+        Err(rccl_cub::DeviceAlgorithmError::WorkspaceTooSmall {
+            role: "radix bins",
+            required: 256,
+            actual: 0
+        })
+    ));
+    assert_eq!(no_op_buffers.current().to_host_vec(&stream)?, no_op_input);
+
+    let invalid = rccl_cub::device_radix_sort_keys_buffer!(::<u32, sm_89>(
+        &exec,
+        &mut no_op_buffers,
+        25u32..17u32,
+        &mut no_bins,
+        &mut no_lookback,
+        &mut no_counters,
+    ));
+    assert!(matches!(
+        invalid,
+        Err(rccl_cub::DeviceAlgorithmError::InvalidBitRange {
+            begin: 25,
+            end: 17,
+            key_bits: 32
+        })
+    ));
+    assert_eq!(no_op_buffers.current().to_host_vec(&stream)?, no_op_input);
 
     println!("pinned CUB DeviceRadixSort keys cases: PASS");
     Ok(())
