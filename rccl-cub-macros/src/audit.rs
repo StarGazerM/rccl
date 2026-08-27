@@ -31,9 +31,9 @@ pub(crate) fn generated_expression(tokens: TokenStream) -> syn::Result<TokenStre
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Algorithm {
-    DeviceMerge,
-    DeviceMergeSort,
-    DeviceRadixSort,
+    Merge,
+    MergeSort,
+    RadixSort,
 }
 
 /// Audit an operation lowering after ordinary Rust safety checks.
@@ -102,7 +102,7 @@ impl ImplementationAudit {
 
     fn require_topology(&mut self, expression: &Expr) {
         match self.algorithm {
-            Algorithm::DeviceMerge => {
+            Algorithm::Merge => {
                 if !self.saw_merge_partition {
                     self.reject(
                         expression,
@@ -116,7 +116,7 @@ impl ImplementationAudit {
                     );
                 }
             }
-            Algorithm::DeviceMergeSort => {
+            Algorithm::MergeSort => {
                 if !self.saw_merge_sort_block_sort {
                     self.reject(
                         expression,
@@ -136,7 +136,7 @@ impl ImplementationAudit {
                     );
                 }
             }
-            Algorithm::DeviceRadixSort => {
+            Algorithm::RadixSort => {
                 if !self.saw_radix_init {
                     self.reject(
                         expression,
@@ -451,7 +451,7 @@ impl<'ast> Visit<'ast> for ImplementationAudit {
         }
 
         match self.algorithm {
-            Algorithm::DeviceMerge => {
+            Algorithm::Merge => {
                 self.saw_merge_partition |= names
                     .iter()
                     .any(|name| name == "device_partition_merge_path");
@@ -468,7 +468,7 @@ impl<'ast> Visit<'ast> for ImplementationAudit {
                     );
                 }
             }
-            Algorithm::DeviceMergeSort => {
+            Algorithm::MergeSort => {
                 for name in &names {
                     self.observe_merge_sort_name(name);
                 }
@@ -486,7 +486,7 @@ impl<'ast> Visit<'ast> for ImplementationAudit {
                     );
                 }
             }
-            Algorithm::DeviceRadixSort => {
+            Algorithm::RadixSort => {
                 for name in &names {
                     self.observe_radix_name(name);
                 }
@@ -512,7 +512,7 @@ impl<'ast> Visit<'ast> for ImplementationAudit {
             );
         }
         let method = expression.method.to_string();
-        if self.algorithm == Algorithm::DeviceMerge {
+        if self.algorithm == Algorithm::Merge {
             self.saw_merge_partition |= method == "device_partition_merge_path";
             self.saw_merge_agent |= matches!(
                 method.as_str(),
@@ -526,11 +526,11 @@ impl<'ast> Visit<'ast> for ImplementationAudit {
             }
         }
         match self.algorithm {
-            Algorithm::DeviceMerge if method == "stable_left_partition" => self.reject(
+            Algorithm::Merge if method == "stable_left_partition" => self.reject(
                 expression,
                 "DeviceMerge may not substitute one global MergePath search per output thread; port the partition kernel and block merge agent",
             ),
-            Algorithm::DeviceMergeSort => {
+            Algorithm::MergeSort => {
                 self.observe_merge_sort_name(&method);
                 if matches!(
                     method.as_str(),
@@ -544,7 +544,7 @@ impl<'ast> Visit<'ast> for ImplementationAudit {
                     );
                 }
             }
-            Algorithm::DeviceRadixSort
+            Algorithm::RadixSort
                 if method.starts_with("device_merge_sort") || method == "merge_sort_source" =>
             {
                 self.reject(
@@ -552,7 +552,7 @@ impl<'ast> Visit<'ast> for ImplementationAudit {
                     "DeviceRadixSort may not lower a radix digit to comparison merge sort; port the selected CUB radix agent graph",
                 );
             }
-            Algorithm::DeviceRadixSort => self.observe_radix_name(&method),
+            Algorithm::RadixSort => self.observe_radix_name(&method),
             _ => {}
         }
         visit::visit_expr_method_call(self, expression);
@@ -612,7 +612,7 @@ mod tests {
     #[test]
     fn runtime_policy_and_operation_owned_workspace_are_rejected() {
         let error = generated_algorithm_expression(
-            Algorithm::DeviceMerge,
+            Algorithm::Merge,
             quote! {{
                 let target = execution.stream().context().compute_capability()?;
                 let scratch = cuda_core::DeviceBuffer::zeroed(execution.stream(), count)?;
@@ -648,7 +648,7 @@ mod tests {
     #[test]
     fn comparison_sort_cannot_mask_a_radix_agent_gap() {
         let error = generated_algorithm_expression(
-            Algorithm::DeviceRadixSort,
+            Algorithm::RadixSort,
             quote! {{
                 module.device_merge_sort_keys_pass(stream, input, output)
             }},
@@ -665,7 +665,7 @@ mod tests {
     #[test]
     fn global_per_thread_merge_partition_is_rejected() {
         let error = generated_algorithm_expression(
-            Algorithm::DeviceMerge,
+            Algorithm::Merge,
             quote! {{
                 stable_left_partition(first, second, output_index)
             }},

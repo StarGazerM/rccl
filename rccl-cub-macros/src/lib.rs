@@ -439,7 +439,7 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
         #[doc(hidden)]
         mod #module {
             use ::rccl_cub::__private::cuda_device::{
-                DisjointSlice, LinearTiles, kernel, launch_bounds, launch_contract, thread,
+                DisjointSlice, LinearTiles, Uniform, kernel, launch_bounds, launch_contract, thread,
             };
 
             #[inline(always)]
@@ -657,14 +657,11 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                     USE_LOAD_TO_SHARED_VALUES,
                     SHARED_BYTES,
                 >(
-                    first_keys,
-                    first_values,
-                    second_keys,
-                    second_values,
+                    (first_keys, first_values),
+                    (second_keys, second_values),
                     partitions,
                     order,
-                    output_keys,
-                    output_values,
+                    (output_keys, output_values),
                     launch_context,
                 );
             }
@@ -1065,13 +1062,11 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                 F: Fn(&K, &K) -> ::core::cmp::Ordering + Copy,
             {
                 ::rccl_cub::__private::merge_sort_merge_pairs_agent::<K, V, F, 256, ITEMS, SHARED_BYTES>(
-                    source_keys,
-                    source_values,
+                    (source_keys, source_values),
                     partitions,
                     target_merged_tiles,
                     order,
-                    output_keys,
-                    output_values,
+                    (output_keys, output_values),
                     launch_context,
                 );
             }
@@ -1106,13 +1101,11 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                 F: Fn(&K, &K) -> ::core::cmp::Ordering + Copy,
             {
                 ::rccl_cub::__private::merge_sort_merge_pairs_agent::<K, V, F, 512, ITEMS, SHARED_BYTES>(
-                    source_keys,
-                    source_values,
+                    (source_keys, source_values),
                     partitions,
                     target_merged_tiles,
                     order,
-                    output_keys,
-                    output_values,
+                    (output_keys, output_values),
                     launch_context,
                 );
             }
@@ -1146,6 +1139,7 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
             pub fn device_radix_sort_histogram<
                 K,
                 B,
+                DefaultKey,
                 ToOrdered,
                 Digit,
                 const ITEMS: usize,
@@ -1154,24 +1148,26 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                 keys: &[K],
                 begin_bit: u32,
                 end_bit: u32,
-                sentinel: B,
+                default_key: DefaultKey,
                 to_ordered: ToOrdered,
                 digit: Digit,
                 bins: DisjointSlice<u64>,
             ) where
                 K: Copy,
                 B: Copy,
+                DefaultKey: Fn() -> B + Copy,
                 ToOrdered: Fn(K) -> B + Copy,
                 Digit: Fn(B, u32, u32) -> u32 + Copy,
             {
                 ::rccl_cub::__private::radix_histogram_agent::<
                     K,
                     B,
+                    DefaultKey,
                     ToOrdered,
                     Digit,
                     ITEMS,
                     MAX_PASSES,
-                >(keys, begin_bit, end_bit, sentinel, to_ordered, digit, bins);
+                >(keys, begin_bit, end_bit, default_key, to_ordered, digit, bins);
             }
 
             #[kernel(launch_context = launch_context)]
@@ -1202,6 +1198,7 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
             pub fn device_radix_sort_onesweep_keys<
                 K,
                 B,
+                DefaultKey,
                 ToOrdered,
                 FromOrdered,
                 Digit,
@@ -1214,11 +1211,11 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                 bins: &[u64],
                 input: &[K],
                 output: DisjointSlice<K>,
-                bin_offset: usize,
-                counter_offset: usize,
-                current_bit: u32,
-                num_bits: u32,
-                sentinel: B,
+                bin_offset: Uniform<usize>,
+                counter_offset: Uniform<usize>,
+                current_bit: Uniform<u32>,
+                num_bits: Uniform<u32>,
+                default_key: DefaultKey,
                 to_ordered: ToOrdered,
                 from_ordered: FromOrdered,
                 mut digit: Digit,
@@ -1226,6 +1223,7 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
             ) where
                 K: Copy,
                 B: Copy,
+                DefaultKey: Fn() -> B + Copy,
                 ToOrdered: Fn(K) -> B + Copy,
                 FromOrdered: Fn(B) -> K + Copy,
                 Digit: FnMut(B, u32, u32) -> u32 + Copy,
@@ -1234,6 +1232,7 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                 ::rccl_cub::__private::radix_onesweep_keys_agent::<
                     K,
                     B,
+                    DefaultKey,
                     ToOrdered,
                     FromOrdered,
                     Digit,
@@ -1242,20 +1241,15 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                     ITEMS,
                     UNION_BYTES,
                 >(
-                    lookback,
-                    counter,
-                    bins,
-                    input,
-                    output,
-                    bin_offset,
-                    counter_offset,
-                    current_bit,
-                    num_bits,
-                    sentinel,
-                    to_ordered,
-                    from_ordered,
-                    digit,
-                    rank_digit,
+                    (lookback, counter, bins),
+                    (input, output),
+                    (
+                        bin_offset.get(),
+                        counter_offset.get(),
+                        current_bit.get(),
+                        num_bits.get(),
+                    ),
+                    (default_key, to_ordered, from_ordered, digit, rank_digit),
                 );
             }
 
@@ -1272,6 +1266,7 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                 K,
                 V,
                 B,
+                DefaultKey,
                 ToOrdered,
                 FromOrdered,
                 Digit,
@@ -1286,11 +1281,11 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                 input_values: &[V],
                 output_keys: DisjointSlice<K>,
                 output_values: DisjointSlice<V>,
-                bin_offset: usize,
-                counter_offset: usize,
-                current_bit: u32,
-                num_bits: u32,
-                sentinel: B,
+                bin_offset: Uniform<usize>,
+                counter_offset: Uniform<usize>,
+                current_bit: Uniform<u32>,
+                num_bits: Uniform<u32>,
+                default_key: DefaultKey,
                 to_ordered: ToOrdered,
                 from_ordered: FromOrdered,
                 mut digit: Digit,
@@ -1299,6 +1294,7 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                 K: Copy,
                 V: Copy,
                 B: Copy,
+                DefaultKey: Fn() -> B + Copy,
                 ToOrdered: Fn(K) -> B + Copy,
                 FromOrdered: Fn(B) -> K + Copy,
                 Digit: FnMut(B, u32, u32) -> u32 + Copy,
@@ -1308,6 +1304,7 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                     K,
                     V,
                     B,
+                    DefaultKey,
                     ToOrdered,
                     FromOrdered,
                     Digit,
@@ -1316,22 +1313,15 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                     ITEMS,
                     UNION_BYTES,
                 >(
-                    lookback,
-                    counter,
-                    bins,
-                    input_keys,
-                    input_values,
-                    output_keys,
-                    output_values,
-                    bin_offset,
-                    counter_offset,
-                    current_bit,
-                    num_bits,
-                    sentinel,
-                    to_ordered,
-                    from_ordered,
-                    digit,
-                    rank_digit,
+                    (lookback, counter, bins),
+                    (input_keys, input_values, output_keys, output_values),
+                    (
+                        bin_offset.get(),
+                        counter_offset.get(),
+                        current_bit.get(),
+                        num_bits.get(),
+                    ),
+                    (default_key, to_ordered, from_ordered, digit, rank_digit),
                 );
             }
 
@@ -1556,12 +1546,11 @@ fn merge_load_to_shared_policy(
     if target.capability >= 90 {
         let selected = match value_size {
             None => key_size != 8,
-            Some(value_size) => {
-                !(key_size == 8 && value_size == 8)
-                    && (key_size != 16
-                        || (key_size == 16 && value_size == 1)
-                        || (key_size == 16 && value_size == 8))
-            }
+            Some(value_size) => match key_size {
+                8 => value_size != 8,
+                16 => matches!(value_size, 1 | 8),
+                _ => true,
+            },
         };
         return (selected, value_size.is_some() && selected);
     }
@@ -1810,7 +1799,7 @@ fn expand_device_merge_keys(
     let output = call.output;
     let order = call.order;
     audit::generated_algorithm_expression(
-        audit::Algorithm::DeviceMerge,
+        audit::Algorithm::Merge,
         quote! {{
             let __rccl_execution = #execution;
             let __rccl_first = #first;
@@ -1935,7 +1924,7 @@ fn expand_device_merge_pairs(
     let output_values = call.output_values;
     let order = call.order;
     audit::generated_algorithm_expression(
-        audit::Algorithm::DeviceMerge,
+        audit::Algorithm::Merge,
         quote! {{
             let __rccl_execution = #execution;
             let __rccl_first_keys = #first_keys;
@@ -2067,7 +2056,7 @@ fn expand_device_merge_sort_keys(
     let partitions = call.partitions;
     let order = call.order;
     audit::generated_algorithm_expression(
-        audit::Algorithm::DeviceMergeSort,
+        audit::Algorithm::MergeSort,
         quote! {{
             let __rccl_execution = #execution;
             let __rccl_keys = #keys;
@@ -2288,7 +2277,7 @@ fn expand_device_merge_sort_keys_copy(
     let output = call.output;
     let order = call.order;
     audit::generated_algorithm_expression(
-        audit::Algorithm::DeviceMergeSort,
+        audit::Algorithm::MergeSort,
         quote! {{
             let __rccl_execution = #execution;
             let __rccl_input = #input;
@@ -2704,7 +2693,7 @@ fn expand_device_merge_sort_pairs_operation(
     };
 
     audit::generated_algorithm_expression(
-        audit::Algorithm::DeviceMergeSort,
+        audit::Algorithm::MergeSort,
         quote! {{
             let __rccl_execution = #execution;
             #mode_bindings
@@ -2986,7 +2975,7 @@ fn expand_device_radix_sort_keys_order(
     let shared_bytes = union_bytes + 256usize * core::mem::size_of::<u64>();
     let portion_size = ((1usize << 28) - 1) / tile_items * tile_items;
     audit::generated_algorithm_expression(
-        audit::Algorithm::DeviceRadixSort,
+        audit::Algorithm::RadixSort,
         quote! {{
             let __rccl_execution = #execution;
             let __rccl_keys = #keys;
@@ -3066,6 +3055,7 @@ fn expand_device_radix_sort_keys_order(
                     )
                     .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
 
+                let __rccl_default_key = || #sentinel;
                 let __rccl_to_ordered = #to_ordered;
                 let __rccl_from_ordered = #from_ordered;
                 let __rccl_digit = #digit;
@@ -3085,11 +3075,13 @@ fn expand_device_radix_sort_keys_order(
                         #bit_type,
                         _,
                         _,
+                        _,
                         #histogram_items,
                         #passes,
                     >(
                         &__rccl_key_witness,
                         &__rccl_bit_witness,
+                        &__rccl_default_key,
                         &__rccl_to_ordered,
                         &__rccl_digit,
                         __rccl_histogram_probe_launch,
@@ -3117,11 +3109,13 @@ fn expand_device_radix_sort_keys_order(
                         #bit_type,
                         _,
                         _,
+                        _,
                         #histogram_items,
                         #passes,
                     >(
                         &__rccl_key_witness,
                         &__rccl_bit_witness,
+                        &__rccl_default_key,
                         &__rccl_to_ordered,
                         &__rccl_digit,
                         __rccl_histogram_launch,
@@ -3134,6 +3128,7 @@ fn expand_device_radix_sort_keys_order(
                         #bit_type,
                         _,
                         _,
+                        _,
                         #histogram_items,
                         #passes,
                     >(
@@ -3142,7 +3137,7 @@ fn expand_device_radix_sort_keys_order(
                         &*__rccl_keys,
                         0u32,
                         #end_bit,
-                        #sentinel,
+                        __rccl_default_key,
                         __rccl_to_ordered,
                         __rccl_digit,
                         &mut *__rccl_bins,
@@ -3183,11 +3178,13 @@ fn expand_device_radix_sort_keys_order(
                         _,
                         _,
                         _,
+                        _,
                         #onesweep_items,
                         #union_bytes,
                     >(
                         &__rccl_key_witness,
                         &__rccl_bit_witness,
+                        &__rccl_default_key,
                         &__rccl_to_ordered,
                         &__rccl_from_ordered,
                         &__rccl_digit,
@@ -3217,6 +3214,7 @@ fn expand_device_radix_sort_keys_order(
                                 _,
                                 _,
                                 _,
+                                _,
                                 #onesweep_items,
                                 #union_bytes,
                             >(
@@ -3231,7 +3229,7 @@ fn expand_device_radix_sort_keys_order(
                                 __rccl_pass,
                                 __rccl_current_bit,
                                 8u32,
-                                #sentinel,
+                                __rccl_default_key,
                                 __rccl_to_ordered,
                                 __rccl_from_ordered,
                                 __rccl_digit,
@@ -3243,6 +3241,7 @@ fn expand_device_radix_sort_keys_order(
                             .device_radix_sort_onesweep_keys::<
                                 #key_type,
                                 #bit_type,
+                                _,
                                 _,
                                 _,
                                 _,
@@ -3261,7 +3260,7 @@ fn expand_device_radix_sort_keys_order(
                                 __rccl_pass,
                                 __rccl_current_bit,
                                 8u32,
-                                #sentinel,
+                                __rccl_default_key,
                                 __rccl_to_ordered,
                                 __rccl_from_ordered,
                                 __rccl_digit,
@@ -3333,7 +3332,7 @@ fn expand_device_radix_sort_pairs_order(
     let shared_bytes = union_bytes + 256usize * core::mem::size_of::<u64>();
     let portion_size = ((1usize << 28) - 1) / tile_items * tile_items;
     audit::generated_algorithm_expression(
-        audit::Algorithm::DeviceRadixSort,
+        audit::Algorithm::RadixSort,
         quote! {{
             let __rccl_execution = #execution;
             let __rccl_keys = #keys;
@@ -3421,6 +3420,7 @@ fn expand_device_radix_sort_pairs_order(
                     )
                     .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
 
+                let __rccl_default_key = || #sentinel;
                 let __rccl_to_ordered = #to_ordered;
                 let __rccl_from_ordered = #from_ordered;
                 let __rccl_digit = #digit;
@@ -3441,11 +3441,13 @@ fn expand_device_radix_sort_pairs_order(
                         #bit_type,
                         _,
                         _,
+                        _,
                         #histogram_items,
                         #passes,
                     >(
                         &__rccl_key_witness,
                         &__rccl_bit_witness,
+                        &__rccl_default_key,
                         &__rccl_to_ordered,
                         &__rccl_digit,
                         __rccl_histogram_probe_launch,
@@ -3473,11 +3475,13 @@ fn expand_device_radix_sort_pairs_order(
                         #bit_type,
                         _,
                         _,
+                        _,
                         #histogram_items,
                         #passes,
                     >(
                         &__rccl_key_witness,
                         &__rccl_bit_witness,
+                        &__rccl_default_key,
                         &__rccl_to_ordered,
                         &__rccl_digit,
                         __rccl_histogram_launch,
@@ -3490,6 +3494,7 @@ fn expand_device_radix_sort_pairs_order(
                         #bit_type,
                         _,
                         _,
+                        _,
                         #histogram_items,
                         #passes,
                     >(
@@ -3498,7 +3503,7 @@ fn expand_device_radix_sort_pairs_order(
                         &*__rccl_keys,
                         0u32,
                         #end_bit,
-                        #sentinel,
+                        __rccl_default_key,
                         __rccl_to_ordered,
                         __rccl_digit,
                         &mut *__rccl_bins,
@@ -3540,12 +3545,14 @@ fn expand_device_radix_sort_pairs_order(
                         _,
                         _,
                         _,
+                        _,
                         #onesweep_items,
                         #union_bytes,
                     >(
                         &__rccl_key_witness,
                         &__rccl_value_witness,
                         &__rccl_bit_witness,
+                        &__rccl_default_key,
                         &__rccl_to_ordered,
                         &__rccl_from_ordered,
                         &__rccl_digit,
@@ -3572,6 +3579,7 @@ fn expand_device_radix_sort_pairs_order(
                                 _,
                                 _,
                                 _,
+                                _,
                                 #onesweep_items,
                                 #union_bytes,
                             >(
@@ -3588,7 +3596,7 @@ fn expand_device_radix_sort_pairs_order(
                                 __rccl_pass,
                                 __rccl_current_bit,
                                 8u32,
-                                #sentinel,
+                                __rccl_default_key,
                                 __rccl_to_ordered,
                                 __rccl_from_ordered,
                                 __rccl_digit,
@@ -3601,6 +3609,7 @@ fn expand_device_radix_sort_pairs_order(
                                 #key_type,
                                 #value_type,
                                 #bit_type,
+                                _,
                                 _,
                                 _,
                                 _,
@@ -3621,7 +3630,7 @@ fn expand_device_radix_sort_pairs_order(
                                 __rccl_pass,
                                 __rccl_current_bit,
                                 8u32,
-                                #sentinel,
+                                __rccl_default_key,
                                 __rccl_to_ordered,
                                 __rccl_from_ordered,
                                 __rccl_digit,
@@ -3956,6 +3965,32 @@ mod tests {
     }
 
     #[test]
+    fn radix_default_key_is_macro_specialization_not_runtime_data() {
+        let kernels = expand_device_kernels(syn::parse_quote!(__test_kernels))
+            .expect("CUB must generate the radix kernels")
+            .to_string();
+        assert!(kernels.contains("DefaultKey : Fn () -> B + Copy"));
+        assert!(kernels.contains("default_key : DefaultKey"));
+        assert!(!kernels.contains("sentinel : Uniform < B >"));
+
+        let operation = expand_device_radix_sort_keys(syn::parse_quote! {
+            ::<i32, sm_89>(
+                &exec,
+                &mut keys,
+                &mut scratch_keys,
+                &mut bins,
+                &mut lookback,
+                &mut counters
+            )
+        })
+        .expect("the macro must specialize the default key")
+        .to_string();
+        assert!(operation.contains("let __rccl_default_key = ||"));
+        assert!(operation.contains("& __rccl_default_key"));
+        assert!(!operation.contains("sentinel"));
+    }
+
+    #[test]
     fn radix_keys_emit_the_exact_policy800_onesweep_graph() {
         let call: call::DeviceRadixSortKeysCall = syn::parse_quote! {
             ::<i32, sm_89>(
@@ -3975,15 +4010,13 @@ mod tests {
         assert!(operation.contains("prepare_device_radix_sort_exclusive_sum"));
         assert!(operation.contains("prepare_device_radix_sort_onesweep_keys"));
         assert!(operation.contains(
-            "prepare_device_radix_sort_histogram_for :: < i32 , u32 , _ , _ , 16usize , 4usize , >"
+            "prepare_device_radix_sort_histogram_for :: < i32 , u32 , _ , _ , _ , 16usize , 4usize , >"
         ));
-        assert!(
-            operation.contains(
-                "device_radix_sort_histogram :: < i32 , u32 , _ , _ , 16usize , 4usize , >"
-            )
-        );
         assert!(operation.contains(
-            "prepare_device_radix_sort_onesweep_keys_for :: < i32 , u32 , _ , _ , _ , _ , 21usize"
+            "device_radix_sort_histogram :: < i32 , u32 , _ , _ , _ , 16usize , 4usize , >"
+        ));
+        assert!(operation.contains(
+            "prepare_device_radix_sort_onesweep_keys_for :: < i32 , u32 , _ , _ , _ , _ , _ , 21usize"
         ));
         assert!(operation.contains("let __rccl_rank_digit ="));
         assert!(operation.contains("rotate_right (__rccl_bit)"));
@@ -4031,7 +4064,7 @@ mod tests {
             .expect("the pinned 64-bit Policy800 graph must lower")
             .to_string();
         assert!(operation.contains(
-            "prepare_device_radix_sort_onesweep_keys_for :: < u64 , u64 , _ , _ , _ , _ , 10usize"
+            "prepare_device_radix_sort_onesweep_keys_for :: < u64 , u64 , _ , _ , _ , _ , _ , 10usize"
         ));
         assert!(operation.contains("let __rccl_blocks = __rccl_len . div_ceil (3840usize)"));
         assert!(operation.contains("while __rccl_pass < 8usize"));
@@ -4069,7 +4102,7 @@ mod tests {
         assert!(operation.contains("prepare_device_radix_sort_histogram"));
         assert!(operation.contains("prepare_device_radix_sort_exclusive_sum"));
         assert!(operation.contains(
-            "prepare_device_radix_sort_onesweep_pairs_for :: < f32 , i32 , u32 , _ , _ , _ , _ , 17usize , 26112usize"
+            "prepare_device_radix_sort_onesweep_pairs_for :: < f32 , i32 , u32 , _ , _ , _ , _ , _ , 17usize , 26112usize"
         ));
         assert!(operation.contains("let __rccl_blocks = __rccl_len . div_ceil (6528usize)"));
         assert!(operation.contains("28160usize as u32"));

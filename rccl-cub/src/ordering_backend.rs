@@ -270,7 +270,12 @@ pub fn merge_keys_agent<
     if items_in_tile == tile_items {
         let output = WarpStripedBlockWrite::<K, THREADS, ITEMS>::new(output, launch, tile_items);
         merge_keys_tile::<K, F, THREADS, ITEMS, K_SIZE, USE_LOAD_TO_SHARED, SHARED_BYTES, true>(
-            first, second, partitions, order, tile_index, tile_base, tile_items, output,
+            first,
+            second,
+            partitions,
+            order,
+            (tile_index, tile_base, tile_items),
+            output,
         );
     } else {
         let output = WarpStripedBlockWrite::<K, THREADS, ITEMS>::new(output, launch, items_in_tile);
@@ -279,9 +284,7 @@ pub fn merge_keys_agent<
             second,
             partitions,
             order,
-            tile_index,
-            tile_base,
-            items_in_tile,
+            (tile_index, tile_base, items_in_tile),
             output,
         );
     }
@@ -303,14 +306,13 @@ fn merge_keys_tile<
     second: &[K],
     partitions: &[usize],
     order: F,
-    tile_index: usize,
-    tile_base: usize,
-    items_in_tile: usize,
+    tile_position: (usize, usize, usize),
     mut output: WarpStripedBlockWrite<'_, K, THREADS, ITEMS>,
 ) where
     K: Copy,
     F: Fn(&K, &K) -> core::cmp::Ordering + Copy,
 {
+    let (tile_index, tile_base, items_in_tile) = tile_position;
     let thread_index = thread::threadIdx_x();
     let tile_items = THREADS * ITEMS;
     let total = first.len() + second.len();
@@ -487,20 +489,23 @@ pub fn merge_pairs_agent<
     const USE_LOAD_TO_SHARED_VALUES: bool,
     const SHARED_BYTES: usize,
 >(
-    first_keys: &[K],
-    first_values: &[V],
-    second_keys: &[K],
-    second_values: &[V],
+    first: (&[K], &[V]),
+    second: (&[K], &[V]),
     partitions: &[usize],
     order: F,
-    output_keys: DisjointSlice<K, LinearTiles<ITEMS>>,
-    output_values: DisjointSlice<V, LinearTiles<ITEMS>>,
+    output: (
+        DisjointSlice<K, LinearTiles<ITEMS>>,
+        DisjointSlice<V, LinearTiles<ITEMS>>,
+    ),
     launch: OneDimensionalLaunch<'_>,
 ) where
     K: Copy,
     V: Copy,
     F: Fn(&K, &K) -> core::cmp::Ordering + Copy,
 {
+    let (first_keys, first_values) = first;
+    let (second_keys, second_values) = second;
+    let (output_keys, output_values) = output;
     let tile_index = thread::blockIdx_x() as usize;
     let tile_items = THREADS * ITEMS;
     let tile_base = tile_index * tile_items;
@@ -522,17 +527,12 @@ pub fn merge_pairs_agent<
             SHARED_BYTES,
             true,
         >(
-            first_keys,
-            first_values,
-            second_keys,
-            second_values,
+            (first_keys, first_values),
+            (second_keys, second_values),
             partitions,
             order,
-            tile_index,
-            tile_base,
-            tile_items,
-            output_keys,
-            output_values,
+            (tile_index, tile_base, tile_items),
+            (output_keys, output_values),
             tile,
         );
     } else {
@@ -551,17 +551,12 @@ pub fn merge_pairs_agent<
             SHARED_BYTES,
             false,
         >(
-            first_keys,
-            first_values,
-            second_keys,
-            second_values,
+            (first_keys, first_values),
+            (second_keys, second_values),
             partitions,
             order,
-            tile_index,
-            tile_base,
-            items_in_tile,
-            output_keys,
-            output_values,
+            (tile_index, tile_base, items_in_tile),
+            (output_keys, output_values),
             tile,
         );
     }
@@ -1318,9 +1313,7 @@ where
             if left + 1 < ITEMS && (left & 1) == (phase & 1) {
                 let right = left + 1;
                 if ordered_before(order, &local[right], &local[left]) {
-                    let temporary = local[left];
-                    local[left] = local[right];
-                    local[right] = temporary;
+                    local.swap(left, right);
                 }
             }
         });
@@ -1781,19 +1774,22 @@ pub fn merge_sort_merge_pairs_agent<
     const ITEMS: usize,
     const SHARED_BYTES: usize,
 >(
-    source_keys: &[K],
-    source_values: &[V],
+    source: (&[K], &[V]),
     partitions: &[usize],
     target_merged_tiles: usize,
     order: F,
-    output_keys: DisjointSlice<K, LinearTiles<ITEMS>>,
-    output_values: DisjointSlice<V, LinearTiles<ITEMS>>,
+    output: (
+        DisjointSlice<K, LinearTiles<ITEMS>>,
+        DisjointSlice<V, LinearTiles<ITEMS>>,
+    ),
     launch: OneDimensionalLaunch<'_>,
 ) where
     K: Copy,
     V: Copy,
     F: Fn(&K, &K) -> core::cmp::Ordering + Copy,
 {
+    let (source_keys, source_values) = source;
+    let (output_keys, output_values) = output;
     let tile_index = thread::blockIdx_x() as usize;
     let tile_items = THREADS * ITEMS;
     let tile_base = tile_index * tile_items;
@@ -1804,15 +1800,12 @@ pub fn merge_sort_merge_pairs_agent<
         let output_values =
             WarpStripedBlockWrite::<V, THREADS, ITEMS>::new(output_values, launch, tile_items);
         merge_sort_merge_pairs_tile::<K, V, F, THREADS, ITEMS, SHARED_BYTES, true>(
-            source_keys,
-            source_values,
+            (source_keys, source_values),
             partitions,
             target_merged_tiles,
             order,
-            tile_index,
-            tile_items,
-            output_keys,
-            output_values,
+            (tile_index, tile_items),
+            (output_keys, output_values),
         );
     } else {
         let output_keys =
@@ -1820,15 +1813,12 @@ pub fn merge_sort_merge_pairs_agent<
         let output_values =
             WarpStripedBlockWrite::<V, THREADS, ITEMS>::new(output_values, launch, items_in_tile);
         merge_sort_merge_pairs_tile::<K, V, F, THREADS, ITEMS, SHARED_BYTES, false>(
-            source_keys,
-            source_values,
+            (source_keys, source_values),
             partitions,
             target_merged_tiles,
             order,
-            tile_index,
-            items_in_tile,
-            output_keys,
-            output_values,
+            (tile_index, items_in_tile),
+            (output_keys, output_values),
         );
     }
 }
@@ -1844,20 +1834,23 @@ fn merge_sort_merge_pairs_tile<
     const SHARED_BYTES: usize,
     const FULL: bool,
 >(
-    source_keys: &[K],
-    source_values: &[V],
+    source: (&[K], &[V]),
     partitions: &[usize],
     target_merged_tiles: usize,
     order: F,
-    tile_index: usize,
-    items_in_tile: usize,
-    mut output_keys: WarpStripedBlockWrite<'_, K, THREADS, ITEMS>,
-    mut output_values: WarpStripedBlockWrite<'_, V, THREADS, ITEMS>,
+    tile_position: (usize, usize),
+    output: (
+        WarpStripedBlockWrite<'_, K, THREADS, ITEMS>,
+        WarpStripedBlockWrite<'_, V, THREADS, ITEMS>,
+    ),
 ) where
     K: Copy,
     V: Copy,
     F: Fn(&K, &K) -> core::cmp::Ordering + Copy,
 {
+    let (source_keys, source_values) = source;
+    let (tile_index, items_in_tile) = tile_position;
+    let (mut output_keys, mut output_values) = output;
     let thread_index = thread::threadIdx_x();
     let tile_items = THREADS * ITEMS;
     let partition_begin = partitions[tile_index];
@@ -2032,23 +2025,25 @@ fn merge_pairs_tile<
     const SHARED_BYTES: usize,
     const FULL: bool,
 >(
-    first_keys: &[K],
-    first_values: &[V],
-    second_keys: &[K],
-    second_values: &[V],
+    first: (&[K], &[V]),
+    second: (&[K], &[V]),
     partitions: &[usize],
     order: F,
-    tile_index: usize,
-    tile_base: usize,
-    items_in_tile: usize,
-    output_keys: DisjointSlice<K, LinearTiles<ITEMS>>,
-    output_values: DisjointSlice<V, LinearTiles<ITEMS>>,
+    tile_position: (usize, usize, usize),
+    output: (
+        DisjointSlice<K, LinearTiles<ITEMS>>,
+        DisjointSlice<V, LinearTiles<ITEMS>>,
+    ),
     tile: WarpStripedBlockTile<THREADS, ITEMS>,
 ) where
     K: Copy,
     V: Copy,
     F: Fn(&K, &K) -> core::cmp::Ordering + Copy,
 {
+    let (first_keys, first_values) = first;
+    let (second_keys, second_values) = second;
+    let (tile_index, tile_base, items_in_tile) = tile_position;
+    let (output_keys, output_values) = output;
     let thread_index = thread::threadIdx_x();
     let tile_items = THREADS * ITEMS;
     let total = first_keys.len() + second_keys.len();
@@ -2356,17 +2351,26 @@ pub fn radix_init_bins_and_counters_agent(
 /// retaining CUB's striped loads, per-block shared histogram, and device-wide
 /// atomic accumulation.
 #[inline(always)]
-pub fn radix_histogram_agent<K, B, ToOrdered, Digit, const ITEMS: usize, const MAX_PASSES: usize>(
+pub fn radix_histogram_agent<
+    K,
+    B,
+    DefaultKey,
+    ToOrdered,
+    Digit,
+    const ITEMS: usize,
+    const MAX_PASSES: usize,
+>(
     keys: &[K],
     begin_bit: u32,
     end_bit: u32,
-    sentinel: B,
+    default_key: DefaultKey,
     to_ordered: ToOrdered,
     digit: Digit,
     bins: DisjointSlice<u64>,
 ) where
     K: Copy,
     B: Copy,
+    DefaultKey: Fn() -> B + Copy,
     ToOrdered: Fn(K) -> B + Copy,
     Digit: Fn(B, u32, u32) -> u32 + Copy,
 {
@@ -2379,6 +2383,7 @@ pub fn radix_histogram_agent<K, B, ToOrdered, Digit, const ITEMS: usize, const M
     let mut shared = shared_memory.region::<u32>(0, MAX_PASSES * RADIX_DIGITS);
     let mut bins = DeviceRegion::new(bins);
     let num_passes = (end_bit - begin_bit).div_ceil(8) as usize;
+    let sentinel = default_key();
 
     for bin in (thread_index..RADIX_DIGITS).step_by(block_threads) {
         let mut pass = 0usize;
@@ -2549,9 +2554,9 @@ fn warp_exclusive_sum_i32(value: i32, lane: u32) -> (i32, i32) {
 fn radix_match_any_8(label: u32) -> u32 {
     macro_rules! matching_lanes_for_bit {
         ($bit:expr) => {{
-            let polarity = ((label << (31 - $bit)) as i32 >> 31) as u32;
-            let set_lanes = warp::ballot_sync(u32::MAX, polarity != 0);
-            set_lanes ^ !polarity
+            let bit_is_set = label & (1u32 << $bit) != 0;
+            let set_lanes = warp::ballot_sync(u32::MAX, bit_is_set);
+            if bit_is_set { set_lanes } else { !set_lanes }
         }};
     }
     // CUB assigns the first ballot result to `retval`, then intersects the
@@ -2656,6 +2661,7 @@ fn radix_lookback_global(
 pub fn radix_onesweep_keys_agent<
     K,
     B,
+    DefaultKey,
     ToOrdered,
     FromOrdered,
     Digit,
@@ -2664,28 +2670,23 @@ pub fn radix_onesweep_keys_agent<
     const ITEMS: usize,
     const UNION_BYTES: usize,
 >(
-    lookback: DisjointSlice<i32>,
-    counter: DisjointSlice<i32>,
-    bins: &[u64],
-    input: &[K],
-    output: DisjointSlice<K>,
-    bin_offset: usize,
-    counter_offset: usize,
-    current_bit: u32,
-    num_bits: u32,
-    sentinel: B,
-    to_ordered: ToOrdered,
-    from_ordered: FromOrdered,
-    mut digit: Digit,
-    mut rank_digit: RankDigit,
+    storage: (DisjointSlice<i32>, DisjointSlice<i32>, &[u64]),
+    buffers: (&[K], DisjointSlice<K>),
+    pass: (usize, usize, u32, u32),
+    transforms: (DefaultKey, ToOrdered, FromOrdered, Digit, RankDigit),
 ) where
     K: Copy,
     B: Copy,
+    DefaultKey: Fn() -> B + Copy,
     ToOrdered: Fn(K) -> B + Copy,
     FromOrdered: Fn(B) -> K + Copy,
     Digit: FnMut(B, u32, u32) -> u32 + Copy,
     RankDigit: FnMut(B, u32, u32) -> u32 + Copy,
 {
+    let (lookback, counter, bins) = storage;
+    let (input, output) = buffers;
+    let (bin_offset, counter_offset, current_bit, num_bits) = pass;
+    let (default_key, to_ordered, from_ordered, mut digit, mut rank_digit) = transforms;
     const RADIX_DIGITS: usize = 256;
     let thread_index = thread::threadIdx_x();
     let lane = thread_index & 31;
@@ -2713,6 +2714,7 @@ pub fn radix_onesweep_keys_agent<
     let mut lookback = DeviceRegion::new(lookback);
     let mut counter = DeviceRegion::new(counter);
     let mut output = DeviceRegion::new(output);
+    let sentinel = default_key();
     // The pass offset is uniform for the launch. Prove its complete 256-bin
     // band once instead of retaining a bounds check at each callback read.
     let Some(pass_bins) = bins.get(bin_offset..bin_offset + RADIX_DIGITS) else {
@@ -2951,6 +2953,7 @@ pub fn radix_onesweep_pairs_agent<
     K,
     V,
     B,
+    DefaultKey,
     ToOrdered,
     FromOrdered,
     Digit,
@@ -2959,31 +2962,24 @@ pub fn radix_onesweep_pairs_agent<
     const ITEMS: usize,
     const UNION_BYTES: usize,
 >(
-    lookback: DisjointSlice<i32>,
-    counter: DisjointSlice<i32>,
-    bins: &[u64],
-    input_keys: &[K],
-    input_values: &[V],
-    output_keys: DisjointSlice<K>,
-    output_values: DisjointSlice<V>,
-    bin_offset: usize,
-    counter_offset: usize,
-    current_bit: u32,
-    num_bits: u32,
-    sentinel: B,
-    to_ordered: ToOrdered,
-    from_ordered: FromOrdered,
-    mut digit: Digit,
-    mut rank_digit: RankDigit,
+    storage: (DisjointSlice<i32>, DisjointSlice<i32>, &[u64]),
+    buffers: (&[K], &[V], DisjointSlice<K>, DisjointSlice<V>),
+    pass: (usize, usize, u32, u32),
+    transforms: (DefaultKey, ToOrdered, FromOrdered, Digit, RankDigit),
 ) where
     K: Copy,
     V: Copy,
     B: Copy,
+    DefaultKey: Fn() -> B + Copy,
     ToOrdered: Fn(K) -> B + Copy,
     FromOrdered: Fn(B) -> K + Copy,
     Digit: FnMut(B, u32, u32) -> u32 + Copy,
     RankDigit: FnMut(B, u32, u32) -> u32 + Copy,
 {
+    let (lookback, counter, bins) = storage;
+    let (input_keys, input_values, output_keys, output_values) = buffers;
+    let (bin_offset, counter_offset, current_bit, num_bits) = pass;
+    let (default_key, to_ordered, from_ordered, mut digit, mut rank_digit) = transforms;
     const RADIX_DIGITS: usize = 256;
     let thread_index = thread::threadIdx_x();
     let lane = thread_index & 31;
@@ -3011,6 +3007,7 @@ pub fn radix_onesweep_pairs_agent<
     let mut counter = DeviceRegion::new(counter);
     let mut output_keys = DeviceRegion::new(output_keys);
     let mut output_values = DeviceRegion::new(output_values);
+    let sentinel = default_key();
     let Some(pass_bins) = bins.get(bin_offset..bin_offset + RADIX_DIGITS) else {
         return;
     };
@@ -3319,6 +3316,9 @@ mod tests {
             .expect("Policy800 block scan must follow match-any");
         let match_any = &source[begin..end];
         assert!(match_any.contains("warp::ballot_sync"));
+        assert!(match_any.contains("label & (1u32 << $bit) != 0"));
+        assert!(match_any.contains("if bit_is_set"));
+        assert!(match_any.contains("!set_lanes"));
         assert!(match_any.contains("let mut peers = matching_lanes_for_bit!(0u32)"));
         assert_eq!(
             match_any
@@ -3328,6 +3328,9 @@ mod tests {
         );
         for forbidden in [
             ["warp::", "match_any_sync"].concat(),
+            "polarity".to_owned(),
+            "as i32 >> 31".to_owned(),
+            "wrapping_sub(1u32)".to_owned(),
             ["p", "tx_", "a", "sm", "!"].concat(),
             ["a", "sm", "!"].concat(),
         ] {

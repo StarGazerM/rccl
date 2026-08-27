@@ -109,7 +109,7 @@ impl BlockSharedMemory {
     pub fn region<T>(&self, byte_offset: usize, len: usize) -> SharedRegion<T> {
         let element_bytes = size_of::<T>();
         if element_bytes == 0
-            || byte_offset % align_of::<T>() != 0
+            || !byte_offset.is_multiple_of(align_of::<T>())
             || byte_offset > self.bytes
             || len > (self.bytes - byte_offset) / element_bytes
         {
@@ -279,6 +279,11 @@ impl<T> SharedRegion<T> {
     }
 
     #[inline(always)]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    #[inline(always)]
     pub fn read(&self, index: usize) -> T
     where
         T: Copy,
@@ -404,6 +409,11 @@ impl<'a, T> DeviceRegion<'a, T> {
     }
 
     #[inline(always)]
+    pub fn is_empty(&self) -> bool {
+        self.storage.is_empty()
+    }
+
+    #[inline(always)]
     fn checked(&mut self, index: usize) -> *mut T {
         debug_assert!(index < self.storage.len());
         // SAFETY: release collectives derive the index from their reviewed
@@ -478,7 +488,7 @@ const fn warp_striped_local<const THREADS: usize, const ITEMS: usize>(
 ) -> Option<usize> {
     if THREADS == 0
         || ITEMS == 0
-        || THREADS % 32 != 0
+        || !THREADS.is_multiple_of(32)
         || thread_index as usize >= THREADS
         || item >= ITEMS
     {
@@ -504,7 +514,7 @@ fn block_tile<const THREADS: usize, const ITEMS: usize>(
 ) -> (usize, u32) {
     if THREADS == 0
         || ITEMS == 0
-        || THREADS % 32 != 0
+        || !THREADS.is_multiple_of(32)
         || THREADS > usize::MAX / ITEMS
         || thread::blockDim_x() as usize != THREADS
     {
@@ -583,12 +593,8 @@ impl<const THREADS: usize, const ITEMS: usize> WarpStripedBlockTile<THREADS, ITE
         second_count: i32,
     ) -> BlockedConcatenatedInput<'input, U, THREADS, ITEMS, FULL> {
         BlockedConcatenatedInput::new(
-            first,
-            first_begin,
-            first_count,
-            second,
-            second_begin,
-            second_count,
+            (first, first_begin, first_count),
+            (second, second_begin, second_count),
             self.thread_index,
             self.valid_items,
         )
@@ -611,15 +617,13 @@ impl<'a, T: Copy, const THREADS: usize, const ITEMS: usize, const FULL: bool>
 {
     #[inline(always)]
     fn new(
-        first: &'a [T],
-        first_begin: usize,
-        first_count: i32,
-        second: &'a [T],
-        second_begin: usize,
-        second_count: i32,
+        first: (&'a [T], usize, i32),
+        second: (&'a [T], usize, i32),
         thread_index: u32,
         valid_items: usize,
     ) -> Self {
+        let (first, first_begin, first_count) = first;
+        let (second, second_begin, second_count) = second;
         if first_count < 0 || second_count < 0 {
             cuda_device::debug::trap();
         }

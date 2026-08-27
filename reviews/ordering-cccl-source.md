@@ -69,10 +69,11 @@ used to hide that missing TMP input.
 - `benchmarks/ordering-reference.cu` and the Rust benchmarks use complete
   device-resident validation. The strict 1.001 performance ratio is still
   failing, so result parity cannot be misreported as CCCL performance parity.
-  After repairing the equal-input oracle described below, the run measured
-  4.241231x for direct merge, 5.535783x for merge sort, 30.605403x for radix,
-  2.918400x for Thrust merge, and 9.363180x for Thrust sort. The gate exited
-  nonzero with `implementation gap is not masked`.
+  After the exact agent rewrites, eight of ten ordering paths pass that band.
+  Key-only radix remains at 1.008787x and Thrust sort at 1.019154x; the gate
+  still exits nonzero with `implementation gap is not masked`. The complete
+  ratios and emitted-code diagnosis are recorded in
+  `reviews/current-implemented-performance.md`.
 
 ## Injected faults
 
@@ -96,10 +97,11 @@ the aggregate gate is evaluated.
 
 ## Remaining upstream product
 
-This review is partial. Exact CUB block/agent scheduling and performance,
-caller-provided temporary storage, resource-owned allocation, double buffers,
-bit windows, half/bfloat, decomposers/custom records, NaN matrices, 32/64-bit
-offset selection, general iterator/adaptor products, segmented sorting, and
-all architecture rows remain. Thrust permutation/zip/fancy-iterator ordering
-and device-callable sequential forms also remain. None is represented by a
-passing stub or CPU fallback.
+This review is partial. The implemented SM89 primitive agent topology is now
+source-mapped, but exact key-only radix emitted performance, caller-provided
+temporary storage, resource-owned allocation, double buffers, bit windows,
+half/bfloat, decomposers/custom records, NaN matrices, 32/64-bit offset
+selection, general iterator/adaptor products, segmented sorting, and all other
+architecture rows remain. Thrust permutation/zip/fancy-iterator ordering and
+device-callable sequential forms also remain. None is represented by a passing
+stub or CPU fallback.
