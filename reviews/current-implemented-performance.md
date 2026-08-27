@@ -24,26 +24,37 @@ the public borrowed `DoubleBuffer` forms directly.
 
 | Implemented ordering intersection | RCCL / CCCL | Gate result |
 |---|---:|---:|
-| CUB DeviceMerge keys | 1.000000 | pass |
-| CUB DeviceMerge pairs | 1.009718 | **fail** |
-| CUB DeviceMergeSort keys | 1.006900 | **fail** |
-| CUB DeviceMergeSort pairs | 0.998203 | pass |
-| CUB DeviceRadixSort keys | 1.001751 | **fail** |
-| CUB DeviceRadixSort pairs | 1.017864 | **fail** |
-| CUB DeviceRadixSort keys `DoubleBuffer` 0..24 | 1.005168 | **fail** |
-| CUB DeviceRadixSort pairs `DoubleBuffer` 0..24 | 1.001041 | **fail** |
-| Thrust merge | 1.000398 | pass |
+| CUB DeviceMerge keys | 1.002967 | **fail** |
+| CUB DeviceMerge pairs | 1.000958 | pass |
+| CUB DeviceMergeSort keys | 0.989863 | pass |
+| CUB DeviceMergeSort pairs | 1.005833 | **fail** |
+| CUB DeviceRadixSort keys | 1.057996 | **fail** |
+| CUB DeviceRadixSort pairs | 1.010049 | **fail** |
+| CUB DeviceRadixSort keys `DoubleBuffer` 0..24 | 1.082600 | **fail** |
+| CUB DeviceRadixSort pairs `DoubleBuffer` 0..24 | 1.017727 | **fail** |
+| CUB DeviceRadixSort keys, exact Policy800 single tile | 1.020752 | **fail** |
+| CUB DeviceRadixSort pairs, exact Policy800 single tile | 1.010958 | **fail** |
+| Thrust merge | 1.000000 | pass |
 | Thrust merge-by-key | 1.000000 | pass |
-| Thrust sort | 1.019154 | **fail** |
-| Thrust sort-by-key | 0.999147 | pass |
+| Thrust sort | 1.030604 | **fail** |
+| Thrust sort-by-key | 0.992057 | pass |
 
-Five of twelve ordering paths are inside the 1.001 measurement-equivalence
+Five of fourteen ordering paths are inside the 1.001 measurement-equivalence
 band in this run. Some repeated-run ratios move across the boundary even when
 the normalized cuda-oxide kernel instructions are unchanged, but the gate
 does not classify that observation as a pass or widen its band. The key-only
 radix and Thrust-sort gaps remain repeatable, and Thrust preserves its required
 `par` synchronization. Neither the threshold nor that synchronization is
 weakened to make the current test set pass.
+
+The two single-tile rows each batch 512 sequential public API calls between
+CUDA events and divide by 512. This makes the roughly 20-microsecond route
+measurable without changing its one-kernel launch graph, but the interval is a
+queued-operation throughput measurement: it can include a host-submission gap
+if either public API fails to keep the stream fed. It is therefore deliberately
+not labelled an isolated kernel-latency proof. Both implementations execute
+the same alternating `DoubleBuffer` workload and validate the complete final
+buffer.
 
 The full-range and 0..24 operations now select the same named primitive Rust
 function items. Before that change, identical zero-capture closure expressions
@@ -100,3 +111,22 @@ measured 0.587936 ms versus the accepted form's 0.586752 ms sample. Hardware
 plumbing, deleting the short-circuit, and relaxing the ratio are all rejected:
 they change the pinned algorithm, the Rust safety boundary, or the test rather
 than repairing the implementation.
+
+## Policy800 single-tile backend boundary
+
+The single-block lowering now retains the pinned 256-thread, 19-item u32
+policy, six-bit passes, memoized 33-word raking scan, u16 digit-counter phase,
+eight-warp scan, blocked intermediate exchange, striped final exchange,
+one-block launch bound, and 32-byte shared-storage alignment. Key and pair
+scatter layout is a Rust const specialization; there is no per-item runtime
+`bool` branch. The rank uses cuda-oxide's safe lane-register API rather than
+recovering the lane from `threadIdx.x`.
+
+The remaining inner-scan mismatch is a backend capability boundary. Pinned CUB
+uses the validity predicate returned by `shfl.sync.up` to guard each u32 add.
+The current safe cuda-oxide shuffle API returns only the shuffled value, so the
+Rust lowering must express the same predicate as `lane >= offset`. An
+arithmetic-mask rewrite was slower (about 0.0200 ms for keys), and widening all
+shared indices to a new u32 capability was likewise slower (about 0.020016 ms)
+without helping pairs. Both were removed. Inline PTX, manual generated
+artifacts, and a relaxed performance limit remain rejected.

@@ -134,6 +134,14 @@ require_equal_performance \
   "$(median_metric 'CCCL_ORDERING ' cub_radix_window_pairs_gpu_median_ms "$cccl_ordering")" \
   "$(median_metric 'RCCL_CUB_ORDERING ' radix_window_pairs_gpu_median_ms "$rccl_cub")" || failed=1
 require_equal_performance \
+  'CUB DeviceRadixSort::SortKeys u32 single tile' \
+  "$(median_metric 'CCCL_ORDERING ' cub_radix_single_tile_gpu_median_ms "$cccl_ordering")" \
+  "$(median_metric 'RCCL_CUB_ORDERING ' radix_single_tile_gpu_median_ms "$rccl_cub")" || failed=1
+require_equal_performance \
+  'CUB DeviceRadixSort::SortPairs u32/u32 single tile' \
+  "$(median_metric 'CCCL_ORDERING ' cub_radix_single_tile_pairs_gpu_median_ms "$cccl_ordering")" \
+  "$(median_metric 'RCCL_CUB_ORDERING ' radix_single_tile_pairs_gpu_median_ms "$rccl_cub")" || failed=1
+require_equal_performance \
   'Thrust merge u32 through CUB' \
   "$(median_metric 'CCCL Thrust merge u32:' median "$cccl_merge")" \
   "$(median_metric 'RCCL_THRUST_ORDERING ' merge_gpu_median_ms "$rccl_thrust")" || failed=1

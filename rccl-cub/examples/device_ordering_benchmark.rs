@@ -53,6 +53,23 @@ fn timed(
     })
 }
 
+fn timed_batched(
+    stream: &CudaStream,
+    iterations: usize,
+    batch: usize,
+    mut operation: impl FnMut() -> Result<(), rccl_cub::DeviceAlgorithmError>,
+) -> Result<Timing, Box<dyn Error>> {
+    let mut timing = timed(stream, iterations, || {
+        for _ in 0..batch {
+            operation()?;
+        }
+        Ok(())
+    })?;
+    timing.gpu_ms /= batch as f64;
+    timing.end_to_end_ms /= batch as f64;
+    Ok(timing)
+}
+
 fn random_u32(count: usize) -> Vec<u32> {
     (0..count)
         .map(|index| {
@@ -283,6 +300,65 @@ fn main() -> Result<(), Box<dyn Error>> {
     assert_eq!(window_pair_keys.to_host_vec(&stream)?, window_expected);
     assert_eq!(window_pair_values.to_host_vec(&stream)?, window_expected);
 
+    // Policy800's exact u32 single-tile extent. Batching one-kernel calls per
+    // event makes the sub-20-microsecond path measurable without changing the
+    // launch work being compared with pinned CUB.
+    const SINGLE_TILE_COUNT: usize = 256 * 19;
+    const SINGLE_TILE_BATCH: usize = 512;
+    let single_tile_input = random_u32(SINGLE_TILE_COUNT);
+    let mut single_tile_expected = single_tile_input.clone();
+    single_tile_expected.sort_unstable();
+    let mut single_keys_0 = DeviceBuffer::from_host(&stream, &single_tile_input)?;
+    let mut single_keys_1 = DeviceBuffer::<u32>::zeroed(&stream, SINGLE_TILE_COUNT)?;
+    let mut single_keys = rccl_cub::DoubleBuffer::new(&mut single_keys_0, &mut single_keys_1)
+        .expect("equal single-tile key buffers must construct");
+    let mut no_bins = DeviceBuffer::<u64>::zeroed(&stream, 0)?;
+    let mut no_lookback = DeviceBuffer::<i32>::zeroed(&stream, 0)?;
+    let mut no_counters = DeviceBuffer::<i32>::zeroed(&stream, 0)?;
+    stream.synchronize()?;
+    let radix_single_tile_timing = timed_batched(&stream, iterations, SINGLE_TILE_BATCH, || {
+        rccl_cub::device_radix_sort_keys_buffer!(::<u32, sm_89>(
+            &exec,
+            &mut single_keys,
+            0u32..32u32,
+            &mut no_bins,
+            &mut no_lookback,
+            &mut no_counters,
+        ))
+    })?;
+    assert_eq!(
+        single_keys.current().to_host_vec(&stream)?,
+        single_tile_expected
+    );
+
+    let mut single_pair_keys_0 = DeviceBuffer::from_host(&stream, &single_tile_input)?;
+    let mut single_pair_keys_1 = DeviceBuffer::<u32>::zeroed(&stream, SINGLE_TILE_COUNT)?;
+    let mut single_pair_values_0 = DeviceBuffer::from_host(&stream, &single_tile_input)?;
+    let mut single_pair_values_1 = DeviceBuffer::<u32>::zeroed(&stream, SINGLE_TILE_COUNT)?;
+    let mut single_pairs = rccl_cub::DoubleBuffer::paired(
+        (&mut single_pair_keys_0, &mut single_pair_values_0),
+        (&mut single_pair_keys_1, &mut single_pair_values_1),
+    )
+    .expect("equal single-tile pair buffers must construct");
+    stream.synchronize()?;
+    let radix_single_tile_pair_timing =
+        timed_batched(&stream, iterations, SINGLE_TILE_BATCH, || {
+            rccl_cub::device_radix_sort_pairs_buffer!(::<u32, u32, sm_89>(
+                &exec,
+                &mut single_pairs,
+                0u32..32u32,
+                &mut no_bins,
+                &mut no_lookback,
+                &mut no_counters,
+            ))
+        })?;
+    let (single_pair_keys, single_pair_values) = single_pairs.current();
+    assert_eq!(single_pair_keys.to_host_vec(&stream)?, single_tile_expected);
+    assert_eq!(
+        single_pair_values.to_host_vec(&stream)?,
+        single_tile_expected
+    );
+
     println!(
         "RCCL_CUB_ORDERING items={count} \
          merge_gpu_median_ms={:.6} merge_end_to_end_median_ms={:.6} \
@@ -291,7 +367,9 @@ fn main() -> Result<(), Box<dyn Error>> {
          radix_gpu_median_ms={:.6} radix_end_to_end_median_ms={:.6} \
          radix_pairs_gpu_median_ms={:.6} radix_pairs_end_to_end_median_ms={:.6} \
          radix_window_gpu_median_ms={:.6} radix_window_end_to_end_median_ms={:.6} \
-         radix_window_pairs_gpu_median_ms={:.6} radix_window_pairs_end_to_end_median_ms={:.6}",
+         radix_window_pairs_gpu_median_ms={:.6} radix_window_pairs_end_to_end_median_ms={:.6} \
+         radix_single_tile_gpu_median_ms={:.9} radix_single_tile_end_to_end_median_ms={:.9} \
+         radix_single_tile_pairs_gpu_median_ms={:.9} radix_single_tile_pairs_end_to_end_median_ms={:.9}",
         merge_timing.gpu_ms,
         merge_timing.end_to_end_ms,
         pair_merge_timing.gpu_ms,
@@ -306,6 +384,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         radix_window_timing.end_to_end_ms,
         radix_window_pair_timing.gpu_ms,
         radix_window_pair_timing.end_to_end_ms,
+        radix_single_tile_timing.gpu_ms,
+        radix_single_tile_timing.end_to_end_ms,
+        radix_single_tile_pair_timing.gpu_ms,
+        radix_single_tile_pair_timing.end_to_end_ms,
     );
     Ok(())
 }

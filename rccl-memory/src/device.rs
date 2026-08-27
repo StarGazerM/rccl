@@ -78,13 +78,17 @@ pub type OneDimensionalLaunch<'kernel> =
 /// determines its extent. RCCL's proc macros already determine that extent;
 /// this capability records it once and hands algorithms checked typed regions
 /// instead of making every collective recover and cast the address.
-pub struct BlockSharedMemory {
+pub struct AlignedBlockSharedMemory<const ALIGN: usize> {
     base: *mut u8,
     bytes: usize,
     _not_send_or_sync: PhantomData<*mut ()>,
 }
 
-impl BlockSharedMemory {
+/// Default shared-memory capability for policies requiring at most 16-byte
+/// alignment.
+pub type BlockSharedMemory = AlignedBlockSharedMemory<16>;
+
+impl<const ALIGN: usize> AlignedBlockSharedMemory<ALIGN> {
     /// Bind the macro-declared dynamic shared extent for this kernel block.
     #[inline(always)]
     pub fn new(bytes: usize) -> Self {
@@ -92,7 +96,7 @@ impl BlockSharedMemory {
             cuda_device::debug::trap();
         }
         Self {
-            base: DynamicSharedArray::<u8, 16>::get_raw(),
+            base: DynamicSharedArray::<u8, ALIGN>::get_raw(),
             bytes,
             _not_send_or_sync: PhantomData,
         }
@@ -805,17 +809,6 @@ pub struct BlockStripedBlockWrite<'a, T, const THREADS: usize, const ITEMS: usiz
     valid_items: usize,
 }
 
-#[inline(always)]
-const fn block_striped_local<const THREADS: usize, const ITEMS: usize>(
-    thread_index: u32,
-    item: usize,
-) -> Option<usize> {
-    if THREADS == 0 || ITEMS == 0 || thread_index as usize >= THREADS || item >= ITEMS {
-        return None;
-    }
-    Some(item * THREADS + thread_index as usize)
-}
-
 impl<'a, T, const THREADS: usize, const ITEMS: usize>
     BlockStripedBlockWrite<'a, T, THREADS, ITEMS>
 {
@@ -840,9 +833,10 @@ impl<'a, T, const THREADS: usize, const ITEMS: usize>
         if item >= ITEMS {
             return;
         }
-        let Some(local) = block_striped_local::<THREADS, ITEMS>(self.thread_index, item) else {
-            return;
-        };
+        // `new` consumed the launch proof and rejected a thread coordinate
+        // outside `THREADS`; retain CUB's direct striped formula in the hot
+        // store instead of rechecking that invariant for every item.
+        let local = item * THREADS + self.thread_index as usize;
         if local >= self.valid_items {
             return;
         }
@@ -1045,7 +1039,17 @@ pub fn warp_striped_pair_into_write<
 
 #[cfg(test)]
 mod tests {
-    use super::{MergePathSearch, block_striped_local, warp_striped_local};
+    use super::{MergePathSearch, warp_striped_local};
+
+    const fn block_striped_local<const THREADS: usize, const ITEMS: usize>(
+        thread_index: u32,
+        item: usize,
+    ) -> Option<usize> {
+        if THREADS == 0 || ITEMS == 0 || thread_index as usize >= THREADS || item >= ITEMS {
+            return None;
+        }
+        Some(item * THREADS + thread_index as usize)
+    }
 
     fn merge_path(first: &[i32], second: &[i32], diagonal: usize) -> usize {
         let mut search = MergePathSearch::new(first, second, diagonal);

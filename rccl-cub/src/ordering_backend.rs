@@ -18,10 +18,11 @@ use core::{mem::MaybeUninit, ops::Range};
 
 use cuda_device::{DisjointSlice, LinearTiles, thread, warp};
 use rccl_memory::device::{
-    BlockSharedMemory, BlockStripedBlockWrite, DeviceRegion, MergePathSearch, OneDimensionalLaunch,
-    SharedRegion, WarpStripedBlockInput, WarpStripedBlockRead, WarpStripedBlockTile,
-    WarpStripedBlockWrite, commit_and_wait_async_copy, commit_async_copy, initialized_ref,
-    initialized_value, threadfence_block, wait_async_copy, warp_striped_pair_into_write,
+    AlignedBlockSharedMemory, BlockSharedMemory, BlockStripedBlockWrite, DeviceRegion,
+    MergePathSearch, OneDimensionalLaunch, SharedRegion, WarpStripedBlockInput,
+    WarpStripedBlockRead, WarpStripedBlockTile, WarpStripedBlockWrite, commit_and_wait_async_copy,
+    commit_async_copy, initialized_ref, initialized_value, threadfence_block, wait_async_copy,
+    warp_striped_pair_into_write,
 };
 
 // CUB marks each per-thread item loop with `_CCCL_PRAGMA_UNROLL_FULL()`. A
@@ -92,6 +93,27 @@ macro_rules! for_each_policy800_warp {
         one!(9usize);
         one!(10usize);
         one!(11usize);
+    }};
+}
+
+// Policy800's single-tile agent has 256 threads: exactly eight warps. Keep
+// this distinct from the 384-thread one-sweep repetition so the Rust source
+// has the same compile-time recursion extent as `BlockScanWarpScans`.
+macro_rules! for_each_single_tile_warp {
+    ($warp:ident, $body:block) => {{
+        macro_rules! one {
+            ($index:expr) => {{
+                let $warp = $index;
+                $body
+            }};
+        }
+        one!(1usize);
+        one!(2usize);
+        one!(3usize);
+        one!(4usize);
+        one!(5usize);
+        one!(6usize);
+        one!(7usize);
     }};
 }
 
@@ -2600,7 +2622,7 @@ pub fn radix_digit_u32(ordered: u32, bit: u32, bits: u32) -> u32 {
 #[doc(hidden)]
 #[inline(always)]
 pub fn radix_rank_digit_u32(ordered: u32, bit: u32, bits: u32) -> u32 {
-    ordered.rotate_right(bit) & ((1u32 << bits) - 1)
+    radix_digit_u32(ordered, bit, bits)
 }
 
 #[doc(hidden)]
@@ -2634,7 +2656,7 @@ pub fn radix_digit_u64(ordered: u64, bit: u32, bits: u32) -> u32 {
 #[doc(hidden)]
 #[inline(always)]
 pub fn radix_rank_digit_u64(ordered: u64, bit: u32, bits: u32) -> u32 {
-    (ordered.rotate_right(bit) & ((1u64 << bits) - 1)) as u32
+    radix_digit_u64(ordered, bit, bits)
 }
 
 #[doc(hidden)]
@@ -2697,7 +2719,7 @@ fn radix_single_tile_rank<
     current_bit: u32,
     pass_bits: u32,
     rank_digit: RankDigit,
-    shared_memory: &BlockSharedMemory,
+    shared_memory: &AlignedBlockSharedMemory<32>,
 ) -> [u32; ITEMS]
 where
     B: Copy,
@@ -2712,115 +2734,120 @@ where
         cuda_device::debug::trap();
     }
 
-    let thread_index = thread::threadIdx_x() as usize;
-    let lane = (thread_index & 31) as u32;
+    let thread_index = thread::threadIdx_x();
+    let lane = warp::lane_id();
     let warp_index = thread_index >> 5;
     let grid_words = THREADS * RAKING_SEGMENT;
-    let mut grid = shared_memory.region::<u32>(0, grid_words);
 
     // Reset through the digit-counter view
     // `[counter_lane][thread][packed_sub_counter]`. Only after the following
     // barrier does CUB reinterpret these same bytes as `[thread][33]` raking
     // segments. Keeping the two formulas distinct is the essential union
     // phase boundary.
-    for_each_radix_raking_word!(counter_lane, {
-        grid.write(counter_lane * THREADS + thread_index, 0);
-    });
+    {
+        let mut reset_words = shared_memory.region::<u32>(0, grid_words);
+        for_each_radix_raking_word!(counter_lane, {
+            reset_words.write(counter_lane * THREADS + thread_index as usize, 0);
+        });
+    }
 
     let mut thread_prefixes = [0u16; ITEMS];
-    let mut counter_words = [0usize; ITEMS];
-    let mut sub_counters = [0usize; ITEMS];
-    for_each_thread_item!(ITEMS, item, {
-        let digit = rank_digit(keys[item], current_bit, pass_bits) as usize;
-        let mut sub_counter = digit >> 5;
-        let mut counter_lane = digit & (COUNTER_LANES - 1);
-        if DESCENDING {
-            sub_counter = PACKING_RATIO - 1 - sub_counter;
-            counter_lane = COUNTER_LANES - 1 - counter_lane;
-        }
-        let word_index = counter_lane * THREADS + thread_index;
-        let word = grid.read(word_index);
-        let shift = (sub_counter * 16) as u32;
-        let prefix = ((word >> shift) & 0xffff) as u16;
-        thread_prefixes[item] = prefix;
-        counter_words[item] = word_index;
-        sub_counters[item] = sub_counter;
-        grid.write(word_index, word.wrapping_add(1u32 << shift));
-    });
-    thread::sync_threads();
+    let mut counter_indices = [0u32; ITEMS];
+    {
+        let mut counters = shared_memory.region::<u16>(0, grid_words * PACKING_RATIO);
+        for_each_thread_item!(ITEMS, item, {
+            let digit = rank_digit(keys[item], current_bit, pass_bits);
+            let mut sub_counter = digit >> 5;
+            let mut counter_lane = digit & (COUNTER_LANES as u32 - 1);
+            if DESCENDING {
+                sub_counter = PACKING_RATIO as u32 - 1 - sub_counter;
+                counter_lane = COUNTER_LANES as u32 - 1 - counter_lane;
+            }
+            let counter_index =
+                (counter_lane * THREADS as u32 + thread_index) * PACKING_RATIO as u32 + sub_counter;
+            let prefix = counters.read(counter_index as usize);
+            thread_prefixes[item] = prefix;
+            counter_indices[item] = counter_index;
+            counters.write(counter_index as usize, prefix.wrapping_add(1));
+        });
+        thread::sync_threads();
+    }
 
     // Memoized outer raking scan: cache all 33 words, reduce them, scan one
     // packed aggregate per thread with the warp-scans block algorithm, then
     // perform the exclusive downsweep in registers.
-    let mut cached_segment = [0u32; RAKING_SEGMENT];
-    let mut aggregate = 0u32;
-    for_each_radix_raking_word!(word, {
-        let value = grid.read(thread_index * RAKING_SEGMENT + word);
-        cached_segment[word] = value;
-        aggregate = aggregate.wrapping_add(value);
-    });
+    {
+        let mut cached_segment = [0u32; RAKING_SEGMENT];
+        let mut aggregate = 0u32;
+        let mut grid = shared_memory.region::<u32>(0, grid_words);
+        for_each_radix_raking_word!(word, {
+            let value = grid.read(thread_index as usize * RAKING_SEGMENT + word);
+            cached_segment[word] = value;
+            aggregate = aggregate.wrapping_add(value);
+        });
 
-    let (warp_exclusive, warp_inclusive) = warp_exclusive_sum_u32(aggregate, lane);
-    let scan_offset = grid_words * core::mem::size_of::<u32>();
-    let mut warp_aggregates = shared_memory.region::<u32>(scan_offset, WARPS);
-    // CUB stores eight one-byte `NullType` warp-scan placeholders between the
-    // aggregate array and this aligned u32 block prefix.
-    let mut block_prefix_storage =
-        shared_memory.region::<u32>(scan_offset + WARPS * core::mem::size_of::<u32>() + WARPS, 1);
-    if lane == 31 {
-        warp_aggregates.write(warp_index, warp_inclusive);
-    }
-    thread::sync_threads();
+        let (warp_exclusive, warp_inclusive) = warp_exclusive_sum_u32(aggregate, lane);
+        let scan_offset = grid_words * core::mem::size_of::<u32>();
+        let mut warp_aggregates = shared_memory.region::<u32>(scan_offset, WARPS);
+        // CUB stores eight one-byte `NullType` warp-scan placeholders between
+        // the aggregate array and this aligned u32 block prefix.
+        let mut block_prefix_storage = shared_memory
+            .region::<u32>(scan_offset + WARPS * core::mem::size_of::<u32>() + WARPS, 1);
+        if lane == 31 {
+            warp_aggregates.write(warp_index as usize, warp_inclusive);
+        }
+        thread::sync_threads();
 
-    let mut warp_prefix = 0u32;
-    let mut block_aggregate = warp_aggregates.read(0);
-    for_each_policy800_warp!(warp, {
-        if warp > 0 && warp < WARPS {
-            if warp_index == warp {
+        let mut warp_prefix = 0u32;
+        let mut block_aggregate = warp_aggregates.read(0);
+        for_each_single_tile_warp!(warp, {
+            if warp_index as usize == warp {
                 warp_prefix = block_aggregate;
             }
             block_aggregate = block_aggregate.wrapping_add(warp_aggregates.read(warp));
+        });
+        let mut exclusive_partial =
+            warp_exclusive.wrapping_add(if warp_index == 0 { 0 } else { warp_prefix });
+        if warp_index == 0 {
+            let block_prefix = block_aggregate << 16;
+            if lane == 0 {
+                block_prefix_storage.write(0, block_prefix);
+                exclusive_partial = block_prefix;
+            }
         }
-    });
-    let mut exclusive_partial =
-        warp_exclusive.wrapping_add(if warp_index == 0 { 0 } else { warp_prefix });
-    if warp_index == 0 {
-        let block_prefix = block_aggregate << 16;
-        if lane == 0 {
-            block_prefix_storage.write(0, block_prefix);
-            exclusive_partial = block_prefix;
+        thread::sync_threads();
+        let block_prefix = block_prefix_storage.read(0);
+        if thread_index > 0 {
+            exclusive_partial = block_prefix.wrapping_add(exclusive_partial);
         }
+        let mut running = exclusive_partial;
+        for_each_radix_raking_word!(word, {
+            let value = cached_segment[word];
+            cached_segment[word] = running;
+            running = running.wrapping_add(value);
+            grid.write(
+                thread_index as usize * RAKING_SEGMENT + word,
+                cached_segment[word],
+            );
+        });
+        let _ = running;
+        thread::sync_threads();
     }
-    thread::sync_threads();
-    let block_prefix = block_prefix_storage.read(0);
-    if thread_index > 0 {
-        exclusive_partial = block_prefix.wrapping_add(exclusive_partial);
-    }
-    let mut running = exclusive_partial;
-    for_each_radix_raking_word!(word, {
-        let value = cached_segment[word];
-        cached_segment[word] = running;
-        running = running.wrapping_add(value);
-        grid.write(thread_index * RAKING_SEGMENT + word, cached_segment[word]);
-    });
-    let _ = running;
-    thread::sync_threads();
 
     let mut ranks = [0u32; ITEMS];
+    let counters = shared_memory.region::<u16>(0, grid_words * PACKING_RATIO);
     for_each_thread_item!(ITEMS, item, {
-        let shift = (sub_counters[item] * 16) as u32;
-        let block_prefix = (grid.read(counter_words[item]) >> shift) & 0xffff;
-        ranks[item] = thread_prefixes[item] as u32 + block_prefix;
+        let block_prefix = counters.read(counter_indices[item] as usize);
+        ranks[item] = thread_prefixes[item] as u32 + block_prefix as u32;
     });
     ranks
 }
 
 #[inline(always)]
-fn radix_single_tile_scatter<T, const THREADS: usize, const ITEMS: usize>(
+fn radix_single_tile_scatter<T, const THREADS: usize, const ITEMS: usize, const STRIPED: bool>(
     items: &mut [T; ITEMS],
     ranks: &[u32; ITEMS],
-    striped: bool,
-    shared_memory: &BlockSharedMemory,
+    shared_memory: &AlignedBlockSharedMemory<32>,
 ) where
     T: Copy,
 {
@@ -2835,7 +2862,7 @@ fn radix_single_tile_scatter<T, const THREADS: usize, const ITEMS: usize>(
     });
     thread::sync_threads();
     for_each_thread_item!(ITEMS, item, {
-        let logical = if striped {
+        let logical = if STRIPED {
             item * THREADS + thread_index
         } else {
             thread_index * ITEMS + item
@@ -2875,7 +2902,7 @@ pub fn radix_single_tile_keys_agent<
     let (default_ordered, to_ordered, from_ordered, rank_digit) = operations;
     let mut output =
         BlockStripedBlockWrite::<K, THREADS, ITEMS>::new(output, launch_context, input.len());
-    let shared_memory = BlockSharedMemory::new(SHARED_BYTES);
+    let shared_memory = AlignedBlockSharedMemory::<32>::new(SHARED_BYTES);
     let thread_index = thread::threadIdx_x() as usize;
     let default = default_ordered();
     let mut keys = [default; ITEMS];
@@ -2899,15 +2926,12 @@ pub fn radix_single_tile_keys_agent<
         );
         current_bit += 6;
         thread::sync_threads();
-        radix_single_tile_scatter::<B, THREADS, ITEMS>(
-            &mut keys,
-            &ranks,
-            current_bit >= bit_range.end,
-            &shared_memory,
-        );
-        if current_bit < bit_range.end {
-            thread::sync_threads();
+        if current_bit >= bit_range.end {
+            radix_single_tile_scatter::<B, THREADS, ITEMS, true>(&mut keys, &ranks, &shared_memory);
+            break;
         }
+        radix_single_tile_scatter::<B, THREADS, ITEMS, false>(&mut keys, &ranks, &shared_memory);
+        thread::sync_threads();
     }
 
     for_each_thread_item!(ITEMS, item, {
@@ -2964,7 +2988,7 @@ pub fn radix_single_tile_pairs_agent<
         launch_context,
         input_values.len(),
     );
-    let shared_memory = BlockSharedMemory::new(SHARED_BYTES);
+    let shared_memory = AlignedBlockSharedMemory::<32>::new(SHARED_BYTES);
     let thread_index = thread::threadIdx_x() as usize;
     let default = default_ordered();
     let mut keys = [default; ITEMS];
@@ -3002,18 +3026,24 @@ pub fn radix_single_tile_pairs_agent<
         );
         current_bit += 6;
         thread::sync_threads();
-        let striped = current_bit >= bit_range.end;
-        radix_single_tile_scatter::<B, THREADS, ITEMS>(&mut keys, &ranks, striped, &shared_memory);
+        if current_bit >= bit_range.end {
+            radix_single_tile_scatter::<B, THREADS, ITEMS, true>(&mut keys, &ranks, &shared_memory);
+            thread::sync_threads();
+            radix_single_tile_scatter::<MaybeUninit<V>, THREADS, ITEMS, true>(
+                &mut values,
+                &ranks,
+                &shared_memory,
+            );
+            break;
+        }
+        radix_single_tile_scatter::<B, THREADS, ITEMS, false>(&mut keys, &ranks, &shared_memory);
         thread::sync_threads();
-        radix_single_tile_scatter::<MaybeUninit<V>, THREADS, ITEMS>(
+        radix_single_tile_scatter::<MaybeUninit<V>, THREADS, ITEMS, false>(
             &mut values,
             &ranks,
-            striped,
             &shared_memory,
         );
-        if current_bit < bit_range.end {
-            thread::sync_threads();
-        }
+        thread::sync_threads();
     }
 
     for_each_thread_item!(ITEMS, item, {
@@ -4115,6 +4145,22 @@ mod tests {
     }
 
     #[test]
+    fn rank_digits_keep_cub_bitfield_extraction_not_rotation() {
+        let source = include_str!("ordering_backend.rs");
+        let begin = source
+            .find("pub fn radix_rank_digit_u32")
+            .expect("u32 rank digit helper must exist");
+        let end = source[begin..]
+            .find("fn warp_exclusive_sum_u32")
+            .map(|offset| begin + offset)
+            .expect("warp scan must follow primitive rank digit helpers");
+        let rank_digits = &source[begin..end];
+        assert!(rank_digits.contains("radix_digit_u32(ordered, bit, bits)"));
+        assert!(rank_digits.contains("radix_digit_u64(ordered, bit, bits)"));
+        assert!(!rank_digits.contains("rotate_right"));
+    }
+
+    #[test]
     fn single_tile_radix_keeps_cub_union_phases_and_rust_ownership_boundary() {
         let source = include_str!("ordering_backend.rs");
         let begin = source
@@ -4128,10 +4174,15 @@ mod tests {
 
         for required in [
             "counter_lane * THREADS + thread_index",
-            "thread_index * RAKING_SEGMENT + word",
+            "thread_index as usize * RAKING_SEGMENT + word",
+            "region::<u16>",
+            "counter_indices",
             "for_each_radix_raking_word!",
+            "for_each_single_tile_warp!",
+            "let lane = warp::lane_id()",
             "let pass_bits = (bit_range.end - current_bit).min(6)",
-            "radix_single_tile_scatter",
+            "radix_single_tile_scatter::<B, THREADS, ITEMS, true>",
+            "radix_single_tile_scatter::<B, THREADS, ITEMS, false>",
             "BlockStripedBlockWrite",
             "MaybeUninit::<V>::uninit()",
             "warp::shuffle_sync(u32::MAX, input_values.len() as u32, 0)",
@@ -4143,7 +4194,7 @@ mod tests {
         }
         assert!(
             single_tile.find("counter_lane * THREADS + thread_index")
-                < single_tile.find("thread_index * RAKING_SEGMENT + word"),
+                < single_tile.find("thread_index as usize * RAKING_SEGMENT + word"),
             "counter reset must precede the union's raking reinterpretation"
         );
         for forbidden in [
@@ -4152,6 +4203,7 @@ mod tests {
             "as_mut_ptr",
             "sort_unstable",
             "device_merge_sort",
+            "striped: bool",
             &["un", "safe"].concat(),
             &["*", "mut"].concat(),
         ] {

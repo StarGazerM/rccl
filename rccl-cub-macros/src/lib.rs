@@ -1187,13 +1187,13 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
             }
 
             #[kernel(launch_context = launch_context)]
-            #[launch_bounds(256)]
+            #[launch_bounds(256, 1)]
             #[launch_contract(
                 domain = 1,
                 coordinates = u32,
                 block = (256, 1, 1),
                 dynamic_shared_range = (33856, 33856),
-                dynamic_shared_alignment = 16,
+                dynamic_shared_alignment = 32,
             )]
             pub fn device_radix_sort_single_tile_keys<
                 K,
@@ -1243,13 +1243,13 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
             }
 
             #[kernel(launch_context = launch_context)]
-            #[launch_bounds(256)]
+            #[launch_bounds(256, 1)]
             #[launch_contract(
                 domain = 1,
                 coordinates = u32,
                 block = (256, 1, 1),
                 dynamic_shared_range = (33856, 33856),
-                dynamic_shared_alignment = 16,
+                dynamic_shared_alignment = 32,
             )]
             pub fn device_radix_sort_single_tile_pairs<
                 K,
@@ -4480,6 +4480,16 @@ mod tests {
             .to_string();
         assert!(kernels.contains("DefaultKey : Fn () -> B + Copy"));
         assert!(kernels.contains("default_key : DefaultKey"));
+        assert_eq!(
+            kernels.matches("launch_bounds (256 , 1)").count(),
+            2,
+            "both single-tile entries must retain CUB's one-block launch bound"
+        );
+        assert_eq!(
+            kernels.matches("dynamic_shared_alignment = 32").count(),
+            2,
+            "both single-tile entries must retain BlockScan's 32-byte alignment"
+        );
         assert!(!kernels.contains("sentinel : Uniform < B >"));
 
         let operation = expand_device_radix_sort_keys(syn::parse_quote! {

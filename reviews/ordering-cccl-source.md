@@ -111,11 +111,12 @@ used to hide that missing TMP input.
 - `benchmarks/ordering-reference.cu` and the Rust benchmarks use complete
   device-resident validation. The strict 1.001 performance ratio is still
   failing, so result parity cannot be misreported as CCCL performance parity.
-  The direct bit-window additions bring the gate to twelve paths. Its latest
-  median-of-medians run still fails, including key-only radix at 1.001751x,
-  bit-window keys at 1.005168x, and Thrust sort at 1.019154x; the gate still
-  exits nonzero with `implementation gap is not masked`. The complete ratios
-  and emitted-code diagnosis are recorded in
+  The direct bit-window and Policy800 single-tile additions bring the gate to
+  fourteen paths. Its latest median-of-medians run still fails, including
+  key-only radix at 1.057996x, bit-window keys at 1.082600x, single-tile keys
+  at 1.020752x, and Thrust sort at 1.030604x; the gate still exits nonzero with
+  `implementation gap is not masked`. The complete ratios and backend-boundary
+  diagnosis are recorded in
   `reviews/current-implemented-performance.md`.
 
 ## Injected faults
@@ -140,6 +141,15 @@ sortedness alone is no longer accepted.
 The focused key and pair single-tile probes pass both compute-sanitizer
 memcheck and racecheck. The aggregate result gate runs those focused probes in
 addition to the complete primitive matrices.
+
+The Policy800 source mapping also retains CUB's `__launch_bounds__(256, 1)`,
+the 32-byte alignment induced by `BlockScanWarpScans`, the u16 counter-update
+phase before the u32 raking reinterpretation, the lane special register, and
+separate const-specialized blocked/striped scatter calls. A runtime scatter
+layout flag is rejected by the source test. Two performance experiments were
+also rejected and removed: widening all hot shared-memory indices through a
+new u32 access surface, and replacing the safe shuffle validity branch with an
+arithmetic mask. Neither may be reintroduced merely because result tests pass.
 
 ## Remaining upstream product
 
