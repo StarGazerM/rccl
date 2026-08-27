@@ -78,13 +78,21 @@ try
   cudaStream_t stream{};
   CUDA_CHECK(cudaStreamCreate(&stream));
   std::uint32_t *input = nullptr, *output = nullptr, *thrust_keys = nullptr;
+  std::uint32_t *thrust_pair_keys = nullptr, *thrust_pair_values = nullptr;
+  std::uint32_t *input_values = nullptr, *output_values = nullptr;
   CUDA_CHECK(cudaMalloc(&input, count * sizeof(*input)));
   CUDA_CHECK(cudaMalloc(&output, count * sizeof(*output)));
   CUDA_CHECK(cudaMalloc(&thrust_keys, count * sizeof(*thrust_keys)));
+  CUDA_CHECK(cudaMalloc(&thrust_pair_keys, count * sizeof(*thrust_pair_keys)));
+  CUDA_CHECK(cudaMalloc(&thrust_pair_values, count * sizeof(*thrust_pair_values)));
+  CUDA_CHECK(cudaMalloc(&input_values, count * sizeof(*input_values)));
+  CUDA_CHECK(cudaMalloc(&output_values, count * sizeof(*output_values)));
   constexpr int threads = 256;
   const int blocks = static_cast<int>((count + threads - 1) / threads);
   fill_random<<<blocks, threads, 0, stream>>>(input, count);
   CUDA_CHECK(cudaGetLastError());
+  CUDA_CHECK(cudaMemcpyAsync(
+    input_values, input, count * sizeof(*input), cudaMemcpyDeviceToDevice, stream));
   std::vector<std::uint32_t> expected(static_cast<std::size_t>(count));
   for (std::int64_t index = 0; index < count; ++index)
   {
@@ -99,10 +107,34 @@ try
   std::size_t radix_temp_bytes = 0;
   CUDA_CHECK(cub::DeviceRadixSort::SortKeys(
     nullptr, radix_temp_bytes, input, output, count, 0, 32, stream));
+  std::size_t radix_pairs_temp_bytes = 0;
+  CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
+    nullptr,
+    radix_pairs_temp_bytes,
+    input,
+    output,
+    input_values,
+    output_values,
+    count,
+    0,
+    32,
+    stream));
   std::size_t merge_temp_bytes = 0;
   CUDA_CHECK(cub::DeviceMergeSort::SortKeysCopy(
     nullptr, merge_temp_bytes, input, output, count, cuda::std::less<>{}, stream));
-  const std::size_t temp_bytes = std::max(radix_temp_bytes, merge_temp_bytes);
+  std::size_t merge_pairs_temp_bytes = 0;
+  CUDA_CHECK(cub::DeviceMergeSort::SortPairsCopy(
+    nullptr,
+    merge_pairs_temp_bytes,
+    input,
+    input_values,
+    output,
+    output_values,
+    count,
+    cuda::std::less<>{},
+    stream));
+  const std::size_t temp_bytes =
+    std::max({radix_temp_bytes, radix_pairs_temp_bytes, merge_temp_bytes, merge_pairs_temp_bytes});
   void* temp = nullptr;
   CUDA_CHECK(cudaMalloc(&temp, temp_bytes));
 
@@ -118,6 +150,27 @@ try
     radix_output.data(), output, count * sizeof(*output), cudaMemcpyDeviceToHost));
   if (radix_output != expected)
     throw std::runtime_error("CUB radix exact-output validation failed");
+  const auto radix_pairs = measure(stream, start, end, iterations, [&] {
+    return cub::DeviceRadixSort::SortPairs(
+      temp,
+      radix_pairs_temp_bytes,
+      input,
+      output,
+      input_values,
+      output_values,
+      count,
+      0,
+      32,
+      stream);
+  });
+  std::vector<std::uint32_t> radix_pair_keys(static_cast<std::size_t>(count));
+  std::vector<std::uint32_t> radix_pair_values(static_cast<std::size_t>(count));
+  CUDA_CHECK(cudaMemcpy(
+    radix_pair_keys.data(), output, count * sizeof(*output), cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaMemcpy(
+    radix_pair_values.data(), output_values, count * sizeof(*output_values), cudaMemcpyDeviceToHost));
+  if (radix_pair_keys != expected || radix_pair_values != expected)
+    throw std::runtime_error("CUB radix pair exact-output validation failed");
   const auto merge = measure(stream, start, end, iterations, [&] {
     return cub::DeviceMergeSort::SortKeysCopy(
       temp, merge_temp_bytes, input, output, count, cuda::std::less<>{}, stream);
@@ -127,6 +180,26 @@ try
     merge_output.data(), output, count * sizeof(*output), cudaMemcpyDeviceToHost));
   if (merge_output != expected)
     throw std::runtime_error("CUB merge-sort exact-output validation failed");
+  const auto merge_pairs = measure(stream, start, end, iterations, [&] {
+    return cub::DeviceMergeSort::SortPairsCopy(
+      temp,
+      merge_pairs_temp_bytes,
+      input,
+      input_values,
+      output,
+      output_values,
+      count,
+      cuda::std::less<>{},
+      stream);
+  });
+  std::vector<std::uint32_t> merge_pair_keys(static_cast<std::size_t>(count));
+  std::vector<std::uint32_t> merge_pair_values(static_cast<std::size_t>(count));
+  CUDA_CHECK(cudaMemcpy(
+    merge_pair_keys.data(), output, count * sizeof(*output), cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaMemcpy(
+    merge_pair_values.data(), output_values, count * sizeof(*output_values), cudaMemcpyDeviceToHost));
+  if (merge_pair_keys != expected || merge_pair_values != expected)
+    throw std::runtime_error("CUB merge-sort pair exact-output validation failed");
 
   // Reset outside the measured interval so every Thrust sample receives the
   // same unsorted keys while timing only the operation, like the CUB samples.
@@ -153,6 +226,36 @@ try
   if (thrust_output != expected)
     throw std::runtime_error("Thrust exact-output validation failed");
 
+  std::vector<double> thrust_pair_samples;
+  thrust_pair_samples.reserve(iterations);
+  for (int i = 0; i < iterations + 3; ++i)
+  {
+    CUDA_CHECK(cudaMemcpyAsync(
+      thrust_pair_keys, input, count * sizeof(*input), cudaMemcpyDeviceToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(
+      thrust_pair_values, input_values, count * sizeof(*input_values), cudaMemcpyDeviceToDevice, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+    CUDA_CHECK(cudaEventRecord(start, stream));
+    thrust::sort_by_key(
+      thrust::cuda::par.on(stream), thrust_pair_keys, thrust_pair_keys + count, thrust_pair_values);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaEventRecord(end, stream));
+    CUDA_CHECK(cudaEventSynchronize(end));
+    if (i >= 3)
+      thrust_pair_samples.push_back(elapsed(start, end));
+  }
+  std::sort(thrust_pair_samples.begin(), thrust_pair_samples.end());
+  std::vector<std::uint32_t> thrust_pair_output_keys(static_cast<std::size_t>(count));
+  std::vector<std::uint32_t> thrust_pair_output_values(static_cast<std::size_t>(count));
+  CUDA_CHECK(cudaMemcpy(
+    thrust_pair_output_keys.data(), thrust_pair_keys, count * sizeof(*thrust_pair_keys), cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaMemcpy(thrust_pair_output_values.data(),
+                        thrust_pair_values,
+                        count * sizeof(*thrust_pair_values),
+                        cudaMemcpyDeviceToHost));
+  if (thrust_pair_output_keys != expected || thrust_pair_output_values != expected)
+    throw std::runtime_error("Thrust pair exact-output validation failed");
+
   unsigned long long* errors = nullptr;
   CUDA_CHECK(cudaMalloc(&errors, sizeof(*errors)));
   CUDA_CHECK(cudaMemsetAsync(errors, 0, sizeof(*errors), stream));
@@ -165,19 +268,29 @@ try
     throw std::runtime_error("Thrust order validation failed");
 
   std::printf(
-    "CCCL_ORDERING items=%lld cub_radix_gpu_median_ms=%.6f "
-    "cub_merge_sort_copy_gpu_median_ms=%.6f thrust_sort_gpu_median_ms=%.6f "
-    "radix_temp_bytes=%zu merge_temp_bytes=%zu\n",
+    "CCCL_ORDERING items=%lld cub_radix_gpu_median_ms=%.6f cub_radix_pairs_gpu_median_ms=%.6f "
+    "cub_merge_sort_copy_gpu_median_ms=%.6f cub_merge_sort_pairs_copy_gpu_median_ms=%.6f "
+    "thrust_sort_gpu_median_ms=%.6f thrust_sort_by_key_gpu_median_ms=%.6f "
+    "radix_temp_bytes=%zu radix_pairs_temp_bytes=%zu merge_temp_bytes=%zu merge_pairs_temp_bytes=%zu\n",
     static_cast<long long>(count),
     radix[radix.size() / 2],
+    radix_pairs[radix_pairs.size() / 2],
     merge[merge.size() / 2],
+    merge_pairs[merge_pairs.size() / 2],
     thrust_samples[thrust_samples.size() / 2],
+    thrust_pair_samples[thrust_pair_samples.size() / 2],
     radix_temp_bytes,
-    merge_temp_bytes);
+    radix_pairs_temp_bytes,
+    merge_temp_bytes,
+    merge_pairs_temp_bytes);
 
   CUDA_CHECK(cudaFree(errors));
   CUDA_CHECK(cudaFree(temp));
+  CUDA_CHECK(cudaFree(thrust_pair_values));
+  CUDA_CHECK(cudaFree(thrust_pair_keys));
   CUDA_CHECK(cudaFree(thrust_keys));
+  CUDA_CHECK(cudaFree(output_values));
+  CUDA_CHECK(cudaFree(input_values));
   CUDA_CHECK(cudaFree(output));
   CUDA_CHECK(cudaFree(input));
   CUDA_CHECK(cudaEventDestroy(end));

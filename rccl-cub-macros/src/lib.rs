@@ -4,7 +4,7 @@ mod call;
 mod catalog;
 
 use proc_macro::TokenStream;
-use quote::quote;
+use quote::{format_ident, quote};
 
 #[proc_macro]
 pub fn warp_reduce(input: TokenStream) -> TokenStream {
@@ -78,6 +78,16 @@ operation_macro!(
     expand_device_merge_keys
 );
 operation_macro!(
+    device_merge_keys_partition_count,
+    call::DeviceMergeKeysPartitionCountCall,
+    expand_device_merge_keys_partition_count
+);
+operation_macro!(
+    device_merge_pairs_partition_count,
+    call::DeviceMergePairsPartitionCountCall,
+    expand_device_merge_pairs_partition_count
+);
+operation_macro!(
     device_merge_pairs,
     call::DeviceMergePairsCall,
     expand_device_merge_pairs
@@ -86,6 +96,11 @@ operation_macro!(
     device_merge_sort_keys,
     call::DeviceMergeSortKeysCall,
     expand_device_merge_sort_keys
+);
+operation_macro!(
+    device_merge_sort_partition_count,
+    call::DeviceMergeSortPartitionCountCall,
+    expand_device_merge_sort_partition_count
 );
 operation_macro!(
     device_stable_merge_sort_keys,
@@ -123,6 +138,16 @@ operation_macro!(
     expand_device_radix_sort_keys
 );
 operation_macro!(
+    device_radix_sort_workspace,
+    call::DeviceRadixSortWorkspaceCall,
+    expand_device_radix_sort_workspace
+);
+operation_macro!(
+    device_radix_sort_pairs_workspace,
+    call::DeviceRadixSortPairsWorkspaceCall,
+    expand_device_radix_sort_pairs_workspace
+);
+operation_macro!(
     device_radix_sort_keys_descending,
     call::DeviceRadixSortKeysCall,
     expand_device_radix_sort_keys_descending
@@ -149,6 +174,223 @@ enum PrimitiveRadixKind {
 struct PrimitiveRadix {
     bits: u32,
     kind: PrimitiveRadixKind,
+}
+
+struct PrimitiveRadixLowering {
+    bit_type: syn::Type,
+    sentinel: proc_macro2::TokenStream,
+    to_ordered: proc_macro2::TokenStream,
+    from_ordered: proc_macro2::TokenStream,
+    digit: proc_macro2::TokenStream,
+}
+
+/// Pinned CUB `detail::RegBoundScaling` evaluated by the proc macro.
+///
+/// The result is TMP policy state in C++; it must not be reconstructed by the
+/// running Rust program or selected from a runtime device property.
+fn reg_bound_policy(
+    nominal_threads: usize,
+    nominal_items: usize,
+    type_size: usize,
+) -> (usize, usize) {
+    let items = (nominal_items * 4 / type_size.max(4)).max(1);
+    let static_shared_words = (48 * 1024) / (type_size * items);
+    let shared_limited_threads = static_shared_words.div_ceil(32) * 32;
+    (nominal_threads.min(shared_limited_threads), items)
+}
+
+fn primitive_radix_lowering(
+    key_type: &syn::Type,
+    primitive: PrimitiveRadix,
+    descending: bool,
+) -> syn::Result<PrimitiveRadixLowering> {
+    let invert32 = if descending {
+        quote!(let __rccl_ordered = !__rccl_ordered;)
+    } else {
+        quote!()
+    };
+    let uninvert32 = invert32.clone();
+    let invert64 = invert32.clone();
+    let uninvert64 = invert32.clone();
+    match (primitive.bits, primitive.kind) {
+        (32, PrimitiveRadixKind::Unsigned) => Ok(PrimitiveRadixLowering {
+            bit_type: syn::parse_quote!(u32),
+            sentinel: quote!(u32::MAX),
+            to_ordered: quote!(|__rccl_key: #key_type| {
+                let __rccl_ordered = __rccl_key;
+                #invert32
+                __rccl_ordered
+            }),
+            from_ordered: quote!(|__rccl_ordered: u32| {
+                let __rccl_ordered = __rccl_ordered;
+                #uninvert32
+                __rccl_ordered
+            }),
+            digit: quote!(|__rccl_ordered: u32, __rccl_bit: u32, __rccl_bits: u32| {
+                ((__rccl_ordered >> __rccl_bit) & ((1u32 << __rccl_bits) - 1)) as u32
+            }),
+        }),
+        (64, PrimitiveRadixKind::Unsigned) => Ok(PrimitiveRadixLowering {
+            bit_type: syn::parse_quote!(u64),
+            sentinel: quote!(u64::MAX),
+            to_ordered: quote!(|__rccl_key: #key_type| {
+                let __rccl_ordered = __rccl_key;
+                #invert64
+                __rccl_ordered
+            }),
+            from_ordered: quote!(|__rccl_ordered: u64| {
+                let __rccl_ordered = __rccl_ordered;
+                #uninvert64
+                __rccl_ordered
+            }),
+            digit: quote!(|__rccl_ordered: u64, __rccl_bit: u32, __rccl_bits: u32| {
+                ((__rccl_ordered >> __rccl_bit) & ((1u64 << __rccl_bits) - 1)) as u32
+            }),
+        }),
+        (32, PrimitiveRadixKind::Signed) => Ok(PrimitiveRadixLowering {
+            bit_type: syn::parse_quote!(u32),
+            sentinel: quote!(u32::MAX),
+            to_ordered: quote!(|__rccl_key: #key_type| {
+                let __rccl_ordered = (__rccl_key as u32) ^ 0x8000_0000u32;
+                #invert32
+                __rccl_ordered
+            }),
+            from_ordered: quote!(|__rccl_ordered: u32| {
+                let __rccl_ordered = __rccl_ordered;
+                #uninvert32
+                (__rccl_ordered ^ 0x8000_0000u32) as #key_type
+            }),
+            digit: quote!(|__rccl_ordered: u32, __rccl_bit: u32, __rccl_bits: u32| {
+                ((__rccl_ordered >> __rccl_bit) & ((1u32 << __rccl_bits) - 1)) as u32
+            }),
+        }),
+        (64, PrimitiveRadixKind::Signed) => Ok(PrimitiveRadixLowering {
+            bit_type: syn::parse_quote!(u64),
+            sentinel: quote!(u64::MAX),
+            to_ordered: quote!(|__rccl_key: #key_type| {
+                let __rccl_ordered = (__rccl_key as u64) ^ 0x8000_0000_0000_0000u64;
+                #invert64
+                __rccl_ordered
+            }),
+            from_ordered: quote!(|__rccl_ordered: u64| {
+                let __rccl_ordered = __rccl_ordered;
+                #uninvert64
+                (__rccl_ordered ^ 0x8000_0000_0000_0000u64) as #key_type
+            }),
+            digit: quote!(|__rccl_ordered: u64, __rccl_bit: u32, __rccl_bits: u32| {
+                ((__rccl_ordered >> __rccl_bit) & ((1u64 << __rccl_bits) - 1)) as u32
+            }),
+        }),
+        (32, PrimitiveRadixKind::Floating) => Ok(PrimitiveRadixLowering {
+            bit_type: syn::parse_quote!(u32),
+            sentinel: quote!(u32::MAX),
+            to_ordered: quote!(|__rccl_key: #key_type| {
+                let __rccl_raw = __rccl_key.to_bits();
+                let __rccl_ordered = if __rccl_raw & 0x8000_0000u32 != 0 {
+                    !__rccl_raw
+                } else {
+                    __rccl_raw ^ 0x8000_0000u32
+                };
+                #invert32
+                __rccl_ordered
+            }),
+            from_ordered: quote!(|__rccl_ordered: u32| {
+                let __rccl_ordered = __rccl_ordered;
+                #uninvert32
+                let __rccl_raw = if __rccl_ordered & 0x8000_0000u32 != 0 {
+                    __rccl_ordered ^ 0x8000_0000u32
+                } else {
+                    !__rccl_ordered
+                };
+                #key_type::from_bits(__rccl_raw)
+            }),
+            digit: quote!(|__rccl_ordered: u32, __rccl_bit: u32, __rccl_bits: u32| {
+                let __rccl_zero_ordered = if __rccl_ordered == 0x7fff_ffffu32 {
+                    0x8000_0000u32
+                } else {
+                    __rccl_ordered
+                };
+                ((__rccl_zero_ordered >> __rccl_bit) & ((1u32 << __rccl_bits) - 1)) as u32
+            }),
+        }),
+        (64, PrimitiveRadixKind::Floating) => Ok(PrimitiveRadixLowering {
+            bit_type: syn::parse_quote!(u64),
+            sentinel: quote!(u64::MAX),
+            to_ordered: quote!(|__rccl_key: #key_type| {
+                let __rccl_raw = __rccl_key.to_bits();
+                let __rccl_ordered = if __rccl_raw & 0x8000_0000_0000_0000u64 != 0 {
+                    !__rccl_raw
+                } else {
+                    __rccl_raw ^ 0x8000_0000_0000_0000u64
+                };
+                #invert64
+                __rccl_ordered
+            }),
+            from_ordered: quote!(|__rccl_ordered: u64| {
+                let __rccl_ordered = __rccl_ordered;
+                #uninvert64
+                let __rccl_raw = if __rccl_ordered & 0x8000_0000_0000_0000u64 != 0 {
+                    __rccl_ordered ^ 0x8000_0000_0000_0000u64
+                } else {
+                    !__rccl_ordered
+                };
+                #key_type::from_bits(__rccl_raw)
+            }),
+            digit: quote!(|__rccl_ordered: u64, __rccl_bit: u32, __rccl_bits: u32| {
+                let __rccl_zero_ordered = if __rccl_ordered == 0x7fff_ffff_ffff_ffffu64 {
+                    0x8000_0000_0000_0000u64
+                } else {
+                    __rccl_ordered
+                };
+                ((__rccl_zero_ordered >> __rccl_bit) & ((1u64 << __rccl_bits) - 1)) as u32
+            }),
+        }),
+        _ => Err(syn::Error::new_spanned(
+            key_type,
+            "the exact pinned SM80 one-sweep path requires a 32-bit or 64-bit primitive key; smaller keys use CUB's different multi-pass policy",
+        )),
+    }
+}
+
+/// Re-express CUB's second digit extraction as a distinct Rust operation.
+///
+/// The one-sweep agent recomputes digits after ranking and its block scan. A
+/// second `>>` expression is folded back into the first phase by LLVM GVN,
+/// retaining every per-item digit across the synchronization boundary and
+/// reducing Policy800 occupancy. The proc macro has already proved that every
+/// pass is a complete byte at a byte-aligned offset, so rotate-and-mask has the
+/// same value. Floating keys must retain CUB's signed-zero equivalence in both
+/// phases; omitting it makes the histogram and rank disagree for `-0.0`.
+fn primitive_radix_rank_digit(primitive: PrimitiveRadix) -> proc_macro2::TokenStream {
+    match (primitive.bits, primitive.kind) {
+        (32, PrimitiveRadixKind::Floating) => {
+            quote!(|__rccl_ordered: u32, __rccl_bit: u32, __rccl_bits: u32| {
+                let __rccl_zero_ordered = if __rccl_ordered == 0x7fff_ffffu32 {
+                    0x8000_0000u32
+                } else {
+                    __rccl_ordered
+                };
+                (__rccl_zero_ordered.rotate_right(__rccl_bit) & ((1u32 << __rccl_bits) - 1)) as u32
+            })
+        }
+        (64, PrimitiveRadixKind::Floating) => {
+            quote!(|__rccl_ordered: u64, __rccl_bit: u32, __rccl_bits: u32| {
+                let __rccl_zero_ordered = if __rccl_ordered == 0x7fff_ffff_ffff_ffffu64 {
+                    0x8000_0000_0000_0000u64
+                } else {
+                    __rccl_ordered
+                };
+                (__rccl_zero_ordered.rotate_right(__rccl_bit) & ((1u64 << __rccl_bits) - 1)) as u32
+            })
+        }
+        (32, _) => quote!(|__rccl_ordered: u32, __rccl_bit: u32, __rccl_bits: u32| {
+            (__rccl_ordered.rotate_right(__rccl_bit) & ((1u32 << __rccl_bits) - 1)) as u32
+        }),
+        (64, _) => quote!(|__rccl_ordered: u64, __rccl_bit: u32, __rccl_bits: u32| {
+            (__rccl_ordered.rotate_right(__rccl_bit) & ((1u64 << __rccl_bits) - 1)) as u32
+        }),
+        _ => unreachable!("primitive radix widths are validated before lowering"),
+    }
 }
 
 fn primitive_radix(key_type: &syn::Type) -> syn::Result<PrimitiveRadix> {
@@ -186,110 +428,6 @@ fn primitive_radix(key_type: &syn::Type) -> syn::Result<PrimitiveRadix> {
     Ok(PrimitiveRadix { bits, kind })
 }
 
-fn radix_digit_order(
-    key_type: &syn::Type,
-    radix: PrimitiveRadix,
-    shift: u32,
-    digit_bits: u32,
-    descending: bool,
-) -> syn::Expr {
-    let value_mask = if radix.bits == 64 {
-        u64::MAX
-    } else {
-        (1u64 << radix.bits) - 1
-    };
-    let sign_mask = if matches!(
-        radix.kind,
-        PrimitiveRadixKind::Signed | PrimitiveRadixKind::Floating
-    ) {
-        1u64 << (radix.bits - 1)
-    } else {
-        0
-    };
-    let digit_mask = (1u64 << digit_bits) - 1;
-    let encode_left = match radix.kind {
-        PrimitiveRadixKind::Unsigned => {
-            quote!(((*__rccl_left as u64) & #value_mask))
-        }
-        PrimitiveRadixKind::Signed => {
-            quote!((((*__rccl_left as u64) & #value_mask) ^ #sign_mask))
-        }
-        PrimitiveRadixKind::Floating => quote!({
-            let __rccl_bits = __rccl_left.to_bits() as u64;
-            let __rccl_bits = if (__rccl_bits & (#sign_mask - 1)) == 0 {
-                0
-            } else {
-                __rccl_bits
-            };
-            if (__rccl_bits & #sign_mask) == 0 {
-                __rccl_bits ^ #sign_mask
-            } else {
-                (!__rccl_bits) & #value_mask
-            }
-        }),
-    };
-    let encode_right = match radix.kind {
-        PrimitiveRadixKind::Unsigned => {
-            quote!(((*__rccl_right as u64) & #value_mask))
-        }
-        PrimitiveRadixKind::Signed => {
-            quote!((((*__rccl_right as u64) & #value_mask) ^ #sign_mask))
-        }
-        PrimitiveRadixKind::Floating => quote!({
-            let __rccl_bits = __rccl_right.to_bits() as u64;
-            let __rccl_bits = if (__rccl_bits & (#sign_mask - 1)) == 0 {
-                0
-            } else {
-                __rccl_bits
-            };
-            if (__rccl_bits & #sign_mask) == 0 {
-                __rccl_bits ^ #sign_mask
-            } else {
-                (!__rccl_bits) & #value_mask
-            }
-        }),
-    };
-    if descending {
-        syn::parse_quote! {
-            |__rccl_left: &#key_type, __rccl_right: &#key_type| {
-                let __rccl_left_encoded = #encode_left;
-                let __rccl_right_encoded = #encode_right;
-                let __rccl_left_digit = (__rccl_left_encoded >> #shift) & #digit_mask;
-                let __rccl_right_digit = (__rccl_right_encoded >> #shift) & #digit_mask;
-                __rccl_right_digit.cmp(&__rccl_left_digit)
-            }
-        }
-    } else {
-        syn::parse_quote! {
-            |__rccl_left: &#key_type, __rccl_right: &#key_type| {
-                let __rccl_left_encoded = #encode_left;
-                let __rccl_right_encoded = #encode_right;
-                let __rccl_left_digit = (__rccl_left_encoded >> #shift) & #digit_mask;
-                let __rccl_right_digit = (__rccl_right_encoded >> #shift) & #digit_mask;
-                __rccl_left_digit.cmp(&__rccl_right_digit)
-            }
-        }
-    }
-}
-
-fn sequence_operations(
-    operations: impl DoubleEndedIterator<Item = proc_macro2::TokenStream>,
-) -> proc_macro2::TokenStream {
-    operations.rev().fold(
-        quote!(::core::result::Result::Ok(())),
-        |continuation, operation| {
-            quote! {
-                match #operation {
-                    ::core::result::Result::Err(__rccl_error) => {
-                        ::core::result::Result::Err(__rccl_error)
-                    }
-                    ::core::result::Result::Ok(()) => #continuation,
-                }
-            }
-        },
-    )
-}
-
 fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenStream> {
     audit::generated_rust(quote! {
         #[doc(hidden)]
@@ -318,7 +456,7 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
             /// semantic distinction between CUB's stable merge and a merely
             /// sorted permutation; no source index or pointer escapes.
             #[inline(always)]
-            fn stable_left_partition<K, F>(
+            fn merge_path<K, F>(
                 first: &[K],
                 first_begin: usize,
                 first_count: usize,
@@ -376,7 +514,7 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                 K: Copy,
                 F: Fn(&K, &K) -> ::core::cmp::Ordering + Copy,
             {
-                let first_taken = stable_left_partition(
+                let first_taken = merge_path(
                     first,
                     first_begin,
                     first_count,
@@ -402,230 +540,727 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
             }
 
             #[kernel(launch_context = launch_context)]
-            #[launch_bounds(512)]
-            #[launch_contract(domain = 1, coordinates = u32, block = (512, 1, 1))]
-            pub fn device_merge_keys<K, F, const ITEMS: usize>(
+            #[launch_bounds(256)]
+            #[launch_contract(domain = 1, block = (256, 1, 1))]
+            pub fn device_partition_merge_path<K, F, const ITEMS: usize>(
                 first: &[K],
                 second: &[K],
                 order: F,
-                mut output: DisjointSlice<K, LinearTiles<ITEMS>>,
+                mut partitions: DisjointSlice<usize>,
             )
             where
                 K: Copy,
                 F: Fn(&K, &K) -> ::core::cmp::Ordering + Copy,
             {
-                let thread_index = thread::index_1d_u32(launch_context);
-                let mut output_index = thread_index.get() as usize * ITEMS;
-                let mut runs = output.grid_stride_runs32(thread_index);
-                let period = runs.period() as usize * ITEMS;
-                while let Some(mut run) = runs.next_run() {
-                    let mut first_taken = stable_left_partition(
-                        first,
-                        0,
-                        first.len(),
-                        second,
-                        0,
-                        second.len(),
-                        output_index,
-                        &order,
+                let diagonal_index = thread::index_1d(launch_context);
+                let raw_index = diagonal_index.get();
+                if let ::core::option::Option::Some(partition) =
+                    partitions.get_mut(diagonal_index)
+                {
+                    let tile_items = 512usize * ITEMS;
+                    let total = first.len() + second.len();
+                    let diagonal = (raw_index * tile_items).min(total);
+                    *partition = ::rccl_cub::__private::global_merge_path(
+                        first, second, diagonal, &order,
                     );
-                    let mut second_taken = output_index - first_taken;
-                    let mut local = 0u32;
-                    while (local as usize) < ITEMS {
-                        let Some(mut slot) = run.at(local) else {
-                            break;
-                        };
-                        let take_first = first_taken < first.len()
-                            && (second_taken == second.len()
-                                || !ordered_before(
-                                    &order,
-                                    &second[second_taken],
-                                    &first[first_taken],
-                                ));
-                        if take_first {
-                            slot.write(first[first_taken]);
-                            first_taken += 1;
-                        } else {
-                            slot.write(second[second_taken]);
-                            second_taken += 1;
-                        }
-                        local += 1;
-                    }
-                    output_index = output_index.wrapping_add(period);
                 }
             }
 
             #[kernel(launch_context = launch_context)]
             #[launch_bounds(512)]
-            #[launch_contract(domain = 1, coordinates = u32, block = (512, 1, 1))]
-            pub fn device_merge_pairs<K, V, F, const ITEMS: usize>(
+            #[launch_contract(
+                domain = 1,
+                coordinates = u32,
+                block = (512, 1, 1),
+                dynamic_shared_range = (0, 49152),
+                dynamic_shared_alignment = 16,
+            )]
+            pub fn device_merge_keys_agent<
+                K,
+                F,
+                const ITEMS: usize,
+                const K_SIZE: usize,
+                const USE_LOAD_TO_SHARED: bool,
+            >(
+                first: &[K],
+                second: &[K],
+                partitions: &[usize],
+                order: F,
+                output: DisjointSlice<K, LinearTiles<ITEMS>>,
+            )
+            where
+                K: Copy,
+                F: Fn(&K, &K) -> ::core::cmp::Ordering + Copy,
+            {
+                ::rccl_cub::__private::merge_keys_agent::<
+                    K,
+                    F,
+                    512,
+                    ITEMS,
+                    K_SIZE,
+                    USE_LOAD_TO_SHARED,
+                >(
+                    first,
+                    second,
+                    partitions,
+                    order,
+                    output,
+                    launch_context,
+                );
+            }
+
+            #[kernel(launch_context = launch_context)]
+            #[launch_bounds(512)]
+            #[launch_contract(
+                domain = 1,
+                coordinates = u32,
+                block = (512, 1, 1),
+                dynamic_shared_range = (0, 49152),
+                dynamic_shared_alignment = 16,
+            )]
+            pub fn device_merge_pairs_agent<
+                K,
+                V,
+                F,
+                const ITEMS: usize,
+                const K_SIZE: usize,
+                const V_SIZE: usize,
+                const USE_LOAD_TO_SHARED_KEYS: bool,
+                const USE_LOAD_TO_SHARED_VALUES: bool,
+            >(
                 first_keys: &[K],
                 first_values: &[V],
                 second_keys: &[K],
                 second_values: &[V],
+                partitions: &[usize],
                 order: F,
-                mut output_keys: DisjointSlice<K, LinearTiles<ITEMS>>,
-                mut output_values: DisjointSlice<V, LinearTiles<ITEMS>>,
+                output_keys: DisjointSlice<K, LinearTiles<ITEMS>>,
+                output_values: DisjointSlice<V, LinearTiles<ITEMS>>,
             )
             where
                 K: Copy,
                 V: Copy,
                 F: Fn(&K, &K) -> ::core::cmp::Ordering + Copy,
             {
-                let key_thread = thread::index_1d_u32(launch_context);
-                let value_thread = thread::index_1d_u32(launch_context);
-                let mut output_index = key_thread.get() as usize * ITEMS;
-                let mut key_runs = output_keys.grid_stride_runs32(key_thread);
-                let mut value_runs = output_values.grid_stride_runs32(value_thread);
-                let period = key_runs.period() as usize * ITEMS;
-                while let Some(mut key_run) = key_runs.next_run() {
-                    let Some(mut value_run) = value_runs.next_run() else {
-                        return;
-                    };
-                    let mut first_taken = stable_left_partition(
-                        first_keys,
-                        0,
-                        first_keys.len(),
-                        second_keys,
-                        0,
-                        second_keys.len(),
-                        output_index,
+                ::rccl_cub::__private::merge_pairs_agent::<
+                    K,
+                    V,
+                    F,
+                    512,
+                    ITEMS,
+                    K_SIZE,
+                    V_SIZE,
+                    USE_LOAD_TO_SHARED_KEYS,
+                    USE_LOAD_TO_SHARED_VALUES,
+                >(
+                    first_keys,
+                    first_values,
+                    second_keys,
+                    second_values,
+                    partitions,
+                    order,
+                    output_keys,
+                    output_values,
+                    launch_context,
+                );
+            }
+
+            #[kernel(launch_context = launch_context)]
+            #[launch_bounds(256)]
+            #[launch_contract(
+                domain = 1,
+                coordinates = u32,
+                block = (256, 1, 1),
+                dynamic_shared_range = (0, 49152),
+                dynamic_shared_alignment = 16,
+            )]
+            pub fn device_merge_sort_block_keys_256<K, F, const ITEMS: usize>(
+                input: &[K],
+                order: F,
+                output: DisjointSlice<K, LinearTiles<ITEMS>>,
+            )
+            where
+                K: Copy,
+                F: Fn(&K, &K) -> ::core::cmp::Ordering + Copy,
+            {
+                ::rccl_cub::__private::merge_sort_block_keys_agent::<K, F, 256, ITEMS>(
+                    input,
+                    order,
+                    output,
+                    launch_context,
+                );
+            }
+
+            #[kernel(launch_context = launch_context)]
+            #[launch_bounds(256)]
+            #[launch_contract(
+                domain = 1,
+                coordinates = u32,
+                block = (256, 1, 1),
+                dynamic_shared_range = (0, 49152),
+                dynamic_shared_alignment = 16,
+            )]
+            pub fn device_merge_sort_block_keys_in_place_256<K, F, const ITEMS: usize>(
+                order: F,
+                output: DisjointSlice<K, LinearTiles<ITEMS>>,
+            )
+            where
+                K: Copy,
+                F: Fn(&K, &K) -> ::core::cmp::Ordering + Copy,
+            {
+                ::rccl_cub::__private::merge_sort_block_keys_in_place_agent::<K, F, 256, ITEMS>(
+                    order,
+                    output,
+                    launch_context,
+                );
+            }
+
+            #[kernel(launch_context = launch_context)]
+            #[launch_bounds(512)]
+            #[launch_contract(
+                domain = 1,
+                coordinates = u32,
+                block = (512, 1, 1),
+                dynamic_shared_range = (0, 49152),
+                dynamic_shared_alignment = 16,
+            )]
+            pub fn device_merge_sort_block_keys_512<K, F, const ITEMS: usize>(
+                input: &[K],
+                order: F,
+                output: DisjointSlice<K, LinearTiles<ITEMS>>,
+            )
+            where
+                K: Copy,
+                F: Fn(&K, &K) -> ::core::cmp::Ordering + Copy,
+            {
+                ::rccl_cub::__private::merge_sort_block_keys_agent::<K, F, 512, ITEMS>(
+                    input,
+                    order,
+                    output,
+                    launch_context,
+                );
+            }
+
+            #[kernel(launch_context = launch_context)]
+            #[launch_bounds(512)]
+            #[launch_contract(
+                domain = 1,
+                coordinates = u32,
+                block = (512, 1, 1),
+                dynamic_shared_range = (0, 49152),
+                dynamic_shared_alignment = 16,
+            )]
+            pub fn device_merge_sort_block_keys_in_place_512<K, F, const ITEMS: usize>(
+                order: F,
+                output: DisjointSlice<K, LinearTiles<ITEMS>>,
+            )
+            where
+                K: Copy,
+                F: Fn(&K, &K) -> ::core::cmp::Ordering + Copy,
+            {
+                ::rccl_cub::__private::merge_sort_block_keys_in_place_agent::<K, F, 512, ITEMS>(
+                    order,
+                    output,
+                    launch_context,
+                );
+            }
+
+            #[kernel(launch_context = launch_context)]
+            #[launch_bounds(256)]
+            #[launch_contract(
+                domain = 1,
+                coordinates = u32,
+                block = (256, 1, 1),
+                dynamic_shared_range = (0, 49152),
+                dynamic_shared_alignment = 16,
+            )]
+            pub fn device_merge_sort_block_pairs_256<K, V, F, const ITEMS: usize>(
+                input_keys: &[K],
+                input_values: &[V],
+                order: F,
+                output_keys: DisjointSlice<K, LinearTiles<ITEMS>>,
+                output_values: DisjointSlice<V, LinearTiles<ITEMS>>,
+            )
+            where
+                K: Copy,
+                V: Copy,
+                F: Fn(&K, &K) -> ::core::cmp::Ordering + Copy,
+            {
+                ::rccl_cub::__private::merge_sort_block_pairs_agent::<K, V, F, 256, ITEMS>(
+                    input_keys,
+                    input_values,
+                    order,
+                    output_keys,
+                    output_values,
+                    launch_context,
+                );
+            }
+
+            #[kernel(launch_context = launch_context)]
+            #[launch_bounds(256)]
+            #[launch_contract(
+                domain = 1,
+                coordinates = u32,
+                block = (256, 1, 1),
+                dynamic_shared_range = (0, 49152),
+                dynamic_shared_alignment = 16,
+            )]
+            pub fn device_merge_sort_block_pairs_in_place_256<K, V, F, const ITEMS: usize>(
+                order: F,
+                output_keys: DisjointSlice<K, LinearTiles<ITEMS>>,
+                output_values: DisjointSlice<V, LinearTiles<ITEMS>>,
+            )
+            where
+                K: Copy,
+                V: Copy,
+                F: Fn(&K, &K) -> ::core::cmp::Ordering + Copy,
+            {
+                ::rccl_cub::__private::merge_sort_block_pairs_in_place_agent::<
+                    K,
+                    V,
+                    F,
+                    256,
+                    ITEMS,
+                >(order, output_keys, output_values, launch_context);
+            }
+
+            #[kernel(launch_context = launch_context)]
+            #[launch_bounds(512)]
+            #[launch_contract(
+                domain = 1,
+                coordinates = u32,
+                block = (512, 1, 1),
+                dynamic_shared_range = (0, 49152),
+                dynamic_shared_alignment = 16,
+            )]
+            pub fn device_merge_sort_block_pairs_512<K, V, F, const ITEMS: usize>(
+                input_keys: &[K],
+                input_values: &[V],
+                order: F,
+                output_keys: DisjointSlice<K, LinearTiles<ITEMS>>,
+                output_values: DisjointSlice<V, LinearTiles<ITEMS>>,
+            )
+            where
+                K: Copy,
+                V: Copy,
+                F: Fn(&K, &K) -> ::core::cmp::Ordering + Copy,
+            {
+                ::rccl_cub::__private::merge_sort_block_pairs_agent::<K, V, F, 512, ITEMS>(
+                    input_keys,
+                    input_values,
+                    order,
+                    output_keys,
+                    output_values,
+                    launch_context,
+                );
+            }
+
+            #[kernel(launch_context = launch_context)]
+            #[launch_bounds(512)]
+            #[launch_contract(
+                domain = 1,
+                coordinates = u32,
+                block = (512, 1, 1),
+                dynamic_shared_range = (0, 49152),
+                dynamic_shared_alignment = 16,
+            )]
+            pub fn device_merge_sort_block_pairs_in_place_512<K, V, F, const ITEMS: usize>(
+                order: F,
+                output_keys: DisjointSlice<K, LinearTiles<ITEMS>>,
+                output_values: DisjointSlice<V, LinearTiles<ITEMS>>,
+            )
+            where
+                K: Copy,
+                V: Copy,
+                F: Fn(&K, &K) -> ::core::cmp::Ordering + Copy,
+            {
+                ::rccl_cub::__private::merge_sort_block_pairs_in_place_agent::<
+                    K,
+                    V,
+                    F,
+                    512,
+                    ITEMS,
+                >(order, output_keys, output_values, launch_context);
+            }
+
+            #[kernel(launch_context = launch_context)]
+            #[launch_bounds(256)]
+            #[launch_contract(domain = 1, block = (256, 1, 1))]
+            pub fn device_merge_sort_partition<K, F, const THREADS: usize, const ITEMS: usize>(
+                source: &[K],
+                target_merged_tiles: usize,
+                order: F,
+                mut partitions: DisjointSlice<usize>,
+            )
+            where
+                K: Copy,
+                F: Fn(&K, &K) -> ::core::cmp::Ordering + Copy,
+            {
+                let index = thread::index_1d(launch_context);
+                let partition_index = index.get();
+                let partition_count = partitions.len();
+                if let ::core::option::Option::Some(partition) = partitions.get_mut(index) {
+                    *partition = ::rccl_cub::__private::merge_sort_partition_point::<
+                        K,
+                        F,
+                        THREADS,
+                        ITEMS,
+                    >(
+                        source,
+                        partition_index,
+                        partition_count,
+                        target_merged_tiles,
                         &order,
                     );
-                    let mut second_taken = output_index - first_taken;
-                    let mut local = 0u32;
-                    while (local as usize) < ITEMS {
-                        let Some(mut key_slot) = key_run.at(local) else {
-                            break;
-                        };
-                        let Some(mut value_slot) = value_run.at(local) else {
-                            break;
-                        };
-                        let take_first = first_taken < first_keys.len()
-                            && (second_taken == second_keys.len()
-                                || !ordered_before(
-                                    &order,
-                                    &second_keys[second_taken],
-                                    &first_keys[first_taken],
-                                ));
-                        if take_first {
-                            key_slot.write(first_keys[first_taken]);
-                            value_slot.write(first_values[first_taken]);
-                            first_taken += 1;
-                        } else {
-                            key_slot.write(second_keys[second_taken]);
-                            value_slot.write(second_values[second_taken]);
-                            second_taken += 1;
-                        }
-                        local += 1;
-                    }
-                    output_index = output_index.wrapping_add(period);
                 }
-            }
-
-            #[inline(always)]
-            fn merge_sort_source<K, F>(
-                source: &[K],
-                output_index: usize,
-                run_length: usize,
-                order: &F,
-            ) -> usize
-            where
-                K: Copy,
-                F: Fn(&K, &K) -> ::core::cmp::Ordering + Copy,
-            {
-                let pair_length = run_length.saturating_mul(2);
-                let pair_begin = (output_index / pair_length) * pair_length;
-                let first_end_candidate = pair_begin.saturating_add(run_length);
-                let pair_end_candidate = pair_begin.saturating_add(pair_length);
-                let first_end = if first_end_candidate < source.len() {
-                    first_end_candidate
-                } else {
-                    source.len()
-                };
-                let pair_end = if pair_end_candidate < source.len() {
-                    pair_end_candidate
-                } else {
-                    source.len()
-                };
-                let diagonal = output_index - pair_begin;
-                let (from_first, source_index) = merged_source(
-                    source,
-                    pair_begin,
-                    first_end - pair_begin,
-                    source,
-                    first_end,
-                    pair_end - first_end,
-                    diagonal,
-                    order,
-                );
-                let _ = from_first;
-                source_index
             }
 
             #[kernel(launch_context = launch_context)]
             #[launch_bounds(256)]
-            #[launch_contract(domain = 1, coordinates = u32, block = (256, 1, 1))]
-            pub fn device_merge_sort_keys_pass<K, F>(
+            #[launch_contract(
+                domain = 1,
+                coordinates = u32,
+                block = (256, 1, 1),
+                dynamic_shared_range = (0, 49152),
+                dynamic_shared_alignment = 16,
+            )]
+            pub fn device_merge_sort_merge_keys_256<K, F, const ITEMS: usize>(
                 source: &[K],
-                run_length: usize,
+                partitions: &[usize],
+                target_merged_tiles: usize,
                 order: F,
-                mut output: DisjointSlice<K, LinearTiles<1>>,
+                output: DisjointSlice<K, LinearTiles<ITEMS>>,
             )
             where
                 K: Copy,
                 F: Fn(&K, &K) -> ::core::cmp::Ordering + Copy,
             {
-                let thread_index = thread::index_1d_u32(launch_context);
-                let mut output_index = thread_index.get() as usize;
-                let mut runs = output.grid_stride_runs32(thread_index);
-                let period = runs.period() as usize;
-                while let Some(mut run) = runs.next_run() {
-                    if let Some(mut slot) = run.at(0) {
-                        let source_index =
-                            merge_sort_source(source, output_index, run_length, &order);
-                        slot.write(source[source_index]);
-                    }
-                    output_index = output_index.wrapping_add(period);
-                }
+                ::rccl_cub::__private::merge_sort_merge_keys_agent::<K, F, 256, ITEMS>(
+                    source,
+                    partitions,
+                    target_merged_tiles,
+                    order,
+                    output,
+                    launch_context,
+                );
+            }
+
+            #[kernel(launch_context = launch_context)]
+            #[launch_bounds(512)]
+            #[launch_contract(
+                domain = 1,
+                coordinates = u32,
+                block = (512, 1, 1),
+                dynamic_shared_range = (0, 49152),
+                dynamic_shared_alignment = 16,
+            )]
+            pub fn device_merge_sort_merge_keys_512<K, F, const ITEMS: usize>(
+                source: &[K],
+                partitions: &[usize],
+                target_merged_tiles: usize,
+                order: F,
+                output: DisjointSlice<K, LinearTiles<ITEMS>>,
+            )
+            where
+                K: Copy,
+                F: Fn(&K, &K) -> ::core::cmp::Ordering + Copy,
+            {
+                ::rccl_cub::__private::merge_sort_merge_keys_agent::<K, F, 512, ITEMS>(
+                    source,
+                    partitions,
+                    target_merged_tiles,
+                    order,
+                    output,
+                    launch_context,
+                );
             }
 
             #[kernel(launch_context = launch_context)]
             #[launch_bounds(256)]
-            #[launch_contract(domain = 1, coordinates = u32, block = (256, 1, 1))]
-            pub fn device_merge_sort_pairs_pass<K, V, F>(
+            #[launch_contract(
+                domain = 1,
+                coordinates = u32,
+                block = (256, 1, 1),
+                dynamic_shared_range = (0, 49152),
+                dynamic_shared_alignment = 16,
+            )]
+            pub fn device_merge_sort_merge_pairs_256<K, V, F, const ITEMS: usize>(
                 source_keys: &[K],
                 source_values: &[V],
-                run_length: usize,
+                partitions: &[usize],
+                target_merged_tiles: usize,
                 order: F,
-                mut output_keys: DisjointSlice<K, LinearTiles<1>>,
-                mut output_values: DisjointSlice<V, LinearTiles<1>>,
+                output_keys: DisjointSlice<K, LinearTiles<ITEMS>>,
+                output_values: DisjointSlice<V, LinearTiles<ITEMS>>,
             )
             where
                 K: Copy,
                 V: Copy,
                 F: Fn(&K, &K) -> ::core::cmp::Ordering + Copy,
             {
-                let key_thread = thread::index_1d_u32(launch_context);
-                let value_thread = thread::index_1d_u32(launch_context);
-                let mut output_index = key_thread.get() as usize;
-                let mut key_runs = output_keys.grid_stride_runs32(key_thread);
-                let mut value_runs = output_values.grid_stride_runs32(value_thread);
-                let period = key_runs.period() as usize;
-                while let Some(mut key_run) = key_runs.next_run() {
-                    let Some(mut value_run) = value_runs.next_run() else {
-                        return;
-                    };
-                    if let Some(mut key_slot) = key_run.at(0) {
-                        if let Some(mut value_slot) = value_run.at(0) {
-                            let source_index =
-                                merge_sort_source(source_keys, output_index, run_length, &order);
-                            key_slot.write(source_keys[source_index]);
-                            value_slot.write(source_values[source_index]);
-                        }
-                    }
-                    output_index = output_index.wrapping_add(period);
-                }
+                ::rccl_cub::__private::merge_sort_merge_pairs_agent::<K, V, F, 256, ITEMS>(
+                    source_keys,
+                    source_values,
+                    partitions,
+                    target_merged_tiles,
+                    order,
+                    output_keys,
+                    output_values,
+                    launch_context,
+                );
+            }
+
+            #[kernel(launch_context = launch_context)]
+            #[launch_bounds(512)]
+            #[launch_contract(
+                domain = 1,
+                coordinates = u32,
+                block = (512, 1, 1),
+                dynamic_shared_range = (0, 49152),
+                dynamic_shared_alignment = 16,
+            )]
+            pub fn device_merge_sort_merge_pairs_512<K, V, F, const ITEMS: usize>(
+                source_keys: &[K],
+                source_values: &[V],
+                partitions: &[usize],
+                target_merged_tiles: usize,
+                order: F,
+                output_keys: DisjointSlice<K, LinearTiles<ITEMS>>,
+                output_values: DisjointSlice<V, LinearTiles<ITEMS>>,
+            )
+            where
+                K: Copy,
+                V: Copy,
+                F: Fn(&K, &K) -> ::core::cmp::Ordering + Copy,
+            {
+                ::rccl_cub::__private::merge_sort_merge_pairs_agent::<K, V, F, 512, ITEMS>(
+                    source_keys,
+                    source_values,
+                    partitions,
+                    target_merged_tiles,
+                    order,
+                    output_keys,
+                    output_values,
+                    launch_context,
+                );
+            }
+
+            #[kernel(launch_context = launch_context)]
+            #[launch_bounds(256)]
+            #[launch_contract(domain = 1, coordinates = u32, block = (256, 1, 1))]
+            pub fn device_radix_sort_init(
+                counters: DisjointSlice<i32, LinearTiles<1>>,
+                bins: DisjointSlice<u64, LinearTiles<1>>,
+            ) {
+                let counter_thread = thread::index_1d_u32(launch_context);
+                let bin_thread = thread::index_1d_u32(launch_context);
+                ::rccl_cub::__private::radix_init_bins_and_counters_agent(
+                    counters,
+                    bins,
+                    counter_thread,
+                    bin_thread,
+                );
+            }
+
+            #[kernel]
+            #[launch_bounds(128)]
+            #[launch_contract(
+                domain = 1,
+                coordinates = u32,
+                block = (128, 1, 1),
+                dynamic_shared_range = (4096, 8192),
+                dynamic_shared_alignment = 16,
+            )]
+            pub fn device_radix_sort_histogram<
+                K,
+                B,
+                ToOrdered,
+                Digit,
+                const ITEMS: usize,
+                const MAX_PASSES: usize,
+            >(
+                keys: &[K],
+                begin_bit: u32,
+                end_bit: u32,
+                sentinel: B,
+                to_ordered: ToOrdered,
+                digit: Digit,
+                bins: DisjointSlice<u64>,
+            ) where
+                K: Copy,
+                B: Copy,
+                ToOrdered: Fn(K) -> B + Copy,
+                Digit: Fn(B, u32, u32) -> u32 + Copy,
+            {
+                ::rccl_cub::__private::radix_histogram_agent::<
+                    K,
+                    B,
+                    ToOrdered,
+                    Digit,
+                    ITEMS,
+                    MAX_PASSES,
+                >(keys, begin_bit, end_bit, sentinel, to_ordered, digit, bins);
+            }
+
+            #[kernel(launch_context = launch_context)]
+            #[launch_bounds(256)]
+            #[launch_contract(
+                domain = 1,
+                coordinates = u32,
+                block = (256, 1, 1),
+                dynamic_shared_range = (2336, 2336),
+                dynamic_shared_alignment = 16,
+            )]
+            pub fn device_radix_sort_exclusive_sum<const PASSES: usize>(
+                bins: DisjointSlice<u64>,
+            ) {
+                let bin_thread = thread::index_1d_u32(launch_context);
+                ::rccl_cub::__private::radix_exclusive_sum_agent::<PASSES>(bins, bin_thread);
+            }
+
+            #[kernel]
+            #[launch_bounds(384)]
+            #[launch_contract(
+                domain = 1,
+                coordinates = u32,
+                block = (384, 1, 1),
+                dynamic_shared_range = (0, 101376),
+                dynamic_shared_alignment = 16,
+            )]
+            pub fn device_radix_sort_onesweep_keys<
+                K,
+                B,
+                ToOrdered,
+                FromOrdered,
+                Digit,
+                RankDigit,
+                const ITEMS: usize,
+                const UNION_BYTES: usize,
+            >(
+                lookback: DisjointSlice<i32>,
+                counter: DisjointSlice<i32>,
+                bins: &[u64],
+                input: &[K],
+                output: DisjointSlice<K>,
+                bin_offset: usize,
+                counter_offset: usize,
+                current_bit: u32,
+                num_bits: u32,
+                sentinel: B,
+                to_ordered: ToOrdered,
+                from_ordered: FromOrdered,
+                mut digit: Digit,
+                mut rank_digit: RankDigit,
+            ) where
+                K: Copy,
+                B: Copy,
+                ToOrdered: Fn(K) -> B + Copy,
+                FromOrdered: Fn(B) -> K + Copy,
+                Digit: FnMut(B, u32, u32) -> u32 + Copy,
+                RankDigit: FnMut(B, u32, u32) -> u32 + Copy,
+            {
+                ::rccl_cub::__private::radix_onesweep_keys_agent::<
+                    K,
+                    B,
+                    ToOrdered,
+                    FromOrdered,
+                    Digit,
+                    RankDigit,
+                    384,
+                    ITEMS,
+                    UNION_BYTES,
+                >(
+                    lookback,
+                    counter,
+                    bins,
+                    input,
+                    output,
+                    bin_offset,
+                    counter_offset,
+                    current_bit,
+                    num_bits,
+                    sentinel,
+                    to_ordered,
+                    from_ordered,
+                    digit,
+                    rank_digit,
+                );
+            }
+
+            #[kernel]
+            #[launch_bounds(384)]
+            #[launch_contract(
+                domain = 1,
+                coordinates = u32,
+                block = (384, 1, 1),
+                dynamic_shared_range = (0, 101376),
+                dynamic_shared_alignment = 16,
+            )]
+            pub fn device_radix_sort_onesweep_pairs<
+                K,
+                V,
+                B,
+                ToOrdered,
+                FromOrdered,
+                Digit,
+                RankDigit,
+                const ITEMS: usize,
+                const UNION_BYTES: usize,
+            >(
+                lookback: DisjointSlice<i32>,
+                counter: DisjointSlice<i32>,
+                bins: &[u64],
+                input_keys: &[K],
+                input_values: &[V],
+                output_keys: DisjointSlice<K>,
+                output_values: DisjointSlice<V>,
+                bin_offset: usize,
+                counter_offset: usize,
+                current_bit: u32,
+                num_bits: u32,
+                sentinel: B,
+                to_ordered: ToOrdered,
+                from_ordered: FromOrdered,
+                mut digit: Digit,
+                mut rank_digit: RankDigit,
+            ) where
+                K: Copy,
+                V: Copy,
+                B: Copy,
+                ToOrdered: Fn(K) -> B + Copy,
+                FromOrdered: Fn(B) -> K + Copy,
+                Digit: FnMut(B, u32, u32) -> u32 + Copy,
+                RankDigit: FnMut(B, u32, u32) -> u32 + Copy,
+            {
+                ::rccl_cub::__private::radix_onesweep_pairs_agent::<
+                    K,
+                    V,
+                    B,
+                    ToOrdered,
+                    FromOrdered,
+                    Digit,
+                    RankDigit,
+                    384,
+                    ITEMS,
+                    UNION_BYTES,
+                >(
+                    lookback,
+                    counter,
+                    bins,
+                    input_keys,
+                    input_values,
+                    output_keys,
+                    output_values,
+                    bin_offset,
+                    counter_offset,
+                    current_bit,
+                    num_bits,
+                    sentinel,
+                    to_ordered,
+                    from_ordered,
+                    digit,
+                    rank_digit,
+                );
             }
 
             #[kernel(launch_context = launch_context)]
@@ -697,23 +1332,6 @@ fn expand_device_transform_repeat_in_place(
     }})
 }
 
-fn merge_launch(
-    output_len: proc_macro2::TokenStream,
-    threads: u32,
-    items_per_thread: usize,
-) -> proc_macro2::TokenStream {
-    quote! {
-        ::rccl_cub::__private::cuda_core::LaunchConfig1D::new(
-            (#output_len)
-                .div_ceil(#items_per_thread)
-                .div_ceil(#threads as usize)
-                .min(u32::MAX as usize) as u32,
-            #threads,
-            0,
-        )
-    }
-}
-
 fn tmp_primitive_size(value_type: &syn::Type) -> syn::Result<usize> {
     let semantic_type = ungroup_type(value_type);
     let syn::Type::Path(path) = semantic_type else {
@@ -741,32 +1359,277 @@ fn tmp_primitive_size(value_type: &syn::Type) -> syn::Result<usize> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CudaTarget {
+    capability: u16,
+}
+
+/// Parse the macro-only architecture argument used for CUB policy selection.
+///
+/// The `sm_XX` token deliberately looks like a Rust type argument so the call
+/// retains ordinary turbofish syntax, but it is consumed here and is never
+/// emitted as a Rust type or runtime value.
+fn tmp_cuda_target(target: &syn::Type) -> syn::Result<CudaTarget> {
+    let syn::Type::Path(path) = ungroup_type(target) else {
+        return Err(syn::Error::new_spanned(
+            target,
+            "the CUB target must be a macro-only architecture such as `sm_89`",
+        ));
+    };
+    if path.qself.is_some() || path.path.segments.len() != 1 {
+        return Err(syn::Error::new_spanned(
+            target,
+            "the CUB target must be a single architecture token such as `sm_89`",
+        ));
+    }
+    let spelling = path.path.segments[0].ident.to_string();
+    let Some(numeric_with_suffix) = spelling.strip_prefix("sm_") else {
+        return Err(syn::Error::new_spanned(
+            target,
+            "the CUB target must use CUDA's `sm_XX` spelling",
+        ));
+    };
+    let numeric = numeric_with_suffix.trim_end_matches(['a', 'f']);
+    if numeric.len() < 2
+        || numeric.len() > 3
+        || numeric_with_suffix[numeric.len()..]
+            .chars()
+            .any(|suffix| !matches!(suffix, 'a' | 'f'))
+    {
+        return Err(syn::Error::new_spanned(
+            target,
+            "invalid CUDA architecture; expected `sm_XX`, `sm_XXX`, or an `a`/`f` suffix",
+        ));
+    }
+    let capability = numeric
+        .parse::<u16>()
+        .map_err(|_| syn::Error::new_spanned(target, "CUDA architecture digits must be decimal"))?;
+    if capability < 52 {
+        return Err(syn::Error::new_spanned(
+            target,
+            "the pinned CCCL ordering policies require sm_52 or newer",
+        ));
+    }
+    Ok(CudaTarget { capability })
+}
+
 fn nominal_4b_items(nominal: usize, item_size: usize) -> usize {
     (nominal * 4 / item_size).clamp(1, nominal)
 }
 
-fn merge_keys_launch(key_type: &syn::Type, items: usize) -> proc_macro2::TokenStream {
-    let launch = merge_launch(quote!(__rccl_output_len), 512, items);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MergeSortPolicy {
+    threads: usize,
+    items: usize,
+}
+
+fn merge_sort_policy(target: CudaTarget, key_size: usize) -> MergeSortPolicy {
+    if target.capability >= 60 {
+        MergeSortPolicy {
+            threads: 256,
+            items: nominal_4b_items(17, key_size),
+        }
+    } else {
+        MergeSortPolicy {
+            threads: 512,
+            items: nominal_4b_items(15, key_size),
+        }
+    }
+}
+
+fn align_16(bytes: usize) -> Option<usize> {
+    bytes.checked_add(15).map(|value| value / 16 * 16)
+}
+
+/// Size of the exact CUB `AgentBlockSort`/`AgentMerge` shared-memory union.
+///
+/// `BlockExchange` inserts one item after each 32 logical items when the
+/// per-thread item count is a power of two greater than four. `BlockStore`
+/// derives from that 16-byte-aligned exchange storage and appends one volatile
+/// `int` for the partial-tile guard. The block-merge member remains a dense
+/// `T[ITEMS_PER_TILE + 1]`; the enclosing union takes the larger member.
+fn merge_sort_shared_bytes(
+    threads: usize,
+    items: usize,
+    key_size: usize,
+    value_size: Option<usize>,
+) -> Option<usize> {
+    let tile_items = threads.checked_mul(items)?;
+    let exchange_items = if items > 4 && items.is_power_of_two() {
+        tile_items.checked_add(tile_items / 32)?
+    } else {
+        tile_items
+    };
+    let representation = |item_size: usize| -> Option<usize> {
+        let merge = tile_items.checked_add(1)?.checked_mul(item_size)?;
+        let exchange = align_16(exchange_items.checked_mul(item_size)?)?;
+        let store = align_16(exchange.checked_add(core::mem::size_of::<i32>())?)?;
+        Some(merge.max(store))
+    };
+    let mut bytes = representation(key_size)?;
+    if let Some(value_size) = value_size {
+        bytes = bytes.max(representation(value_size)?);
+    }
+    align_16(bytes)
+}
+
+fn merge_load_to_shared_policy(
+    target: CudaTarget,
+    key_size: usize,
+    value_size: Option<usize>,
+) -> (bool, bool) {
+    if target.capability >= 100 {
+        return (true, value_size.is_some());
+    }
+    if target.capability >= 90 {
+        let selected = match value_size {
+            None => key_size != 8,
+            Some(value_size) => {
+                !(key_size == 8 && value_size == 8)
+                    && (key_size != 16
+                        || (key_size == 16 && value_size == 1)
+                        || (key_size == 16 && value_size == 8))
+            }
+        };
+        return (selected, value_size.is_some() && selected);
+    }
+    if target.capability >= 80 {
+        let selected = match value_size {
+            None => key_size < 4,
+            Some(value_size) => {
+                key_size == 1
+                    || (key_size == 2 && value_size < 4)
+                    || (key_size == 4 && value_size == 1)
+            }
+        };
+        return (selected, value_size.is_some() && selected);
+    }
+    (false, false)
+}
+
+fn load_to_shared_buffer_bytes(items: usize, item_size: usize) -> usize {
+    let bytes = items * item_size;
+    if item_size >= 16 || bytes == 0 {
+        bytes
+    } else {
+        bytes.div_ceil(16) * 16 + 16
+    }
+}
+
+fn merge_shared_bytes(
+    threads: usize,
+    items: usize,
+    key_size: usize,
+    value_size: Option<usize>,
+    use_load_to_shared_keys: bool,
+    use_load_to_shared_values: bool,
+) -> usize {
+    let tile_items = threads * items;
+    let exchange_items = if items > 4 && items.is_power_of_two() {
+        tile_items + tile_items / 32
+    } else {
+        tile_items
+    };
+    let representation = |item_size: usize, use_load_to_shared: bool| {
+        if use_load_to_shared {
+            load_to_shared_buffer_bytes(tile_items + 1, item_size)
+                + usize::from(item_size < 16) * 32
+        } else {
+            (tile_items + 1) * item_size
+        }
+    };
+    let block_store = |item_size: usize| {
+        align_16(align_16(exchange_items * item_size).unwrap() + core::mem::size_of::<i32>())
+            .unwrap()
+    };
+    let mut union_bytes =
+        representation(key_size, use_load_to_shared_keys).max(block_store(key_size));
+    if let Some(value_size) = value_size {
+        union_bytes = union_bytes
+            .max(representation(value_size, use_load_to_shared_values))
+            .max(block_store(value_size));
+    }
+    let union_bytes = align_16(union_bytes).unwrap();
+    if use_load_to_shared_keys || use_load_to_shared_values {
+        // `temp_storages_with_bl2sh` derives from the 16-byte-aligned union,
+        // appends BlockLoadToShared's u64 mbarrier cell, then rounds the whole
+        // derived object back to its inherited 16-byte alignment.
+        align_16(union_bytes + core::mem::size_of::<u64>()).unwrap()
+    } else {
+        union_bytes
+    }
+}
+
+fn merge_keys_launch(
+    key_type: &syn::Type,
+    key_size: usize,
+    use_load_to_shared: bool,
+    items: usize,
+) -> proc_macro2::TokenStream {
+    let tile_items = 512usize * items;
+    let shared_bytes = merge_shared_bytes(512, items, key_size, None, use_load_to_shared, false);
     quote! {{
-        let __rccl_launch = #launch;
+        let __rccl_num_tiles = __rccl_output_len.div_ceil(#tile_items);
+        let __rccl_num_diagonals = __rccl_num_tiles + 1;
+        let __rccl_partition_launch = ::rccl_cub::__private::cuda_core::LaunchConfig1D::new(
+            __rccl_num_diagonals.div_ceil(256).min(u32::MAX as usize) as u32,
+            256,
+            0,
+        );
         match __rccl_execution
             .module()
-            .prepare_device_merge_keys::<#key_type, _, #items>(__rccl_launch)
+            .prepare_device_partition_merge_path::<#key_type, _, #items>(__rccl_partition_launch)
         {
             ::core::result::Result::Err(__rccl_error) => ::core::result::Result::Err(
                 ::rccl_cub::DeviceAlgorithmError::Launch(__rccl_error),
             ),
-            ::core::result::Result::Ok(__rccl_prepared) => __rccl_execution
+            ::core::result::Result::Ok(__rccl_partition_prepared) => match __rccl_execution
                 .module()
-                .device_merge_keys::<#key_type, _, #items>(
+                .device_partition_merge_path::<#key_type, _, #items>(
                     __rccl_execution.stream(),
-                    &__rccl_prepared,
+                    &__rccl_partition_prepared,
                     __rccl_first,
                     __rccl_second,
                     __rccl_order,
-                    __rccl_output,
+                    &mut *__rccl_partitions,
                 )
-                .map_err(::rccl_cub::DeviceAlgorithmError::Launch),
+            {
+                ::core::result::Result::Err(__rccl_error) => ::core::result::Result::Err(
+                    ::rccl_cub::DeviceAlgorithmError::Launch(__rccl_error),
+                ),
+                ::core::result::Result::Ok(()) => {
+                    let __rccl_agent_launch =
+                        ::rccl_cub::__private::cuda_core::LaunchConfig1D::new(
+                            __rccl_num_tiles.min(u32::MAX as usize) as u32,
+                            512,
+                            #shared_bytes as u32,
+                        );
+                    match __rccl_execution
+                        .module()
+                        .prepare_device_merge_keys_agent::<#key_type, _, #items, #key_size, #use_load_to_shared>(
+                            __rccl_agent_launch,
+                        )
+                    {
+                        ::core::result::Result::Err(__rccl_error) => {
+                            ::core::result::Result::Err(
+                                ::rccl_cub::DeviceAlgorithmError::Launch(__rccl_error),
+                            )
+                        }
+                        ::core::result::Result::Ok(__rccl_agent_prepared) => __rccl_execution
+                            .module()
+                            .device_merge_keys_agent::<#key_type, _, #items, #key_size, #use_load_to_shared>(
+                                __rccl_execution.stream(),
+                                &__rccl_agent_prepared,
+                                __rccl_first,
+                                __rccl_second,
+                                &*__rccl_partitions,
+                                __rccl_order,
+                                __rccl_output,
+                            )
+                            .map_err(::rccl_cub::DeviceAlgorithmError::Launch),
+                    }
+                }
+            },
         }
     }}
 }
@@ -774,32 +1637,86 @@ fn merge_keys_launch(key_type: &syn::Type, items: usize) -> proc_macro2::TokenSt
 fn merge_pairs_launch(
     key_type: &syn::Type,
     value_type: &syn::Type,
+    key_size: usize,
+    value_size: usize,
+    use_load_to_shared_keys: bool,
+    use_load_to_shared_values: bool,
     items: usize,
 ) -> proc_macro2::TokenStream {
-    let launch = merge_launch(quote!(__rccl_output_len), 512, items);
+    let tile_items = 512usize * items;
+    let shared_bytes = merge_shared_bytes(
+        512,
+        items,
+        key_size,
+        Some(value_size),
+        use_load_to_shared_keys,
+        use_load_to_shared_values,
+    );
     quote! {{
-        let __rccl_launch = #launch;
+        let __rccl_num_tiles = __rccl_output_len.div_ceil(#tile_items);
+        let __rccl_num_diagonals = __rccl_num_tiles + 1;
+        let __rccl_partition_launch = ::rccl_cub::__private::cuda_core::LaunchConfig1D::new(
+            __rccl_num_diagonals.div_ceil(256).min(u32::MAX as usize) as u32,
+            256,
+            0,
+        );
         match __rccl_execution
             .module()
-            .prepare_device_merge_pairs::<#key_type, #value_type, _, #items>(__rccl_launch)
+            .prepare_device_partition_merge_path::<#key_type, _, #items>(__rccl_partition_launch)
         {
             ::core::result::Result::Err(__rccl_error) => ::core::result::Result::Err(
                 ::rccl_cub::DeviceAlgorithmError::Launch(__rccl_error),
             ),
-            ::core::result::Result::Ok(__rccl_prepared) => __rccl_execution
+            ::core::result::Result::Ok(__rccl_partition_prepared) => match __rccl_execution
                 .module()
-                .device_merge_pairs::<#key_type, #value_type, _, #items>(
+                .device_partition_merge_path::<#key_type, _, #items>(
                     __rccl_execution.stream(),
-                    &__rccl_prepared,
+                    &__rccl_partition_prepared,
                     __rccl_first_keys,
-                    __rccl_first_values,
                     __rccl_second_keys,
-                    __rccl_second_values,
                     __rccl_order,
-                    __rccl_output_keys,
-                    __rccl_output_values,
+                    &mut *__rccl_partitions,
                 )
-                .map_err(::rccl_cub::DeviceAlgorithmError::Launch),
+            {
+                ::core::result::Result::Err(__rccl_error) => ::core::result::Result::Err(
+                    ::rccl_cub::DeviceAlgorithmError::Launch(__rccl_error),
+                ),
+                ::core::result::Result::Ok(()) => {
+                    let __rccl_agent_launch =
+                        ::rccl_cub::__private::cuda_core::LaunchConfig1D::new(
+                            __rccl_num_tiles.min(u32::MAX as usize) as u32,
+                            512,
+                            #shared_bytes as u32,
+                        );
+                    match __rccl_execution
+                        .module()
+                        .prepare_device_merge_pairs_agent::<#key_type, #value_type, _, #items, #key_size, #value_size, #use_load_to_shared_keys, #use_load_to_shared_values>(
+                            __rccl_agent_launch,
+                        )
+                    {
+                        ::core::result::Result::Err(__rccl_error) => {
+                            ::core::result::Result::Err(
+                                ::rccl_cub::DeviceAlgorithmError::Launch(__rccl_error),
+                            )
+                        }
+                        ::core::result::Result::Ok(__rccl_agent_prepared) => __rccl_execution
+                            .module()
+                            .device_merge_pairs_agent::<#key_type, #value_type, _, #items, #key_size, #value_size, #use_load_to_shared_keys, #use_load_to_shared_values>(
+                                __rccl_execution.stream(),
+                                &__rccl_agent_prepared,
+                                __rccl_first_keys,
+                                __rccl_first_values,
+                                __rccl_second_keys,
+                                __rccl_second_values,
+                                &*__rccl_partitions,
+                                __rccl_order,
+                                __rccl_output_keys,
+                                __rccl_output_values,
+                            )
+                            .map_err(::rccl_cub::DeviceAlgorithmError::Launch),
+                    }
+                }
+            },
         }
     }}
 }
@@ -809,46 +1726,105 @@ fn expand_device_merge_keys(
 ) -> syn::Result<proc_macro2::TokenStream> {
     let key_type = call.key_type;
     let key_size = tmp_primitive_size(&key_type)?;
-    let sm52_items = nominal_4b_items(13, key_size);
-    let sm60_items = nominal_4b_items(15, key_size);
-    let sm52_launch = merge_keys_launch(&key_type, sm52_items);
-    let sm60_launch = merge_keys_launch(&key_type, sm60_items);
+    let target = tmp_cuda_target(&call.target)?;
+    let nominal_items = if target.capability >= 60 { 15 } else { 13 };
+    let items = nominal_4b_items(nominal_items, key_size);
+    let (use_load_to_shared, _) = merge_load_to_shared_policy(target, key_size, None);
+    let launch = merge_keys_launch(&key_type, key_size, use_load_to_shared, items);
     let execution = call.execution;
     let first = call.first;
     let second = call.second;
+    let partitions = call.partitions;
     let output = call.output;
     let order = call.order;
+    audit::generated_algorithm_expression(
+        audit::Algorithm::DeviceMerge,
+        quote! {{
+            let __rccl_execution = #execution;
+            let __rccl_first = #first;
+            let __rccl_second = #second;
+            let __rccl_partitions = #partitions;
+            let __rccl_output = #output;
+            let __rccl_order = #order;
+            match __rccl_first.len().checked_add(__rccl_second.len()) {
+                ::core::option::Option::None => ::core::result::Result::Err(
+                    ::rccl_cub::DeviceAlgorithmError::SizeOverflow,
+                ),
+                ::core::option::Option::Some(__rccl_output_len)
+                    if __rccl_output.len() != __rccl_output_len =>
+                {
+                    ::core::result::Result::Err(::rccl_cub::DeviceAlgorithmError::LengthMismatch {
+                        role: "output",
+                        expected: __rccl_output_len,
+                        actual: __rccl_output.len(),
+                    })
+                }
+                ::core::option::Option::Some(0) => ::core::result::Result::Ok(()),
+                ::core::option::Option::Some(__rccl_output_len) => {
+                    let __rccl_required_partitions = __rccl_output_len.div_ceil(#items * 512) + 1;
+                    if __rccl_partitions.len() != __rccl_required_partitions {
+                        ::core::result::Result::Err(
+                            ::rccl_cub::DeviceAlgorithmError::LengthMismatch {
+                                role: "merge partitions",
+                                expected: __rccl_required_partitions,
+                                actual: __rccl_partitions.len(),
+                            },
+                        )
+                    } else {
+                        #launch
+                    }
+                }
+            }
+        }},
+    )
+}
+
+fn expand_device_merge_keys_partition_count(
+    call: call::DeviceMergeKeysPartitionCountCall,
+) -> syn::Result<proc_macro2::TokenStream> {
+    let key_size = tmp_primitive_size(&call.key_type)?;
+    let target = tmp_cuda_target(&call.target)?;
+    let nominal_items = if target.capability >= 60 { 15 } else { 13 };
+    let items = nominal_4b_items(nominal_items, key_size);
+    let tile_items = 512usize * items;
+    let first_len = call.first_len;
+    let second_len = call.second_len;
     audit::generated_expression(quote! {{
-        let __rccl_execution = #execution;
-        let __rccl_first = #first;
-        let __rccl_second = #second;
-        let __rccl_output = #output;
-        let __rccl_order = #order;
-        match __rccl_first.len().checked_add(__rccl_second.len()) {
+        match (#first_len).checked_add(#second_len) {
+            ::core::option::Option::Some(0) => ::core::result::Result::Ok(0usize),
+            ::core::option::Option::Some(__rccl_total) => {
+                ::core::result::Result::Ok(__rccl_total.div_ceil(#tile_items) + 1)
+            }
             ::core::option::Option::None => ::core::result::Result::Err(
                 ::rccl_cub::DeviceAlgorithmError::SizeOverflow,
             ),
-            ::core::option::Option::Some(__rccl_output_len)
-                if __rccl_output.len() != __rccl_output_len =>
-            {
-                ::core::result::Result::Err(::rccl_cub::DeviceAlgorithmError::LengthMismatch {
-                    role: "output",
-                    expected: __rccl_output_len,
-                    actual: __rccl_output.len(),
-                })
+        }
+    }})
+}
+
+fn expand_device_merge_pairs_partition_count(
+    call: call::DeviceMergePairsPartitionCountCall,
+) -> syn::Result<proc_macro2::TokenStream> {
+    let key_size = tmp_primitive_size(&call.key_type)?;
+    let value_size = tmp_primitive_size(&call.value_type)?;
+    let target = tmp_cuda_target(&call.target)?;
+    let tune_size = key_size
+        .checked_add(value_size)
+        .ok_or_else(|| syn::Error::new_spanned(&call.value_type, "merge tuning size overflowed"))?;
+    let nominal_items = if target.capability >= 60 { 15 } else { 13 };
+    let items = nominal_4b_items(nominal_items, tune_size);
+    let tile_items = 512usize * items;
+    let first_len = call.first_len;
+    let second_len = call.second_len;
+    audit::generated_expression(quote! {{
+        match (#first_len).checked_add(#second_len) {
+            ::core::option::Option::Some(0) => ::core::result::Result::Ok(0usize),
+            ::core::option::Option::Some(__rccl_total) => {
+                ::core::result::Result::Ok(__rccl_total.div_ceil(#tile_items) + 1)
             }
-            ::core::option::Option::Some(0) => ::core::result::Result::Ok(()),
-            ::core::option::Option::Some(__rccl_output_len) => {
-                match __rccl_execution.stream().context().compute_capability() {
-                    ::core::result::Result::Err(__rccl_error) => ::core::result::Result::Err(
-                        ::rccl_cub::DeviceAlgorithmError::Driver(__rccl_error),
-                    ),
-                    ::core::result::Result::Ok((__rccl_major, _)) if __rccl_major >= 6 => {
-                        #sm60_launch
-                    }
-                    ::core::result::Result::Ok(_) => #sm52_launch,
-                }
-            }
+            ::core::option::Option::None => ::core::result::Result::Err(
+                ::rccl_cub::DeviceAlgorithmError::SizeOverflow,
+            ),
         }
     }})
 }
@@ -858,97 +1834,136 @@ fn expand_device_merge_pairs(
 ) -> syn::Result<proc_macro2::TokenStream> {
     let key_type = call.key_type;
     let value_type = call.value_type;
-    let tune_size = tmp_primitive_size(&key_type)?
-        .checked_add(tmp_primitive_size(&value_type)?)
+    let target = tmp_cuda_target(&call.target)?;
+    let key_size = tmp_primitive_size(&key_type)?;
+    let value_size = tmp_primitive_size(&value_type)?;
+    let tune_size = key_size
+        .checked_add(value_size)
         .ok_or_else(|| syn::Error::new_spanned(&value_type, "merge tuning size overflowed"))?;
-    let sm52_items = nominal_4b_items(13, tune_size);
-    let sm60_items = nominal_4b_items(15, tune_size);
-    let sm52_launch = merge_pairs_launch(&key_type, &value_type, sm52_items);
-    let sm60_launch = merge_pairs_launch(&key_type, &value_type, sm60_items);
+    let nominal_items = if target.capability >= 60 { 15 } else { 13 };
+    let items = nominal_4b_items(nominal_items, tune_size);
+    let (use_load_to_shared_keys, use_load_to_shared_values) =
+        merge_load_to_shared_policy(target, key_size, Some(value_size));
+    let launch = merge_pairs_launch(
+        &key_type,
+        &value_type,
+        key_size,
+        value_size,
+        use_load_to_shared_keys,
+        use_load_to_shared_values,
+        items,
+    );
     let execution = call.execution;
     let first_keys = call.first_keys;
     let first_values = call.first_values;
     let second_keys = call.second_keys;
     let second_values = call.second_values;
+    let partitions = call.partitions;
     let output_keys = call.output_keys;
     let output_values = call.output_values;
     let order = call.order;
-    audit::generated_expression(quote! {{
-        let __rccl_execution = #execution;
-        let __rccl_first_keys = #first_keys;
-        let __rccl_first_values = #first_values;
-        let __rccl_second_keys = #second_keys;
-        let __rccl_second_values = #second_values;
-        let __rccl_output_keys = #output_keys;
-        let __rccl_output_values = #output_values;
-        let __rccl_order = #order;
-        let __rccl_first_len = __rccl_first_keys.len();
-        let __rccl_second_len = __rccl_second_keys.len();
-        let __rccl_shape_error = if __rccl_first_values.len() != __rccl_first_len {
-            ::core::option::Option::Some((
-                "first values",
-                __rccl_first_len,
-                __rccl_first_values.len(),
-            ))
-        } else if __rccl_second_values.len() != __rccl_second_len {
-            ::core::option::Option::Some((
-                "second values",
-                __rccl_second_len,
-                __rccl_second_values.len(),
-            ))
-        } else {
-            ::core::option::Option::None
-        };
-        if let ::core::option::Option::Some((__rccl_role, __rccl_expected, __rccl_actual)) =
-            __rccl_shape_error
-        {
-            ::core::result::Result::Err(::rccl_cub::DeviceAlgorithmError::LengthMismatch {
-                role: __rccl_role,
-                expected: __rccl_expected,
-                actual: __rccl_actual,
-            })
-        } else {
-            match __rccl_first_len.checked_add(__rccl_second_len) {
-                ::core::option::Option::None => ::core::result::Result::Err(
-                    ::rccl_cub::DeviceAlgorithmError::SizeOverflow,
-                ),
-                ::core::option::Option::Some(__rccl_output_len)
-                    if __rccl_output_keys.len() != __rccl_output_len =>
-                {
-                    ::core::result::Result::Err(
-                        ::rccl_cub::DeviceAlgorithmError::LengthMismatch {
-                            role: "output keys",
-                            expected: __rccl_output_len,
-                            actual: __rccl_output_keys.len(),
-                        },
-                    )
-                }
-                ::core::option::Option::Some(__rccl_output_len)
-                    if __rccl_output_values.len() != __rccl_output_len =>
-                {
-                    ::core::result::Result::Err(
-                        ::rccl_cub::DeviceAlgorithmError::LengthMismatch {
-                            role: "output values",
-                            expected: __rccl_output_len,
-                            actual: __rccl_output_values.len(),
-                        },
-                    )
-                }
-                ::core::option::Option::Some(0) => ::core::result::Result::Ok(()),
-                ::core::option::Option::Some(__rccl_output_len) => {
-                    match __rccl_execution.stream().context().compute_capability() {
-                        ::core::result::Result::Err(__rccl_error) => {
+    audit::generated_algorithm_expression(
+        audit::Algorithm::DeviceMerge,
+        quote! {{
+            let __rccl_execution = #execution;
+            let __rccl_first_keys = #first_keys;
+            let __rccl_first_values = #first_values;
+            let __rccl_second_keys = #second_keys;
+            let __rccl_second_values = #second_values;
+            let __rccl_partitions = #partitions;
+            let __rccl_output_keys = #output_keys;
+            let __rccl_output_values = #output_values;
+            let __rccl_order = #order;
+            let __rccl_first_len = __rccl_first_keys.len();
+            let __rccl_second_len = __rccl_second_keys.len();
+            let __rccl_shape_error = if __rccl_first_values.len() != __rccl_first_len {
+                ::core::option::Option::Some((
+                    "first values",
+                    __rccl_first_len,
+                    __rccl_first_values.len(),
+                ))
+            } else if __rccl_second_values.len() != __rccl_second_len {
+                ::core::option::Option::Some((
+                    "second values",
+                    __rccl_second_len,
+                    __rccl_second_values.len(),
+                ))
+            } else {
+                ::core::option::Option::None
+            };
+            if let ::core::option::Option::Some((__rccl_role, __rccl_expected, __rccl_actual)) =
+                __rccl_shape_error
+            {
+                ::core::result::Result::Err(::rccl_cub::DeviceAlgorithmError::LengthMismatch {
+                    role: __rccl_role,
+                    expected: __rccl_expected,
+                    actual: __rccl_actual,
+                })
+            } else {
+                match __rccl_first_len.checked_add(__rccl_second_len) {
+                    ::core::option::Option::None => ::core::result::Result::Err(
+                        ::rccl_cub::DeviceAlgorithmError::SizeOverflow,
+                    ),
+                    ::core::option::Option::Some(__rccl_output_len)
+                        if __rccl_output_keys.len() != __rccl_output_len =>
+                    {
+                        ::core::result::Result::Err(
+                            ::rccl_cub::DeviceAlgorithmError::LengthMismatch {
+                                role: "output keys",
+                                expected: __rccl_output_len,
+                                actual: __rccl_output_keys.len(),
+                            },
+                        )
+                    }
+                    ::core::option::Option::Some(__rccl_output_len)
+                        if __rccl_output_values.len() != __rccl_output_len =>
+                    {
+                        ::core::result::Result::Err(
+                            ::rccl_cub::DeviceAlgorithmError::LengthMismatch {
+                                role: "output values",
+                                expected: __rccl_output_len,
+                                actual: __rccl_output_values.len(),
+                            },
+                        )
+                    }
+                    ::core::option::Option::Some(0) => ::core::result::Result::Ok(()),
+                    ::core::option::Option::Some(__rccl_output_len) => {
+                        let __rccl_required_partitions =
+                            __rccl_output_len.div_ceil(#items * 512) + 1;
+                        if __rccl_partitions.len() != __rccl_required_partitions {
                             ::core::result::Result::Err(
-                                ::rccl_cub::DeviceAlgorithmError::Driver(__rccl_error),
+                                ::rccl_cub::DeviceAlgorithmError::LengthMismatch {
+                                    role: "merge partitions",
+                                    expected: __rccl_required_partitions,
+                                    actual: __rccl_partitions.len(),
+                                },
                             )
+                        } else {
+                            #launch
                         }
-                        ::core::result::Result::Ok((__rccl_major, _)) if __rccl_major >= 6 => {
-                            #sm60_launch
-                        }
-                        ::core::result::Result::Ok(_) => #sm52_launch,
                     }
                 }
             }
+        }},
+    )
+}
+
+fn expand_device_merge_sort_partition_count(
+    call: call::DeviceMergeSortPartitionCountCall,
+) -> syn::Result<proc_macro2::TokenStream> {
+    let key_size = tmp_primitive_size(&call.key_type)?;
+    let target = tmp_cuda_target(&call.target)?;
+    let policy = merge_sort_policy(target, key_size);
+    let tile_items = policy.threads * policy.items;
+    let len = call.len;
+    audit::generated_expression(quote! {{
+        let __rccl_len: usize = #len;
+        if __rccl_len == 0 {
+            ::core::result::Result::<usize, ::rccl_cub::DeviceAlgorithmError>::Ok(0usize)
+        } else {
+            ::core::result::Result::<usize, ::rccl_cub::DeviceAlgorithmError>::Ok(
+                __rccl_len.div_ceil(#tile_items) + 1,
+            )
         }
     }})
 }
@@ -956,74 +1971,78 @@ fn expand_device_merge_pairs(
 fn expand_device_merge_sort_keys(
     call: call::DeviceMergeSortKeysCall,
 ) -> syn::Result<proc_macro2::TokenStream> {
+    let key_type = call.key_type;
+    let key_size = tmp_primitive_size(&key_type)?;
+    let target = tmp_cuda_target(&call.target)?;
+    let policy = merge_sort_policy(target, key_size);
+    let threads = policy.threads;
+    let items = policy.items;
+    let tile_items = threads * items;
+    let shared_bytes =
+        merge_sort_shared_bytes(threads, items, key_size, None).ok_or_else(|| {
+            syn::Error::new_spanned(&key_type, "merge-sort shared storage overflowed")
+        })?;
+    let prepare_block = format_ident!("prepare_device_merge_sort_block_keys_{threads}");
+    let launch_block = format_ident!("device_merge_sort_block_keys_{threads}");
+    let prepare_block_in_place =
+        format_ident!("prepare_device_merge_sort_block_keys_in_place_{threads}");
+    let launch_block_in_place = format_ident!("device_merge_sort_block_keys_in_place_{threads}");
+    let prepare_merge = format_ident!("prepare_device_merge_sort_merge_keys_{threads}");
+    let launch_merge = format_ident!("device_merge_sort_merge_keys_{threads}");
     let execution = call.execution;
     let keys = call.keys;
+    let scratch_keys = call.scratch_keys;
+    let partitions = call.partitions;
     let order = call.order;
-    let launch = merge_launch(quote!(__rccl_len), 256, 1);
-    audit::generated_expression(quote! {{
-        let __rccl_execution = #execution;
-        let __rccl_keys = #keys;
-        let __rccl_order = #order;
-        let __rccl_len = __rccl_keys.len();
-        if __rccl_len < 2 {
-            ::core::result::Result::Ok(())
-        } else {
-            match ::rccl_cub::__private::cuda_core::DeviceBuffer::zeroed(
-                __rccl_execution.stream(),
-                __rccl_len,
-            ) {
-                ::core::result::Result::Err(__rccl_error) => ::core::result::Result::Err(
-                    ::rccl_cub::DeviceAlgorithmError::Driver(__rccl_error),
-                ),
-                ::core::result::Result::Ok(mut __rccl_scratch) => {
-                    let __rccl_launch = #launch;
-                    let mut __rccl_run_length = 1usize;
-                    let mut __rccl_source_is_keys = true;
-                    let mut __rccl_result = ::core::result::Result::Ok(());
-                    while __rccl_run_length < __rccl_len && __rccl_result.is_ok() {
-                        let __rccl_prepared = __rccl_execution
+    audit::generated_algorithm_expression(
+        audit::Algorithm::DeviceMergeSort,
+        quote! {{
+            let __rccl_execution = #execution;
+            let __rccl_keys = #keys;
+            let __rccl_scratch_keys = #scratch_keys;
+            let __rccl_partitions = #partitions;
+            let __rccl_order = #order;
+            let __rccl_len = __rccl_keys.len();
+            if __rccl_scratch_keys.len() != __rccl_len {
+                ::core::result::Result::Err(::rccl_cub::DeviceAlgorithmError::LengthMismatch {
+                    role: "merge-sort scratch keys",
+                    expected: __rccl_len,
+                    actual: __rccl_scratch_keys.len(),
+                })
+            } else if __rccl_len == 0 {
+                if __rccl_partitions.len() == 0 {
+                    ::core::result::Result::Ok(())
+                } else {
+                    ::core::result::Result::Err(::rccl_cub::DeviceAlgorithmError::LengthMismatch {
+                        role: "merge-sort partitions",
+                        expected: 0,
+                        actual: __rccl_partitions.len(),
+                    })
+                }
+            } else {
+                let __rccl_num_tiles = __rccl_len.div_ceil(#tile_items);
+                let __rccl_num_partitions = __rccl_num_tiles + 1;
+                if __rccl_partitions.len() != __rccl_num_partitions {
+                    ::core::result::Result::Err(::rccl_cub::DeviceAlgorithmError::LengthMismatch {
+                        role: "merge-sort partitions",
+                        expected: __rccl_num_partitions,
+                        actual: __rccl_partitions.len(),
+                    })
+                } else {
+                    let __rccl_num_passes = usize::BITS as usize
+                        - (__rccl_num_tiles - 1).leading_zeros() as usize;
+                    let mut __rccl_ping = (__rccl_num_passes & 1) == 0;
+                    let __rccl_agent_launch =
+                        ::rccl_cub::__private::cuda_core::LaunchConfig1D::new(
+                            __rccl_num_tiles.min(u32::MAX as usize) as u32,
+                            #threads as u32,
+                            #shared_bytes as u32,
+                        );
+                    let mut __rccl_result = if __rccl_ping {
+                        match __rccl_execution
                             .module()
-                            .prepare_device_merge_sort_keys_pass(__rccl_launch);
-                        __rccl_result = match __rccl_prepared {
-                            ::core::result::Result::Err(__rccl_error) => {
-                                ::core::result::Result::Err(
-                                    ::rccl_cub::DeviceAlgorithmError::Launch(__rccl_error),
-                                )
-                            }
-                            ::core::result::Result::Ok(__rccl_prepared) => {
-                                let __rccl_launch_result = if __rccl_source_is_keys {
-                                    __rccl_execution.module().device_merge_sort_keys_pass(
-                                        __rccl_execution.stream(),
-                                        &__rccl_prepared,
-                                        &*__rccl_keys,
-                                        __rccl_run_length,
-                                        __rccl_order,
-                                        &mut __rccl_scratch,
-                                    )
-                                } else {
-                                    __rccl_execution.module().device_merge_sort_keys_pass(
-                                        __rccl_execution.stream(),
-                                        &__rccl_prepared,
-                                        &__rccl_scratch,
-                                        __rccl_run_length,
-                                        __rccl_order,
-                                        &mut *__rccl_keys,
-                                    )
-                                };
-                                __rccl_launch_result
-                                    .map_err(::rccl_cub::DeviceAlgorithmError::Launch)
-                            }
-                        };
-                        __rccl_source_is_keys = !__rccl_source_is_keys;
-                        __rccl_run_length = __rccl_run_length
-                            .checked_mul(2)
-                            .unwrap_or(__rccl_len);
-                    }
-                    if __rccl_result.is_ok() && !__rccl_source_is_keys {
-                        let __rccl_prepared = __rccl_execution
-                            .module()
-                            .prepare_device_merge_sort_keys_pass(__rccl_launch);
-                        __rccl_result = match __rccl_prepared {
+                            .#prepare_block_in_place::<#key_type, _, #items>(__rccl_agent_launch)
+                        {
                             ::core::result::Result::Err(__rccl_error) => {
                                 ::core::result::Result::Err(
                                     ::rccl_cub::DeviceAlgorithmError::Launch(__rccl_error),
@@ -1031,60 +2050,536 @@ fn expand_device_merge_sort_keys(
                             }
                             ::core::result::Result::Ok(__rccl_prepared) => __rccl_execution
                                 .module()
-                                .device_merge_sort_keys_pass(
+                                .#launch_block_in_place::<#key_type, _, #items>(
                                     __rccl_execution.stream(),
                                     &__rccl_prepared,
-                                    &__rccl_scratch,
-                                    __rccl_len,
                                     __rccl_order,
                                     &mut *__rccl_keys,
                                 )
                                 .map_err(::rccl_cub::DeviceAlgorithmError::Launch),
+                        }
+                    } else {
+                        match __rccl_execution
+                            .module()
+                            .#prepare_block::<#key_type, _, #items>(__rccl_agent_launch)
+                        {
+                            ::core::result::Result::Err(__rccl_error) => {
+                                ::core::result::Result::Err(
+                                    ::rccl_cub::DeviceAlgorithmError::Launch(__rccl_error),
+                                )
+                            }
+                            ::core::result::Result::Ok(__rccl_prepared) => __rccl_execution
+                                .module()
+                                .#launch_block::<#key_type, _, #items>(
+                                    __rccl_execution.stream(),
+                                    &__rccl_prepared,
+                                    &*__rccl_keys,
+                                    __rccl_order,
+                                    &mut *__rccl_scratch_keys,
+                                )
+                                .map_err(::rccl_cub::DeviceAlgorithmError::Launch),
+                        }
+                    };
+                    let __rccl_partition_launch =
+                        ::rccl_cub::__private::cuda_core::LaunchConfig1D::new(
+                            __rccl_num_partitions.div_ceil(256).min(u32::MAX as usize) as u32,
+                            256,
+                            0,
+                        );
+                    let mut __rccl_pass = 0usize;
+                    while __rccl_pass < __rccl_num_passes && __rccl_result.is_ok() {
+                        let __rccl_target_merged_tiles = 2usize << __rccl_pass;
+                        __rccl_result = match __rccl_execution
+                            .module()
+                            .prepare_device_merge_sort_partition::<#key_type, _, #threads, #items>(
+                                __rccl_partition_launch,
+                            )
+                        {
+                            ::core::result::Result::Err(__rccl_error) => {
+                                ::core::result::Result::Err(
+                                    ::rccl_cub::DeviceAlgorithmError::Launch(__rccl_error),
+                                )
+                            }
+                            ::core::result::Result::Ok(__rccl_prepared) => {
+                                let __rccl_launch_result = if __rccl_ping {
+                                    __rccl_execution.module().device_merge_sort_partition::<
+                                        #key_type,
+                                        _,
+                                        #threads,
+                                        #items,
+                                    >(
+                                        __rccl_execution.stream(),
+                                        &__rccl_prepared,
+                                        &*__rccl_keys,
+                                        __rccl_target_merged_tiles,
+                                        __rccl_order,
+                                        &mut *__rccl_partitions,
+                                    )
+                                } else {
+                                    __rccl_execution.module().device_merge_sort_partition::<
+                                        #key_type,
+                                        _,
+                                        #threads,
+                                        #items,
+                                    >(
+                                        __rccl_execution.stream(),
+                                        &__rccl_prepared,
+                                        &*__rccl_scratch_keys,
+                                        __rccl_target_merged_tiles,
+                                        __rccl_order,
+                                        &mut *__rccl_partitions,
+                                    )
+                                };
+                                __rccl_launch_result
+                                    .map_err(::rccl_cub::DeviceAlgorithmError::Launch)
+                            }
                         };
+                        if __rccl_result.is_ok() {
+                            __rccl_result = match __rccl_execution
+                                .module()
+                                .#prepare_merge::<#key_type, _, #items>(__rccl_agent_launch)
+                            {
+                                ::core::result::Result::Err(__rccl_error) => {
+                                    ::core::result::Result::Err(
+                                        ::rccl_cub::DeviceAlgorithmError::Launch(__rccl_error),
+                                    )
+                                }
+                                ::core::result::Result::Ok(__rccl_prepared) => {
+                                    let __rccl_launch_result = if __rccl_ping {
+                                        __rccl_execution.module().#launch_merge::<
+                                            #key_type,
+                                            _,
+                                            #items,
+                                        >(
+                                            __rccl_execution.stream(),
+                                            &__rccl_prepared,
+                                            &*__rccl_keys,
+                                            &*__rccl_partitions,
+                                            __rccl_target_merged_tiles,
+                                            __rccl_order,
+                                            &mut *__rccl_scratch_keys,
+                                        )
+                                    } else {
+                                        __rccl_execution.module().#launch_merge::<
+                                            #key_type,
+                                            _,
+                                            #items,
+                                        >(
+                                            __rccl_execution.stream(),
+                                            &__rccl_prepared,
+                                            &*__rccl_scratch_keys,
+                                            &*__rccl_partitions,
+                                            __rccl_target_merged_tiles,
+                                            __rccl_order,
+                                            &mut *__rccl_keys,
+                                        )
+                                    };
+                                    __rccl_launch_result
+                                        .map_err(::rccl_cub::DeviceAlgorithmError::Launch)
+                                }
+                            };
+                        }
+                        __rccl_ping = !__rccl_ping;
+                        __rccl_pass += 1;
                     }
                     __rccl_result
                 }
             }
-        }
-    }})
+        }},
+    )
 }
 
 fn expand_device_merge_sort_keys_copy(
     call: call::DeviceMergeSortKeysCopyCall,
 ) -> syn::Result<proc_macro2::TokenStream> {
+    let key_type = call.key_type;
+    let key_size = tmp_primitive_size(&key_type)?;
+    let target = tmp_cuda_target(&call.target)?;
+    let policy = merge_sort_policy(target, key_size);
+    let threads = policy.threads;
+    let items = policy.items;
+    let tile_items = threads * items;
+    let shared_bytes =
+        merge_sort_shared_bytes(threads, items, key_size, None).ok_or_else(|| {
+            syn::Error::new_spanned(&key_type, "merge-sort shared storage overflowed")
+        })?;
+    let prepare_block = format_ident!("prepare_device_merge_sort_block_keys_{threads}");
+    let launch_block = format_ident!("device_merge_sort_block_keys_{threads}");
+    let prepare_merge = format_ident!("prepare_device_merge_sort_merge_keys_{threads}");
+    let launch_merge = format_ident!("device_merge_sort_merge_keys_{threads}");
     let execution = call.execution;
     let input = call.input;
+    let scratch_keys = call.scratch_keys;
+    let partitions = call.partitions;
     let output = call.output;
     let order = call.order;
-    let launch = merge_launch(quote!(__rccl_len), 256, 1);
-    audit::generated_expression(quote! {{
-        let __rccl_execution = #execution;
-        let __rccl_input = #input;
-        let __rccl_output = #output;
-        let __rccl_order = #order;
-        let __rccl_len = __rccl_input.len();
-        if __rccl_output.len() != __rccl_len {
-            ::core::result::Result::Err(::rccl_cub::DeviceAlgorithmError::LengthMismatch {
-                role: "output keys",
-                expected: __rccl_len,
-                actual: __rccl_output.len(),
-            })
-        } else if __rccl_len == 0 {
-            ::core::result::Result::Ok(())
-        } else {
-            match ::rccl_cub::__private::cuda_core::DeviceBuffer::zeroed(
-                __rccl_execution.stream(),
-                __rccl_len,
-            ) {
-                ::core::result::Result::Err(__rccl_error) => ::core::result::Result::Err(
-                    ::rccl_cub::DeviceAlgorithmError::Driver(__rccl_error),
-                ),
-                ::core::result::Result::Ok(mut __rccl_scratch) => {
-                    let __rccl_launch = #launch;
-                    let __rccl_prepared = __rccl_execution
+    audit::generated_algorithm_expression(
+        audit::Algorithm::DeviceMergeSort,
+        quote! {{
+            let __rccl_execution = #execution;
+            let __rccl_input = #input;
+            let __rccl_scratch_keys = #scratch_keys;
+            let __rccl_partitions = #partitions;
+            let __rccl_output = #output;
+            let __rccl_order = #order;
+            let __rccl_len = __rccl_input.len();
+            let __rccl_shape_error = if __rccl_output.len() != __rccl_len {
+                ::core::option::Option::Some(("output keys", __rccl_output.len()))
+            } else if __rccl_scratch_keys.len() != __rccl_len {
+                ::core::option::Option::Some((
+                    "merge-sort scratch keys",
+                    __rccl_scratch_keys.len(),
+                ))
+            } else {
+                ::core::option::Option::None
+            };
+            if let ::core::option::Option::Some((__rccl_role, __rccl_actual)) = __rccl_shape_error {
+                ::core::result::Result::Err(::rccl_cub::DeviceAlgorithmError::LengthMismatch {
+                    role: __rccl_role,
+                    expected: __rccl_len,
+                    actual: __rccl_actual,
+                })
+            } else if __rccl_len == 0 {
+                if __rccl_partitions.len() == 0 {
+                    ::core::result::Result::Ok(())
+                } else {
+                    ::core::result::Result::Err(::rccl_cub::DeviceAlgorithmError::LengthMismatch {
+                        role: "merge-sort partitions",
+                        expected: 0,
+                        actual: __rccl_partitions.len(),
+                    })
+                }
+            } else {
+                let __rccl_num_tiles = __rccl_len.div_ceil(#tile_items);
+                let __rccl_num_partitions = __rccl_num_tiles + 1;
+                if __rccl_partitions.len() != __rccl_num_partitions {
+                    ::core::result::Result::Err(::rccl_cub::DeviceAlgorithmError::LengthMismatch {
+                        role: "merge-sort partitions",
+                        expected: __rccl_num_partitions,
+                        actual: __rccl_partitions.len(),
+                    })
+                } else {
+                    let __rccl_num_passes = usize::BITS as usize
+                        - (__rccl_num_tiles - 1).leading_zeros() as usize;
+                    let mut __rccl_ping = (__rccl_num_passes & 1) == 0;
+                    let __rccl_agent_launch =
+                        ::rccl_cub::__private::cuda_core::LaunchConfig1D::new(
+                            __rccl_num_tiles.min(u32::MAX as usize) as u32,
+                            #threads as u32,
+                            #shared_bytes as u32,
+                        );
+                    let mut __rccl_result = match __rccl_execution
                         .module()
-                        .prepare_device_merge_sort_keys_pass(__rccl_launch);
-                    let mut __rccl_result = match __rccl_prepared {
+                        .#prepare_block::<#key_type, _, #items>(__rccl_agent_launch)
+                    {
+                        ::core::result::Result::Err(__rccl_error) => {
+                            ::core::result::Result::Err(
+                                ::rccl_cub::DeviceAlgorithmError::Launch(__rccl_error),
+                            )
+                        }
+                        ::core::result::Result::Ok(__rccl_prepared) => {
+                            let __rccl_launch_result = if __rccl_ping {
+                                __rccl_execution.module().#launch_block::<#key_type, _, #items>(
+                                    __rccl_execution.stream(),
+                                    &__rccl_prepared,
+                                    __rccl_input,
+                                    __rccl_order,
+                                    &mut *__rccl_output,
+                                )
+                            } else {
+                                __rccl_execution.module().#launch_block::<#key_type, _, #items>(
+                                    __rccl_execution.stream(),
+                                    &__rccl_prepared,
+                                    __rccl_input,
+                                    __rccl_order,
+                                    &mut *__rccl_scratch_keys,
+                                )
+                            };
+                            __rccl_launch_result.map_err(::rccl_cub::DeviceAlgorithmError::Launch)
+                        }
+                    };
+                    let __rccl_partition_launch =
+                        ::rccl_cub::__private::cuda_core::LaunchConfig1D::new(
+                            __rccl_num_partitions.div_ceil(256).min(u32::MAX as usize) as u32,
+                            256,
+                            0,
+                        );
+                    let mut __rccl_pass = 0usize;
+                    while __rccl_pass < __rccl_num_passes && __rccl_result.is_ok() {
+                        let __rccl_target_merged_tiles = 2usize << __rccl_pass;
+                        __rccl_result = match __rccl_execution
+                            .module()
+                            .prepare_device_merge_sort_partition::<#key_type, _, #threads, #items>(
+                                __rccl_partition_launch,
+                            )
+                        {
+                            ::core::result::Result::Err(__rccl_error) => {
+                                ::core::result::Result::Err(
+                                    ::rccl_cub::DeviceAlgorithmError::Launch(__rccl_error),
+                                )
+                            }
+                            ::core::result::Result::Ok(__rccl_prepared) => {
+                                let __rccl_launch_result = if __rccl_ping {
+                                    __rccl_execution.module().device_merge_sort_partition::<
+                                        #key_type,
+                                        _,
+                                        #threads,
+                                        #items,
+                                    >(
+                                        __rccl_execution.stream(),
+                                        &__rccl_prepared,
+                                        &*__rccl_output,
+                                        __rccl_target_merged_tiles,
+                                        __rccl_order,
+                                        &mut *__rccl_partitions,
+                                    )
+                                } else {
+                                    __rccl_execution.module().device_merge_sort_partition::<
+                                        #key_type,
+                                        _,
+                                        #threads,
+                                        #items,
+                                    >(
+                                        __rccl_execution.stream(),
+                                        &__rccl_prepared,
+                                        &*__rccl_scratch_keys,
+                                        __rccl_target_merged_tiles,
+                                        __rccl_order,
+                                        &mut *__rccl_partitions,
+                                    )
+                                };
+                                __rccl_launch_result
+                                    .map_err(::rccl_cub::DeviceAlgorithmError::Launch)
+                            }
+                        };
+                        if __rccl_result.is_ok() {
+                            __rccl_result = match __rccl_execution
+                                .module()
+                                .#prepare_merge::<#key_type, _, #items>(__rccl_agent_launch)
+                            {
+                                ::core::result::Result::Err(__rccl_error) => {
+                                    ::core::result::Result::Err(
+                                        ::rccl_cub::DeviceAlgorithmError::Launch(__rccl_error),
+                                    )
+                                }
+                                ::core::result::Result::Ok(__rccl_prepared) => {
+                                    let __rccl_launch_result = if __rccl_ping {
+                                        __rccl_execution.module().#launch_merge::<
+                                            #key_type,
+                                            _,
+                                            #items,
+                                        >(
+                                            __rccl_execution.stream(),
+                                            &__rccl_prepared,
+                                            &*__rccl_output,
+                                            &*__rccl_partitions,
+                                            __rccl_target_merged_tiles,
+                                            __rccl_order,
+                                            &mut *__rccl_scratch_keys,
+                                        )
+                                    } else {
+                                        __rccl_execution.module().#launch_merge::<
+                                            #key_type,
+                                            _,
+                                            #items,
+                                        >(
+                                            __rccl_execution.stream(),
+                                            &__rccl_prepared,
+                                            &*__rccl_scratch_keys,
+                                            &*__rccl_partitions,
+                                            __rccl_target_merged_tiles,
+                                            __rccl_order,
+                                            &mut *__rccl_output,
+                                        )
+                                    };
+                                    __rccl_launch_result
+                                        .map_err(::rccl_cub::DeviceAlgorithmError::Launch)
+                                }
+                            };
+                        }
+                        __rccl_ping = !__rccl_ping;
+                        __rccl_pass += 1;
+                    }
+                    __rccl_result
+                }
+            }
+        }},
+    )
+}
+
+fn expand_device_merge_sort_pairs(
+    call: call::DeviceMergeSortPairsCall,
+) -> syn::Result<proc_macro2::TokenStream> {
+    expand_device_merge_sort_pairs_operation(
+        call.key_type,
+        call.value_type,
+        call.target,
+        call.execution,
+        None,
+        None,
+        call.keys,
+        call.values,
+        call.scratch_keys,
+        call.scratch_values,
+        call.partitions,
+        call.order,
+    )
+}
+
+fn expand_device_merge_sort_pairs_copy(
+    call: call::DeviceMergeSortPairsCopyCall,
+) -> syn::Result<proc_macro2::TokenStream> {
+    expand_device_merge_sort_pairs_operation(
+        call.key_type,
+        call.value_type,
+        call.target,
+        call.execution,
+        Some(call.input_keys),
+        Some(call.input_values),
+        call.output_keys,
+        call.output_values,
+        call.scratch_keys,
+        call.scratch_values,
+        call.partitions,
+        call.order,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn expand_device_merge_sort_pairs_operation(
+    key_type: syn::Type,
+    value_type: syn::Type,
+    target: syn::Type,
+    execution: syn::Expr,
+    input_keys: Option<syn::Expr>,
+    input_values: Option<syn::Expr>,
+    primary_keys: syn::Expr,
+    primary_values: syn::Expr,
+    scratch_keys: syn::Expr,
+    scratch_values: syn::Expr,
+    partitions: syn::Expr,
+    order: syn::Expr,
+) -> syn::Result<proc_macro2::TokenStream> {
+    let key_size = tmp_primitive_size(&key_type)?;
+    let value_size = tmp_primitive_size(&value_type)?;
+    let target = tmp_cuda_target(&target)?;
+    let policy = merge_sort_policy(target, key_size);
+    let threads = policy.threads;
+    let items = policy.items;
+    let tile_items = threads * items;
+    let shared_bytes = merge_sort_shared_bytes(threads, items, key_size, Some(value_size))
+        .ok_or_else(|| {
+            syn::Error::new_spanned(&value_type, "merge-sort shared storage overflowed")
+        })?;
+    if shared_bytes > 49_152 {
+        return Err(syn::Error::new_spanned(
+            &value_type,
+            "this pinned CUB pair policy requires virtual shared memory, whose exact agent path is not implemented; refusing a smaller substitute",
+        ));
+    }
+
+    let prepare_block = format_ident!("prepare_device_merge_sort_block_pairs_{threads}");
+    let launch_block = format_ident!("device_merge_sort_block_pairs_{threads}");
+    let prepare_block_in_place =
+        format_ident!("prepare_device_merge_sort_block_pairs_in_place_{threads}");
+    let launch_block_in_place = format_ident!("device_merge_sort_block_pairs_in_place_{threads}");
+    let prepare_merge = format_ident!("prepare_device_merge_sort_merge_pairs_{threads}");
+    let launch_merge = format_ident!("device_merge_sort_merge_pairs_{threads}");
+
+    let (mode_bindings, shape_error, initial_block) = match (input_keys, input_values) {
+        (Some(input_keys), Some(input_values)) => (
+            quote! {
+                let __rccl_input_keys = #input_keys;
+                let __rccl_input_values = #input_values;
+                let __rccl_primary_keys = #primary_keys;
+                let __rccl_primary_values = #primary_values;
+            },
+            quote! {
+                if __rccl_input_values.len() != __rccl_len {
+                    ::core::option::Option::Some(("input values", __rccl_input_values.len()))
+                } else if __rccl_primary_keys.len() != __rccl_len {
+                    ::core::option::Option::Some(("output keys", __rccl_primary_keys.len()))
+                } else if __rccl_primary_values.len() != __rccl_len {
+                    ::core::option::Option::Some(("output values", __rccl_primary_values.len()))
+                } else if __rccl_scratch_keys.len() != __rccl_len {
+                    ::core::option::Option::Some(("merge-sort scratch keys", __rccl_scratch_keys.len()))
+                } else if __rccl_scratch_values.len() != __rccl_len {
+                    ::core::option::Option::Some(("merge-sort scratch values", __rccl_scratch_values.len()))
+                } else {
+                    ::core::option::Option::None
+                }
+            },
+            quote! {
+                match __rccl_execution
+                    .module()
+                    .#prepare_block::<#key_type, #value_type, _, #items>(__rccl_agent_launch)
+                {
+                    ::core::result::Result::Err(__rccl_error) => {
+                        ::core::result::Result::Err(
+                            ::rccl_cub::DeviceAlgorithmError::Launch(__rccl_error),
+                        )
+                    }
+                    ::core::result::Result::Ok(__rccl_prepared) => {
+                        let __rccl_launch_result = if __rccl_ping {
+                            __rccl_execution.module().#launch_block::<
+                                #key_type,
+                                #value_type,
+                                _,
+                                #items,
+                            >(
+                                __rccl_execution.stream(),
+                                &__rccl_prepared,
+                                __rccl_input_keys,
+                                __rccl_input_values,
+                                __rccl_order,
+                                &mut *__rccl_primary_keys,
+                                &mut *__rccl_primary_values,
+                            )
+                        } else {
+                            __rccl_execution.module().#launch_block::<
+                                #key_type,
+                                #value_type,
+                                _,
+                                #items,
+                            >(
+                                __rccl_execution.stream(),
+                                &__rccl_prepared,
+                                __rccl_input_keys,
+                                __rccl_input_values,
+                                __rccl_order,
+                                &mut *__rccl_scratch_keys,
+                                &mut *__rccl_scratch_values,
+                            )
+                        };
+                        __rccl_launch_result.map_err(::rccl_cub::DeviceAlgorithmError::Launch)
+                    }
+                }
+            },
+        ),
+        (None, None) => (
+            quote! {
+                let __rccl_primary_keys = #primary_keys;
+                let __rccl_primary_values = #primary_values;
+            },
+            quote! {
+                if __rccl_primary_values.len() != __rccl_len {
+                    ::core::option::Option::Some(("values", __rccl_primary_values.len()))
+                } else if __rccl_scratch_keys.len() != __rccl_len {
+                    ::core::option::Option::Some(("merge-sort scratch keys", __rccl_scratch_keys.len()))
+                } else if __rccl_scratch_values.len() != __rccl_len {
+                    ::core::option::Option::Some(("merge-sort scratch values", __rccl_scratch_values.len()))
+                } else {
+                    ::core::option::Option::None
+                }
+            },
+            quote! {
+                if __rccl_ping {
+                    match __rccl_execution
+                        .module()
+                        .#prepare_block_in_place::<#key_type, #value_type, _, #items>(
+                            __rccl_agent_launch,
+                        )
+                    {
                         ::core::result::Result::Err(__rccl_error) => {
                             ::core::result::Result::Err(
                                 ::rccl_cub::DeviceAlgorithmError::Launch(__rccl_error),
@@ -1092,384 +2587,274 @@ fn expand_device_merge_sort_keys_copy(
                         }
                         ::core::result::Result::Ok(__rccl_prepared) => __rccl_execution
                             .module()
-                            .device_merge_sort_keys_pass(
+                            .#launch_block_in_place::<#key_type, #value_type, _, #items>(
                                 __rccl_execution.stream(),
                                 &__rccl_prepared,
-                                __rccl_input,
-                                1usize,
                                 __rccl_order,
-                                &mut *__rccl_output,
+                                &mut *__rccl_primary_keys,
+                                &mut *__rccl_primary_values,
                             )
                             .map_err(::rccl_cub::DeviceAlgorithmError::Launch),
-                    };
-                    let mut __rccl_run_length = 2usize;
-                    let mut __rccl_source_is_output = true;
-                    while __rccl_run_length < __rccl_len && __rccl_result.is_ok() {
-                        let __rccl_prepared = __rccl_execution
+                    }
+                } else {
+                    match __rccl_execution
+                        .module()
+                        .#prepare_block::<#key_type, #value_type, _, #items>(__rccl_agent_launch)
+                    {
+                        ::core::result::Result::Err(__rccl_error) => {
+                            ::core::result::Result::Err(
+                                ::rccl_cub::DeviceAlgorithmError::Launch(__rccl_error),
+                            )
+                        }
+                        ::core::result::Result::Ok(__rccl_prepared) => __rccl_execution
                             .module()
-                            .prepare_device_merge_sort_keys_pass(__rccl_launch);
-                        __rccl_result = match __rccl_prepared {
+                            .#launch_block::<#key_type, #value_type, _, #items>(
+                                __rccl_execution.stream(),
+                                &__rccl_prepared,
+                                &*__rccl_primary_keys,
+                                &*__rccl_primary_values,
+                                __rccl_order,
+                                &mut *__rccl_scratch_keys,
+                                &mut *__rccl_scratch_values,
+                            )
+                            .map_err(::rccl_cub::DeviceAlgorithmError::Launch),
+                    }
+                }
+            },
+        ),
+        _ => unreachable!("copy mode always supplies both input ranges"),
+    };
+
+    audit::generated_algorithm_expression(
+        audit::Algorithm::DeviceMergeSort,
+        quote! {{
+            let __rccl_execution = #execution;
+            #mode_bindings
+            let __rccl_scratch_keys = #scratch_keys;
+            let __rccl_scratch_values = #scratch_values;
+            let __rccl_partitions = #partitions;
+            let __rccl_order = #order;
+            let __rccl_len = __rccl_primary_keys.len();
+            let __rccl_shape_error = #shape_error;
+            if let ::core::option::Option::Some((__rccl_role, __rccl_actual)) = __rccl_shape_error {
+                ::core::result::Result::Err(::rccl_cub::DeviceAlgorithmError::LengthMismatch {
+                    role: __rccl_role,
+                    expected: __rccl_len,
+                    actual: __rccl_actual,
+                })
+            } else if __rccl_len == 0 {
+                if __rccl_partitions.len() == 0 {
+                    ::core::result::Result::Ok(())
+                } else {
+                    ::core::result::Result::Err(::rccl_cub::DeviceAlgorithmError::LengthMismatch {
+                        role: "merge-sort partitions",
+                        expected: 0,
+                        actual: __rccl_partitions.len(),
+                    })
+                }
+            } else {
+                let __rccl_num_tiles = __rccl_len.div_ceil(#tile_items);
+                let __rccl_num_partitions = __rccl_num_tiles + 1;
+                if __rccl_partitions.len() != __rccl_num_partitions {
+                    ::core::result::Result::Err(::rccl_cub::DeviceAlgorithmError::LengthMismatch {
+                        role: "merge-sort partitions",
+                        expected: __rccl_num_partitions,
+                        actual: __rccl_partitions.len(),
+                    })
+                } else {
+                    let __rccl_num_passes = usize::BITS as usize
+                        - (__rccl_num_tiles - 1).leading_zeros() as usize;
+                    let mut __rccl_ping = (__rccl_num_passes & 1) == 0;
+                    let __rccl_agent_launch =
+                        ::rccl_cub::__private::cuda_core::LaunchConfig1D::new(
+                            __rccl_num_tiles.min(u32::MAX as usize) as u32,
+                            #threads as u32,
+                            #shared_bytes as u32,
+                        );
+                    let mut __rccl_result = #initial_block;
+                    let __rccl_partition_launch =
+                        ::rccl_cub::__private::cuda_core::LaunchConfig1D::new(
+                            __rccl_num_partitions.div_ceil(256).min(u32::MAX as usize) as u32,
+                            256,
+                            0,
+                        );
+                    let mut __rccl_pass = 0usize;
+                    while __rccl_pass < __rccl_num_passes && __rccl_result.is_ok() {
+                        let __rccl_target_merged_tiles = 2usize << __rccl_pass;
+                        __rccl_result = match __rccl_execution
+                            .module()
+                            .prepare_device_merge_sort_partition::<#key_type, _, #threads, #items>(
+                                __rccl_partition_launch,
+                            )
+                        {
                             ::core::result::Result::Err(__rccl_error) => {
                                 ::core::result::Result::Err(
                                     ::rccl_cub::DeviceAlgorithmError::Launch(__rccl_error),
                                 )
                             }
                             ::core::result::Result::Ok(__rccl_prepared) => {
-                                let __rccl_launch_result = if __rccl_source_is_output {
-                                    __rccl_execution.module().device_merge_sort_keys_pass(
+                                let __rccl_launch_result = if __rccl_ping {
+                                    __rccl_execution.module().device_merge_sort_partition::<
+                                        #key_type,
+                                        _,
+                                        #threads,
+                                        #items,
+                                    >(
                                         __rccl_execution.stream(),
                                         &__rccl_prepared,
-                                        &*__rccl_output,
-                                        __rccl_run_length,
+                                        &*__rccl_primary_keys,
+                                        __rccl_target_merged_tiles,
                                         __rccl_order,
-                                        &mut __rccl_scratch,
+                                        &mut *__rccl_partitions,
                                     )
                                 } else {
-                                    __rccl_execution.module().device_merge_sort_keys_pass(
+                                    __rccl_execution.module().device_merge_sort_partition::<
+                                        #key_type,
+                                        _,
+                                        #threads,
+                                        #items,
+                                    >(
                                         __rccl_execution.stream(),
                                         &__rccl_prepared,
-                                        &__rccl_scratch,
-                                        __rccl_run_length,
+                                        &*__rccl_scratch_keys,
+                                        __rccl_target_merged_tiles,
                                         __rccl_order,
-                                        &mut *__rccl_output,
+                                        &mut *__rccl_partitions,
                                     )
                                 };
                                 __rccl_launch_result
                                     .map_err(::rccl_cub::DeviceAlgorithmError::Launch)
                             }
                         };
-                        __rccl_source_is_output = !__rccl_source_is_output;
-                        __rccl_run_length = __rccl_run_length
-                            .checked_mul(2)
-                            .unwrap_or(__rccl_len);
-                    }
-                    if __rccl_result.is_ok() && !__rccl_source_is_output {
-                        let __rccl_prepared = __rccl_execution
-                            .module()
-                            .prepare_device_merge_sort_keys_pass(__rccl_launch);
-                        __rccl_result = match __rccl_prepared {
-                            ::core::result::Result::Err(__rccl_error) => {
-                                ::core::result::Result::Err(
-                                    ::rccl_cub::DeviceAlgorithmError::Launch(__rccl_error),
-                                )
-                            }
-                            ::core::result::Result::Ok(__rccl_prepared) => __rccl_execution
+                        if __rccl_result.is_ok() {
+                            __rccl_result = match __rccl_execution
                                 .module()
-                                .device_merge_sort_keys_pass(
-                                    __rccl_execution.stream(),
-                                    &__rccl_prepared,
-                                    &__rccl_scratch,
-                                    __rccl_len,
-                                    __rccl_order,
-                                    &mut *__rccl_output,
+                                .#prepare_merge::<#key_type, #value_type, _, #items>(
+                                    __rccl_agent_launch,
                                 )
-                                .map_err(::rccl_cub::DeviceAlgorithmError::Launch),
-                        };
-                    }
-                    __rccl_result
-                }
-            }
-        }
-    }})
-}
-
-fn expand_device_merge_sort_pairs(
-    call: call::DeviceMergeSortPairsCall,
-) -> syn::Result<proc_macro2::TokenStream> {
-    let execution = call.execution;
-    let keys = call.keys;
-    let values = call.values;
-    let order = call.order;
-    let launch = merge_launch(quote!(__rccl_len), 256, 1);
-    audit::generated_expression(quote! {{
-        let __rccl_execution = #execution;
-        let __rccl_keys = #keys;
-        let __rccl_values = #values;
-        let __rccl_order = #order;
-        let __rccl_len = __rccl_keys.len();
-        if __rccl_values.len() != __rccl_len {
-            ::core::result::Result::Err(::rccl_cub::DeviceAlgorithmError::LengthMismatch {
-                role: "values",
-                expected: __rccl_len,
-                actual: __rccl_values.len(),
-            })
-        } else if __rccl_len < 2 {
-            ::core::result::Result::Ok(())
-        } else {
-            match ::rccl_cub::__private::cuda_core::DeviceBuffer::zeroed(
-                __rccl_execution.stream(),
-                __rccl_len,
-            ) {
-                ::core::result::Result::Err(__rccl_error) => ::core::result::Result::Err(
-                    ::rccl_cub::DeviceAlgorithmError::Driver(__rccl_error),
-                ),
-                ::core::result::Result::Ok(mut __rccl_key_scratch) => {
-                    match ::rccl_cub::__private::cuda_core::DeviceBuffer::zeroed(
-                        __rccl_execution.stream(),
-                        __rccl_len,
-                    ) {
-                        ::core::result::Result::Err(__rccl_error) => {
-                            ::core::result::Result::Err(
-                                ::rccl_cub::DeviceAlgorithmError::Driver(__rccl_error),
-                            )
-                        }
-                        ::core::result::Result::Ok(mut __rccl_value_scratch) => {
-                            let __rccl_launch = #launch;
-                            let mut __rccl_run_length = 1usize;
-                            let mut __rccl_source_is_input = true;
-                            let mut __rccl_result = ::core::result::Result::Ok(());
-                            while __rccl_run_length < __rccl_len && __rccl_result.is_ok() {
-                                let __rccl_prepared = __rccl_execution
-                                    .module()
-                                    .prepare_device_merge_sort_pairs_pass(__rccl_launch);
-                                __rccl_result = match __rccl_prepared {
-                                    ::core::result::Result::Err(__rccl_error) => {
-                                        ::core::result::Result::Err(
-                                            ::rccl_cub::DeviceAlgorithmError::Launch(__rccl_error),
-                                        )
-                                    }
-                                    ::core::result::Result::Ok(__rccl_prepared) => {
-                                        let __rccl_launch_result = if __rccl_source_is_input {
-                                            __rccl_execution.module().device_merge_sort_pairs_pass(
-                                                __rccl_execution.stream(),
-                                                &__rccl_prepared,
-                                                &*__rccl_keys,
-                                                &*__rccl_values,
-                                                __rccl_run_length,
-                                                __rccl_order,
-                                                &mut __rccl_key_scratch,
-                                                &mut __rccl_value_scratch,
-                                            )
-                                        } else {
-                                            __rccl_execution.module().device_merge_sort_pairs_pass(
-                                                __rccl_execution.stream(),
-                                                &__rccl_prepared,
-                                                &__rccl_key_scratch,
-                                                &__rccl_value_scratch,
-                                                __rccl_run_length,
-                                                __rccl_order,
-                                                &mut *__rccl_keys,
-                                                &mut *__rccl_values,
-                                            )
-                                        };
-                                        __rccl_launch_result
-                                            .map_err(::rccl_cub::DeviceAlgorithmError::Launch)
-                                    }
-                                };
-                                __rccl_source_is_input = !__rccl_source_is_input;
-                                __rccl_run_length = __rccl_run_length
-                                    .checked_mul(2)
-                                    .unwrap_or(__rccl_len);
-                            }
-                            if __rccl_result.is_ok() && !__rccl_source_is_input {
-                                let __rccl_prepared = __rccl_execution
-                                    .module()
-                                    .prepare_device_merge_sort_pairs_pass(__rccl_launch);
-                                __rccl_result = match __rccl_prepared {
-                                    ::core::result::Result::Err(__rccl_error) => {
-                                        ::core::result::Result::Err(
-                                            ::rccl_cub::DeviceAlgorithmError::Launch(__rccl_error),
-                                        )
-                                    }
-                                    ::core::result::Result::Ok(__rccl_prepared) => __rccl_execution
-                                        .module()
-                                        .device_merge_sort_pairs_pass(
-                                            __rccl_execution.stream(),
-                                            &__rccl_prepared,
-                                            &__rccl_key_scratch,
-                                            &__rccl_value_scratch,
-                                            __rccl_len,
-                                            __rccl_order,
-                                            &mut *__rccl_keys,
-                                            &mut *__rccl_values,
-                                        )
-                                        .map_err(::rccl_cub::DeviceAlgorithmError::Launch),
-                                };
-                            }
-                            __rccl_result
-                        }
-                    }
-                }
-            }
-        }
-    }})
-}
-
-fn expand_device_merge_sort_pairs_copy(
-    call: call::DeviceMergeSortPairsCopyCall,
-) -> syn::Result<proc_macro2::TokenStream> {
-    let execution = call.execution;
-    let input_keys = call.input_keys;
-    let input_values = call.input_values;
-    let output_keys = call.output_keys;
-    let output_values = call.output_values;
-    let order = call.order;
-    let launch = merge_launch(quote!(__rccl_len), 256, 1);
-    audit::generated_expression(quote! {{
-        let __rccl_execution = #execution;
-        let __rccl_input_keys = #input_keys;
-        let __rccl_input_values = #input_values;
-        let __rccl_output_keys = #output_keys;
-        let __rccl_output_values = #output_values;
-        let __rccl_order = #order;
-        let __rccl_len = __rccl_input_keys.len();
-        let __rccl_shape_error = if __rccl_input_values.len() != __rccl_len {
-            ::core::option::Option::Some((
-                "input values",
-                __rccl_len,
-                __rccl_input_values.len(),
-            ))
-        } else if __rccl_output_keys.len() != __rccl_len {
-            ::core::option::Option::Some((
-                "output keys",
-                __rccl_len,
-                __rccl_output_keys.len(),
-            ))
-        } else if __rccl_output_values.len() != __rccl_len {
-            ::core::option::Option::Some((
-                "output values",
-                __rccl_len,
-                __rccl_output_values.len(),
-            ))
-        } else {
-            ::core::option::Option::None
-        };
-        if let ::core::option::Option::Some((__rccl_role, __rccl_expected, __rccl_actual)) =
-            __rccl_shape_error
-        {
-            ::core::result::Result::Err(::rccl_cub::DeviceAlgorithmError::LengthMismatch {
-                role: __rccl_role,
-                expected: __rccl_expected,
-                actual: __rccl_actual,
-            })
-        } else if __rccl_len == 0 {
-            ::core::result::Result::Ok(())
-        } else {
-            match ::rccl_cub::__private::cuda_core::DeviceBuffer::zeroed(
-                __rccl_execution.stream(),
-                __rccl_len,
-            ) {
-                ::core::result::Result::Err(__rccl_error) => ::core::result::Result::Err(
-                    ::rccl_cub::DeviceAlgorithmError::Driver(__rccl_error),
-                ),
-                ::core::result::Result::Ok(mut __rccl_key_scratch) => {
-                    match ::rccl_cub::__private::cuda_core::DeviceBuffer::zeroed(
-                        __rccl_execution.stream(),
-                        __rccl_len,
-                    ) {
-                        ::core::result::Result::Err(__rccl_error) => {
-                            ::core::result::Result::Err(
-                                ::rccl_cub::DeviceAlgorithmError::Driver(__rccl_error),
-                            )
-                        }
-                        ::core::result::Result::Ok(mut __rccl_value_scratch) => {
-                            let __rccl_launch = #launch;
-                            let __rccl_prepared = __rccl_execution
-                                .module()
-                                .prepare_device_merge_sort_pairs_pass(__rccl_launch);
-                            let mut __rccl_result = match __rccl_prepared {
+                            {
                                 ::core::result::Result::Err(__rccl_error) => {
                                     ::core::result::Result::Err(
                                         ::rccl_cub::DeviceAlgorithmError::Launch(__rccl_error),
                                     )
                                 }
-                                ::core::result::Result::Ok(__rccl_prepared) => __rccl_execution
-                                    .module()
-                                    .device_merge_sort_pairs_pass(
-                                        __rccl_execution.stream(),
-                                        &__rccl_prepared,
-                                        __rccl_input_keys,
-                                        __rccl_input_values,
-                                        1usize,
-                                        __rccl_order,
-                                        &mut *__rccl_output_keys,
-                                        &mut *__rccl_output_values,
-                                    )
-                                    .map_err(::rccl_cub::DeviceAlgorithmError::Launch),
-                            };
-                            let mut __rccl_run_length = 2usize;
-                            let mut __rccl_source_is_output = true;
-                            while __rccl_run_length < __rccl_len && __rccl_result.is_ok() {
-                                let __rccl_prepared = __rccl_execution
-                                    .module()
-                                    .prepare_device_merge_sort_pairs_pass(__rccl_launch);
-                                __rccl_result = match __rccl_prepared {
-                                    ::core::result::Result::Err(__rccl_error) => {
-                                        ::core::result::Result::Err(
-                                            ::rccl_cub::DeviceAlgorithmError::Launch(__rccl_error),
-                                        )
-                                    }
-                                    ::core::result::Result::Ok(__rccl_prepared) => {
-                                        let __rccl_launch_result = if __rccl_source_is_output {
-                                            __rccl_execution.module().device_merge_sort_pairs_pass(
-                                                __rccl_execution.stream(),
-                                                &__rccl_prepared,
-                                                &*__rccl_output_keys,
-                                                &*__rccl_output_values,
-                                                __rccl_run_length,
-                                                __rccl_order,
-                                                &mut __rccl_key_scratch,
-                                                &mut __rccl_value_scratch,
-                                            )
-                                        } else {
-                                            __rccl_execution.module().device_merge_sort_pairs_pass(
-                                                __rccl_execution.stream(),
-                                                &__rccl_prepared,
-                                                &__rccl_key_scratch,
-                                                &__rccl_value_scratch,
-                                                __rccl_run_length,
-                                                __rccl_order,
-                                                &mut *__rccl_output_keys,
-                                                &mut *__rccl_output_values,
-                                            )
-                                        };
-                                        __rccl_launch_result
-                                            .map_err(::rccl_cub::DeviceAlgorithmError::Launch)
-                                    }
-                                };
-                                __rccl_source_is_output = !__rccl_source_is_output;
-                                __rccl_run_length = __rccl_run_length
-                                    .checked_mul(2)
-                                    .unwrap_or(__rccl_len);
-                            }
-                            if __rccl_result.is_ok() && !__rccl_source_is_output {
-                                let __rccl_prepared = __rccl_execution
-                                    .module()
-                                    .prepare_device_merge_sort_pairs_pass(__rccl_launch);
-                                __rccl_result = match __rccl_prepared {
-                                    ::core::result::Result::Err(__rccl_error) => {
-                                        ::core::result::Result::Err(
-                                            ::rccl_cub::DeviceAlgorithmError::Launch(__rccl_error),
-                                        )
-                                    }
-                                    ::core::result::Result::Ok(__rccl_prepared) => __rccl_execution
-                                        .module()
-                                        .device_merge_sort_pairs_pass(
+                                ::core::result::Result::Ok(__rccl_prepared) => {
+                                    let __rccl_launch_result = if __rccl_ping {
+                                        __rccl_execution.module().#launch_merge::<
+                                            #key_type,
+                                            #value_type,
+                                            _,
+                                            #items,
+                                        >(
                                             __rccl_execution.stream(),
                                             &__rccl_prepared,
-                                            &__rccl_key_scratch,
-                                            &__rccl_value_scratch,
-                                            __rccl_len,
+                                            &*__rccl_primary_keys,
+                                            &*__rccl_primary_values,
+                                            &*__rccl_partitions,
+                                            __rccl_target_merged_tiles,
                                             __rccl_order,
-                                            &mut *__rccl_output_keys,
-                                            &mut *__rccl_output_values,
+                                            &mut *__rccl_scratch_keys,
+                                            &mut *__rccl_scratch_values,
                                         )
-                                        .map_err(::rccl_cub::DeviceAlgorithmError::Launch),
-                                };
-                            }
-                            __rccl_result
+                                    } else {
+                                        __rccl_execution.module().#launch_merge::<
+                                            #key_type,
+                                            #value_type,
+                                            _,
+                                            #items,
+                                        >(
+                                            __rccl_execution.stream(),
+                                            &__rccl_prepared,
+                                            &*__rccl_scratch_keys,
+                                            &*__rccl_scratch_values,
+                                            &*__rccl_partitions,
+                                            __rccl_target_merged_tiles,
+                                            __rccl_order,
+                                            &mut *__rccl_primary_keys,
+                                            &mut *__rccl_primary_values,
+                                        )
+                                    };
+                                    __rccl_launch_result
+                                        .map_err(::rccl_cub::DeviceAlgorithmError::Launch)
+                                }
+                            };
                         }
+                        __rccl_ping = !__rccl_ping;
+                        __rccl_pass += 1;
                     }
+                    __rccl_result
                 }
             }
-        }
-    }})
+        }},
+    )
 }
 
 fn expand_device_radix_sort_keys(
     call: call::DeviceRadixSortKeysCall,
 ) -> syn::Result<proc_macro2::TokenStream> {
     expand_device_radix_sort_keys_order(call, false)
+}
+
+fn expand_device_radix_sort_workspace(
+    call: call::DeviceRadixSortWorkspaceCall,
+) -> syn::Result<proc_macro2::TokenStream> {
+    let target = tmp_cuda_target(&call.target)?;
+    if !(80..90).contains(&target.capability) {
+        return Err(syn::Error::new_spanned(
+            call.target,
+            "this workspace macro contains the pinned Policy800 layout only",
+        ));
+    }
+    let primitive = primitive_radix(&call.key_type)?;
+    let _ = primitive_radix_lowering(&call.key_type, primitive, false)?;
+    let len = call.len;
+    let passes = primitive.bits.div_ceil(8) as usize;
+    let bit_size = (primitive.bits / 8) as usize;
+    let (onesweep_threads, onesweep_items) = reg_bound_policy(384, 21, bit_size);
+    let tile_items = onesweep_threads * onesweep_items;
+    audit::generated_expression(quote! {{
+        let __rccl_len: usize = #len;
+        let __rccl_blocks = __rccl_len.div_ceil(#tile_items);
+        ::rccl_cub::RadixSortWorkspaceCounts {
+            scratch_keys: __rccl_len,
+            bins: #passes * 256usize,
+            lookback: __rccl_blocks * 256usize,
+            counters: #passes,
+        }
+    }})
+}
+
+fn expand_device_radix_sort_pairs_workspace(
+    call: call::DeviceRadixSortPairsWorkspaceCall,
+) -> syn::Result<proc_macro2::TokenStream> {
+    let target = tmp_cuda_target(&call.target)?;
+    if !(80..90).contains(&target.capability) {
+        return Err(syn::Error::new_spanned(
+            call.target,
+            "this workspace macro contains the pinned Policy800 layout only",
+        ));
+    }
+    let primitive = primitive_radix(&call.key_type)?;
+    let _ = primitive_radix_lowering(&call.key_type, primitive, false)?;
+    let key_size = tmp_primitive_size(&call.key_type)?;
+    let value_size = tmp_primitive_size(&call.value_type)?;
+    let passes = primitive.bits.div_ceil(8) as usize;
+    let nominal_items = if key_size == 4 { 17 } else { 21 };
+    let (onesweep_threads, onesweep_items) =
+        reg_bound_policy(384, nominal_items, key_size.max(value_size));
+    let tile_items = onesweep_threads * onesweep_items;
+    let len = call.len;
+    audit::generated_expression(quote! {{
+        let __rccl_len: usize = #len;
+        let __rccl_blocks = __rccl_len.div_ceil(#tile_items);
+        ::rccl_cub::RadixSortPairsWorkspaceCounts {
+            scratch_keys: __rccl_len,
+            scratch_values: __rccl_len,
+            bins: #passes * 256usize,
+            lookback: __rccl_blocks * 256usize,
+            counters: #passes,
+        }
+    }})
 }
 
 fn expand_device_radix_sort_keys_descending(
@@ -1482,31 +2867,335 @@ fn expand_device_radix_sort_keys_order(
     call: call::DeviceRadixSortKeysCall,
     descending: bool,
 ) -> syn::Result<proc_macro2::TokenStream> {
+    let target = tmp_cuda_target(&call.target)?;
+    if !(80..90).contains(&target.capability) {
+        return Err(syn::Error::new_spanned(
+            call.target,
+            "this lowering contains the exact pinned Policy800 one-sweep graph only; another architecture must add its own macro-selected CUB policy",
+        ));
+    }
+    let primitive = primitive_radix(&call.key_type)?;
+    let lowering = primitive_radix_lowering(&call.key_type, primitive, descending)?;
     let key_type = call.key_type;
-    let radix = primitive_radix(&key_type)?;
+    let bit_type = lowering.bit_type;
+    let sentinel = lowering.sentinel;
+    let to_ordered = lowering.to_ordered;
+    let from_ordered = lowering.from_ordered;
+    let digit = lowering.digit;
+    // CUB recomputes digits after the rank callback and block scan. LLVM GVN
+    // otherwise retains all first-phase digit values across that boundary and
+    // halves Policy800 occupancy. Every primitive policy here executes complete
+    // eight-bit passes at byte-aligned offsets, so rotate-and-mask is the same
+    // digit extractor under the macro-proved pass domain, expressed as a
+    // distinct Rust operation for the second phase.
+    let rank_digit = primitive_radix_rank_digit(primitive);
     let execution = call.execution;
     let keys = call.keys;
-    let mut operations = Vec::new();
-    let mut shift = 0;
-    while shift < radix.bits {
-        let digit_bits = (radix.bits - shift).min(8);
-        let order = radix_digit_order(&key_type, radix, shift, digit_bits, descending);
-        operations.push(expand_device_merge_sort_keys(
-            call::DeviceMergeSortKeysCall {
-                key_type: key_type.clone(),
-                execution: syn::parse_quote!(__rccl_execution),
-                keys: syn::parse_quote!(&mut *__rccl_keys),
-                order,
-            },
-        )?);
-        shift += digit_bits;
-    }
-    let operations = sequence_operations(operations.into_iter());
-    audit::generated_expression(quote! {{
-        let __rccl_execution = #execution;
-        let __rccl_keys = #keys;
-        #operations
-    }})
+    let scratch_keys = call.scratch_keys;
+    let bins = call.bins;
+    let lookback = call.lookback;
+    let counters = call.counters;
+    let passes = primitive.bits.div_ceil(8) as usize;
+    let end_bit = primitive.bits;
+    let histogram_items = 16usize;
+    let bit_size = (primitive.bits / 8) as usize;
+    let (onesweep_threads, onesweep_items) = reg_bound_policy(384, 21, bit_size);
+    let tile_items = onesweep_threads * onesweep_items;
+    let histogram_shared_bytes = passes * 256usize * core::mem::size_of::<u32>();
+    let union_bytes = tile_items * bit_size;
+    let shared_bytes = union_bytes + 256usize * core::mem::size_of::<u64>();
+    let portion_size = ((1usize << 28) - 1) / tile_items * tile_items;
+    audit::generated_algorithm_expression(
+        audit::Algorithm::DeviceRadixSort,
+        quote! {{
+            let __rccl_execution = #execution;
+            let __rccl_keys = #keys;
+            let __rccl_scratch_keys = #scratch_keys;
+            let __rccl_bins = #bins;
+            let __rccl_lookback = #lookback;
+            let __rccl_counters = #counters;
+            let __rccl_len = __rccl_keys.len();
+            (|| -> ::core::result::Result<(), ::rccl_cub::DeviceAlgorithmError> {
+                if __rccl_scratch_keys.len() != __rccl_len {
+                    return ::core::result::Result::Err(
+                        ::rccl_cub::DeviceAlgorithmError::LengthMismatch {
+                            role: "radix scratch keys",
+                            expected: __rccl_len,
+                            actual: __rccl_scratch_keys.len(),
+                        },
+                    );
+                }
+                let __rccl_blocks = __rccl_len.div_ceil(#tile_items);
+                if __rccl_len > #portion_size {
+                    return ::core::result::Result::Err(
+                        ::rccl_cub::DeviceAlgorithmError::LengthMismatch {
+                            role: "Policy800 one-portion maximum",
+                            expected: #portion_size,
+                            actual: __rccl_len,
+                        },
+                    );
+                }
+                if __rccl_bins.len() != #passes * 256usize {
+                    return ::core::result::Result::Err(
+                        ::rccl_cub::DeviceAlgorithmError::LengthMismatch {
+                            role: "radix bins",
+                            expected: #passes * 256usize,
+                            actual: __rccl_bins.len(),
+                        },
+                    );
+                }
+                if __rccl_lookback.len() != __rccl_blocks * 256usize {
+                    return ::core::result::Result::Err(
+                        ::rccl_cub::DeviceAlgorithmError::LengthMismatch {
+                            role: "radix lookback",
+                            expected: __rccl_blocks * 256usize,
+                            actual: __rccl_lookback.len(),
+                        },
+                    );
+                }
+                if __rccl_counters.len() != #passes {
+                    return ::core::result::Result::Err(
+                        ::rccl_cub::DeviceAlgorithmError::LengthMismatch {
+                            role: "radix pass counters",
+                            expected: #passes,
+                            actual: __rccl_counters.len(),
+                        },
+                    );
+                }
+                if __rccl_len == 0 {
+                    return ::core::result::Result::Ok(());
+                }
+
+                let __rccl_init_launch =
+                    ::rccl_cub::__private::cuda_core::LaunchConfig1D::new(
+                        #passes as u32,
+                        256,
+                        0,
+                    );
+                let __rccl_init = __rccl_execution
+                    .module()
+                    .prepare_device_radix_sort_init(__rccl_init_launch)
+                    .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
+                __rccl_execution
+                    .module()
+                    .device_radix_sort_init(
+                        __rccl_execution.stream(),
+                        &__rccl_init,
+                        &mut *__rccl_counters,
+                        &mut *__rccl_bins,
+                    )
+                    .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
+
+                let __rccl_to_ordered = #to_ordered;
+                let __rccl_from_ordered = #from_ordered;
+                let __rccl_digit = #digit;
+                let __rccl_rank_digit = #rank_digit;
+                let __rccl_key_witness: #key_type = 0 as #key_type;
+                let __rccl_bit_witness: #bit_type = #sentinel;
+                let __rccl_histogram_probe_launch =
+                    ::rccl_cub::__private::cuda_core::LaunchConfig1D::new(
+                        1,
+                        128,
+                        #histogram_shared_bytes as u32,
+                    );
+                let __rccl_histogram_probe = __rccl_execution
+                    .module()
+                    .prepare_device_radix_sort_histogram_for::<
+                        #key_type,
+                        #bit_type,
+                        _,
+                        _,
+                        #histogram_items,
+                        #passes,
+                    >(
+                        &__rccl_key_witness,
+                        &__rccl_bit_witness,
+                        &__rccl_to_ordered,
+                        &__rccl_digit,
+                        __rccl_histogram_probe_launch,
+                    )
+                    .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
+                let __rccl_histogram_blocks_per_sm = __rccl_histogram_probe
+                    .function()
+                    .max_active_blocks_per_multiprocessor(128, #histogram_shared_bytes as u32)
+                    .map_err(::rccl_cub::DeviceAlgorithmError::Driver)?;
+                let __rccl_multiprocessors = __rccl_execution
+                    .stream()
+                    .context()
+                    .multiprocessor_count()
+                    .map_err(::rccl_cub::DeviceAlgorithmError::Driver)?;
+                let __rccl_histogram_launch =
+                    ::rccl_cub::__private::cuda_core::LaunchConfig1D::new(
+                        __rccl_histogram_blocks_per_sm * __rccl_multiprocessors,
+                        128,
+                        #histogram_shared_bytes as u32,
+                    );
+                let __rccl_histogram = __rccl_execution
+                    .module()
+                    .prepare_device_radix_sort_histogram_for::<
+                        #key_type,
+                        #bit_type,
+                        _,
+                        _,
+                        #histogram_items,
+                        #passes,
+                    >(
+                        &__rccl_key_witness,
+                        &__rccl_bit_witness,
+                        &__rccl_to_ordered,
+                        &__rccl_digit,
+                        __rccl_histogram_launch,
+                    )
+                    .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
+                __rccl_execution
+                    .module()
+                    .device_radix_sort_histogram::<
+                        #key_type,
+                        #bit_type,
+                        _,
+                        _,
+                        #histogram_items,
+                        #passes,
+                    >(
+                        __rccl_execution.stream(),
+                        &__rccl_histogram,
+                        &*__rccl_keys,
+                        0u32,
+                        #end_bit,
+                        #sentinel,
+                        __rccl_to_ordered,
+                        __rccl_digit,
+                        &mut *__rccl_bins,
+                    )
+                    .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
+
+                let __rccl_scan_launch =
+                    ::rccl_cub::__private::cuda_core::LaunchConfig1D::new(
+                        #passes as u32,
+                        256,
+                        2336,
+                    );
+                let __rccl_scan = __rccl_execution
+                    .module()
+                    .prepare_device_radix_sort_exclusive_sum::<#passes>(__rccl_scan_launch)
+                    .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
+                __rccl_execution
+                    .module()
+                    .device_radix_sort_exclusive_sum::<#passes>(
+                        __rccl_execution.stream(),
+                        &__rccl_scan,
+                        &mut *__rccl_bins,
+                    )
+                    .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
+
+                let __rccl_onesweep_launch =
+                    ::rccl_cub::__private::cuda_core::LaunchConfig1D::new(
+                        __rccl_blocks as u32,
+                        #onesweep_threads as u32,
+                        #shared_bytes as u32,
+                    );
+                let __rccl_onesweep = __rccl_execution
+                    .module()
+                    .prepare_device_radix_sort_onesweep_keys_for::<
+                        #key_type,
+                        #bit_type,
+                        _,
+                        _,
+                        _,
+                        _,
+                        #onesweep_items,
+                        #union_bytes,
+                    >(
+                        &__rccl_key_witness,
+                        &__rccl_bit_witness,
+                        &__rccl_to_ordered,
+                        &__rccl_from_ordered,
+                        &__rccl_digit,
+                        &__rccl_rank_digit,
+                        __rccl_onesweep_launch,
+                    )
+                    .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
+                // CUB's pass number and DoubleBuffer selector are ordinary
+                // dispatch state, not template parameters. Keep the policy
+                // pass count macro-selected, but execute the launch loop at
+                // runtime exactly like DispatchRadixSort::Dispatch.
+                let mut __rccl_pass = 0usize;
+                while __rccl_pass < #passes {
+                    ::rccl_cub::__private::ZeroRadixLookback::zero_radix_lookback(
+                        &mut *__rccl_lookback,
+                        __rccl_execution.stream(),
+                    )?;
+                    let __rccl_bin_offset = __rccl_pass * 256usize;
+                    let __rccl_current_bit = (__rccl_pass * 8usize) as u32;
+                    let __rccl_pass_result = if (__rccl_pass & 1usize) == 0 {
+                        __rccl_execution
+                            .module()
+                            .device_radix_sort_onesweep_keys::<
+                                #key_type,
+                                #bit_type,
+                                _,
+                                _,
+                                _,
+                                _,
+                                #onesweep_items,
+                                #union_bytes,
+                            >(
+                                __rccl_execution.stream(),
+                                &__rccl_onesweep,
+                                &mut *__rccl_lookback,
+                                &mut *__rccl_counters,
+                                &*__rccl_bins,
+                                &*__rccl_keys,
+                                &mut *__rccl_scratch_keys,
+                                __rccl_bin_offset,
+                                __rccl_pass,
+                                __rccl_current_bit,
+                                8u32,
+                                #sentinel,
+                                __rccl_to_ordered,
+                                __rccl_from_ordered,
+                                __rccl_digit,
+                                __rccl_rank_digit,
+                            )
+                    } else {
+                        __rccl_execution
+                            .module()
+                            .device_radix_sort_onesweep_keys::<
+                                #key_type,
+                                #bit_type,
+                                _,
+                                _,
+                                _,
+                                _,
+                                #onesweep_items,
+                                #union_bytes,
+                            >(
+                                __rccl_execution.stream(),
+                                &__rccl_onesweep,
+                                &mut *__rccl_lookback,
+                                &mut *__rccl_counters,
+                                &*__rccl_bins,
+                                &*__rccl_scratch_keys,
+                                &mut *__rccl_keys,
+                                __rccl_bin_offset,
+                                __rccl_pass,
+                                __rccl_current_bit,
+                                8u32,
+                                #sentinel,
+                                __rccl_to_ordered,
+                                __rccl_from_ordered,
+                                __rccl_digit,
+                                __rccl_rank_digit,
+                            )
+                    };
+                    __rccl_pass_result
+                        .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
+                    __rccl_pass += 1usize;
+                }
+                ::core::result::Result::Ok(())
+            })()
+        }},
+    )
 }
 
 fn expand_device_radix_sort_pairs(
@@ -1525,36 +3214,348 @@ fn expand_device_radix_sort_pairs_order(
     call: call::DeviceRadixSortPairsCall,
     descending: bool,
 ) -> syn::Result<proc_macro2::TokenStream> {
+    let target = tmp_cuda_target(&call.target)?;
+    if !(80..90).contains(&target.capability) {
+        return Err(syn::Error::new_spanned(
+            call.target,
+            "this lowering contains the exact pinned Policy800 one-sweep graph only; another architecture must add its own macro-selected CUB policy",
+        ));
+    }
+    let primitive = primitive_radix(&call.key_type)?;
+    let lowering = primitive_radix_lowering(&call.key_type, primitive, descending)?;
     let key_type = call.key_type;
     let value_type = call.value_type;
-    let radix = primitive_radix(&key_type)?;
+    let key_size = tmp_primitive_size(&key_type)?;
+    let value_size = tmp_primitive_size(&value_type)?;
+    let bit_type = lowering.bit_type;
+    let sentinel = lowering.sentinel;
+    let to_ordered = lowering.to_ordered;
+    let from_ordered = lowering.from_ordered;
+    let digit = lowering.digit;
+    let rank_digit = primitive_radix_rank_digit(primitive);
     let execution = call.execution;
     let keys = call.keys;
     let values = call.values;
-    let mut operations = Vec::new();
-    let mut shift = 0;
-    while shift < radix.bits {
-        let digit_bits = (radix.bits - shift).min(8);
-        let order = radix_digit_order(&key_type, radix, shift, digit_bits, descending);
-        operations.push(expand_device_merge_sort_pairs(
-            call::DeviceMergeSortPairsCall {
-                key_type: key_type.clone(),
-                value_type: value_type.clone(),
-                execution: syn::parse_quote!(__rccl_execution),
-                keys: syn::parse_quote!(&mut *__rccl_keys),
-                values: syn::parse_quote!(&mut *__rccl_values),
-                order,
-            },
-        )?);
-        shift += digit_bits;
-    }
-    let operations = sequence_operations(operations.into_iter());
-    audit::generated_expression(quote! {{
-        let __rccl_execution = #execution;
-        let __rccl_keys = #keys;
-        let __rccl_values = #values;
-        #operations
-    }})
+    let scratch_keys = call.scratch_keys;
+    let scratch_values = call.scratch_values;
+    let bins = call.bins;
+    let lookback = call.lookback;
+    let counters = call.counters;
+    let passes = primitive.bits.div_ceil(8) as usize;
+    let end_bit = primitive.bits;
+    let histogram_items = 16usize;
+    let nominal_items = if key_size == 4 { 17 } else { 21 };
+    let (onesweep_threads, onesweep_items) =
+        reg_bound_policy(384, nominal_items, key_size.max(value_size));
+    let tile_items = onesweep_threads * onesweep_items;
+    let histogram_shared_bytes = passes * 256usize * core::mem::size_of::<u32>();
+    let union_bytes = tile_items * key_size.max(value_size);
+    let shared_bytes = union_bytes + 256usize * core::mem::size_of::<u64>();
+    let portion_size = ((1usize << 28) - 1) / tile_items * tile_items;
+    audit::generated_algorithm_expression(
+        audit::Algorithm::DeviceRadixSort,
+        quote! {{
+            let __rccl_execution = #execution;
+            let __rccl_keys = #keys;
+            let __rccl_values = #values;
+            let __rccl_scratch_keys = #scratch_keys;
+            let __rccl_scratch_values = #scratch_values;
+            let __rccl_bins = #bins;
+            let __rccl_lookback = #lookback;
+            let __rccl_counters = #counters;
+            let __rccl_len = __rccl_keys.len();
+            (|| -> ::core::result::Result<(), ::rccl_cub::DeviceAlgorithmError> {
+                for (__rccl_role, __rccl_actual) in [
+                    ("radix values", __rccl_values.len()),
+                    ("radix scratch keys", __rccl_scratch_keys.len()),
+                    ("radix scratch values", __rccl_scratch_values.len()),
+                ] {
+                    if __rccl_actual != __rccl_len {
+                        return ::core::result::Result::Err(
+                            ::rccl_cub::DeviceAlgorithmError::LengthMismatch {
+                                role: __rccl_role,
+                                expected: __rccl_len,
+                                actual: __rccl_actual,
+                            },
+                        );
+                    }
+                }
+                let __rccl_blocks = __rccl_len.div_ceil(#tile_items);
+                if __rccl_len > #portion_size {
+                    return ::core::result::Result::Err(
+                        ::rccl_cub::DeviceAlgorithmError::LengthMismatch {
+                            role: "Policy800 one-portion maximum",
+                            expected: #portion_size,
+                            actual: __rccl_len,
+                        },
+                    );
+                }
+                if __rccl_bins.len() != #passes * 256usize {
+                    return ::core::result::Result::Err(
+                        ::rccl_cub::DeviceAlgorithmError::LengthMismatch {
+                            role: "radix bins",
+                            expected: #passes * 256usize,
+                            actual: __rccl_bins.len(),
+                        },
+                    );
+                }
+                if __rccl_lookback.len() != __rccl_blocks * 256usize {
+                    return ::core::result::Result::Err(
+                        ::rccl_cub::DeviceAlgorithmError::LengthMismatch {
+                            role: "radix lookback",
+                            expected: __rccl_blocks * 256usize,
+                            actual: __rccl_lookback.len(),
+                        },
+                    );
+                }
+                if __rccl_counters.len() != #passes {
+                    return ::core::result::Result::Err(
+                        ::rccl_cub::DeviceAlgorithmError::LengthMismatch {
+                            role: "radix pass counters",
+                            expected: #passes,
+                            actual: __rccl_counters.len(),
+                        },
+                    );
+                }
+                if __rccl_len == 0 {
+                    return ::core::result::Result::Ok(());
+                }
+
+                let __rccl_init_launch =
+                    ::rccl_cub::__private::cuda_core::LaunchConfig1D::new(
+                        #passes as u32,
+                        256,
+                        0,
+                    );
+                let __rccl_init = __rccl_execution
+                    .module()
+                    .prepare_device_radix_sort_init(__rccl_init_launch)
+                    .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
+                __rccl_execution
+                    .module()
+                    .device_radix_sort_init(
+                        __rccl_execution.stream(),
+                        &__rccl_init,
+                        &mut *__rccl_counters,
+                        &mut *__rccl_bins,
+                    )
+                    .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
+
+                let __rccl_to_ordered = #to_ordered;
+                let __rccl_from_ordered = #from_ordered;
+                let __rccl_digit = #digit;
+                let __rccl_rank_digit = #rank_digit;
+                let __rccl_key_witness: #key_type = 0 as #key_type;
+                let __rccl_value_witness: #value_type = ::core::default::Default::default();
+                let __rccl_bit_witness: #bit_type = #sentinel;
+                let __rccl_histogram_probe_launch =
+                    ::rccl_cub::__private::cuda_core::LaunchConfig1D::new(
+                        1,
+                        128,
+                        #histogram_shared_bytes as u32,
+                    );
+                let __rccl_histogram_probe = __rccl_execution
+                    .module()
+                    .prepare_device_radix_sort_histogram_for::<
+                        #key_type,
+                        #bit_type,
+                        _,
+                        _,
+                        #histogram_items,
+                        #passes,
+                    >(
+                        &__rccl_key_witness,
+                        &__rccl_bit_witness,
+                        &__rccl_to_ordered,
+                        &__rccl_digit,
+                        __rccl_histogram_probe_launch,
+                    )
+                    .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
+                let __rccl_histogram_blocks_per_sm = __rccl_histogram_probe
+                    .function()
+                    .max_active_blocks_per_multiprocessor(128, #histogram_shared_bytes as u32)
+                    .map_err(::rccl_cub::DeviceAlgorithmError::Driver)?;
+                let __rccl_multiprocessors = __rccl_execution
+                    .stream()
+                    .context()
+                    .multiprocessor_count()
+                    .map_err(::rccl_cub::DeviceAlgorithmError::Driver)?;
+                let __rccl_histogram_launch =
+                    ::rccl_cub::__private::cuda_core::LaunchConfig1D::new(
+                        __rccl_histogram_blocks_per_sm * __rccl_multiprocessors,
+                        128,
+                        #histogram_shared_bytes as u32,
+                    );
+                let __rccl_histogram = __rccl_execution
+                    .module()
+                    .prepare_device_radix_sort_histogram_for::<
+                        #key_type,
+                        #bit_type,
+                        _,
+                        _,
+                        #histogram_items,
+                        #passes,
+                    >(
+                        &__rccl_key_witness,
+                        &__rccl_bit_witness,
+                        &__rccl_to_ordered,
+                        &__rccl_digit,
+                        __rccl_histogram_launch,
+                    )
+                    .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
+                __rccl_execution
+                    .module()
+                    .device_radix_sort_histogram::<
+                        #key_type,
+                        #bit_type,
+                        _,
+                        _,
+                        #histogram_items,
+                        #passes,
+                    >(
+                        __rccl_execution.stream(),
+                        &__rccl_histogram,
+                        &*__rccl_keys,
+                        0u32,
+                        #end_bit,
+                        #sentinel,
+                        __rccl_to_ordered,
+                        __rccl_digit,
+                        &mut *__rccl_bins,
+                    )
+                    .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
+
+                let __rccl_scan_launch =
+                    ::rccl_cub::__private::cuda_core::LaunchConfig1D::new(
+                        #passes as u32,
+                        256,
+                        2336,
+                    );
+                let __rccl_scan = __rccl_execution
+                    .module()
+                    .prepare_device_radix_sort_exclusive_sum::<#passes>(__rccl_scan_launch)
+                    .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
+                __rccl_execution
+                    .module()
+                    .device_radix_sort_exclusive_sum::<#passes>(
+                        __rccl_execution.stream(),
+                        &__rccl_scan,
+                        &mut *__rccl_bins,
+                    )
+                    .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
+
+                let __rccl_onesweep_launch =
+                    ::rccl_cub::__private::cuda_core::LaunchConfig1D::new(
+                        __rccl_blocks as u32,
+                        #onesweep_threads as u32,
+                        #shared_bytes as u32,
+                    );
+                let __rccl_onesweep = __rccl_execution
+                    .module()
+                    .prepare_device_radix_sort_onesweep_pairs_for::<
+                        #key_type,
+                        #value_type,
+                        #bit_type,
+                        _,
+                        _,
+                        _,
+                        _,
+                        #onesweep_items,
+                        #union_bytes,
+                    >(
+                        &__rccl_key_witness,
+                        &__rccl_value_witness,
+                        &__rccl_bit_witness,
+                        &__rccl_to_ordered,
+                        &__rccl_from_ordered,
+                        &__rccl_digit,
+                        &__rccl_rank_digit,
+                        __rccl_onesweep_launch,
+                    )
+                    .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
+                let mut __rccl_pass = 0usize;
+                while __rccl_pass < #passes {
+                    ::rccl_cub::__private::ZeroRadixLookback::zero_radix_lookback(
+                        &mut *__rccl_lookback,
+                        __rccl_execution.stream(),
+                    )?;
+                    let __rccl_bin_offset = __rccl_pass * 256usize;
+                    let __rccl_current_bit = (__rccl_pass * 8usize) as u32;
+                    let __rccl_pass_result = if (__rccl_pass & 1usize) == 0 {
+                        __rccl_execution
+                            .module()
+                            .device_radix_sort_onesweep_pairs::<
+                                #key_type,
+                                #value_type,
+                                #bit_type,
+                                _,
+                                _,
+                                _,
+                                _,
+                                #onesweep_items,
+                                #union_bytes,
+                            >(
+                                __rccl_execution.stream(),
+                                &__rccl_onesweep,
+                                &mut *__rccl_lookback,
+                                &mut *__rccl_counters,
+                                &*__rccl_bins,
+                                &*__rccl_keys,
+                                &*__rccl_values,
+                                &mut *__rccl_scratch_keys,
+                                &mut *__rccl_scratch_values,
+                                __rccl_bin_offset,
+                                __rccl_pass,
+                                __rccl_current_bit,
+                                8u32,
+                                #sentinel,
+                                __rccl_to_ordered,
+                                __rccl_from_ordered,
+                                __rccl_digit,
+                                __rccl_rank_digit,
+                            )
+                    } else {
+                        __rccl_execution
+                            .module()
+                            .device_radix_sort_onesweep_pairs::<
+                                #key_type,
+                                #value_type,
+                                #bit_type,
+                                _,
+                                _,
+                                _,
+                                _,
+                                #onesweep_items,
+                                #union_bytes,
+                            >(
+                                __rccl_execution.stream(),
+                                &__rccl_onesweep,
+                                &mut *__rccl_lookback,
+                                &mut *__rccl_counters,
+                                &*__rccl_bins,
+                                &*__rccl_scratch_keys,
+                                &*__rccl_scratch_values,
+                                &mut *__rccl_keys,
+                                &mut *__rccl_values,
+                                __rccl_bin_offset,
+                                __rccl_pass,
+                                __rccl_current_bit,
+                                8u32,
+                                #sentinel,
+                                __rccl_to_ordered,
+                                __rccl_from_ordered,
+                                __rccl_digit,
+                                __rccl_rank_digit,
+                            )
+                    };
+                    __rccl_pass_result
+                        .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
+                    __rccl_pass += 1usize;
+                }
+                ::core::result::Result::Ok(())
+            })()
+        }},
+    )
 }
 
 fn expand_warp_reduce(call: call::WarpReduceCall) -> syn::Result<proc_macro2::TokenStream> {
@@ -1875,62 +3876,274 @@ mod tests {
     }
 
     #[test]
-    fn signed_radix_tmp_is_resolved_by_the_macro_and_emits_only_safe_rust() {
-        let call: call::DeviceRadixSortKeysCall = syn::parse_quote! { ::<i32>(&exec, &mut keys) };
+    fn radix_keys_emit_the_exact_policy800_onesweep_graph() {
+        let call: call::DeviceRadixSortKeysCall = syn::parse_quote! {
+            ::<i32, sm_89>(
+                &exec,
+                &mut keys,
+                &mut scratch_keys,
+                &mut bins,
+                &mut lookback,
+                &mut counters
+            )
+        };
         let operation = expand_device_radix_sort_keys(call)
-            .expect("the explicit primitive TMP argument must select signed radix lowering");
-        let operation_text = operation.to_string();
-
-        // i32 ordering is obtained by flipping its sign bit before each stable
-        // digit pass. Four occurrences prove the 32-bit/8-bit pass tree was
-        // chosen by this proc macro, not by runtime type dispatch.
-        assert_eq!(operation_text.matches("2147483648").count(), 8);
-        assert_eq!(operation_text.matches("let __rccl_execution").count(), 5);
-        assert!(operation_text.contains("prepare_device_merge_sort_keys_pass"));
-        assert!(!operation_text.contains("TypeId"));
-        assert!(!operation_text.contains("unsafe"));
-        assert!(!operation_text.contains("* mut"));
+            .expect("the pinned Policy800 key graph must lower")
+            .to_string();
+        assert!(operation.contains("prepare_device_radix_sort_init"));
+        assert!(operation.contains("prepare_device_radix_sort_histogram"));
+        assert!(operation.contains("prepare_device_radix_sort_exclusive_sum"));
+        assert!(operation.contains("prepare_device_radix_sort_onesweep_keys"));
+        assert!(operation.contains(
+            "prepare_device_radix_sort_histogram_for :: < i32 , u32 , _ , _ , 16usize , 4usize , >"
+        ));
+        assert!(
+            operation.contains(
+                "device_radix_sort_histogram :: < i32 , u32 , _ , _ , 16usize , 4usize , >"
+            )
+        );
+        assert!(operation.contains(
+            "prepare_device_radix_sort_onesweep_keys_for :: < i32 , u32 , _ , _ , _ , _ , 21usize"
+        ));
+        assert!(operation.contains("let __rccl_rank_digit ="));
+        assert!(operation.contains("rotate_right (__rccl_bit)"));
+        assert!(operation.contains("LaunchConfig1D :: new (4usize as u32 , 256 , 0"));
+        assert!(operation.contains("128 , 4096usize as u32"));
+        assert!(
+            !operation.contains("device_radix_sort_histogram :: < i32 , u32 , _ , _ , 21usize")
+        );
+        assert_eq!(operation.matches("zero_radix_lookback").count(), 1);
+        assert!(operation.contains("while __rccl_pass < 4usize"));
+        assert!(operation.contains("let __rccl_bin_offset = __rccl_pass * 256usize"));
+        assert!(operation.contains("let __rccl_current_bit = (__rccl_pass * 8usize) as u32"));
+        assert_eq!(
+            operation
+                .matches("device_radix_sort_onesweep_keys ::")
+                .count(),
+            2,
+            "the runtime DoubleBuffer selector must expose exactly its two affine borrow branches"
+        );
+        assert!(operation.contains("if (__rccl_pass & 1usize) == 0"));
+        assert!(!operation.contains("device_merge_sort"));
+        assert!(!operation.contains("DeviceBuffer :: zeroed"));
+        assert!(!operation.contains("compute_capability"));
+        assert!(!operation.contains("__rccl_len as u32"));
+        assert!(!operation.contains("unsafe"));
+        assert!(!operation.contains("* mut"));
     }
 
     #[test]
-    fn floating_radix_tmp_emits_cccl_bit_transform_and_zero_normalization() {
+    fn radix_policy800_reg_bound_scaling_is_macro_selected_for_key_width() {
+        assert_eq!(reg_bound_policy(384, 21, 4), (384, 21));
+        assert_eq!(reg_bound_policy(384, 21, 8), (384, 10));
+
+        let call: call::DeviceRadixSortKeysCall = syn::parse_quote! {
+            ::<u64, sm_89>(
+                &exec,
+                &mut keys,
+                &mut scratch_keys,
+                &mut bins,
+                &mut lookback,
+                &mut counters
+            )
+        };
+        let operation = expand_device_radix_sort_keys(call)
+            .expect("the pinned 64-bit Policy800 graph must lower")
+            .to_string();
+        assert!(operation.contains(
+            "prepare_device_radix_sort_onesweep_keys_for :: < u64 , u64 , _ , _ , _ , _ , 10usize"
+        ));
+        assert!(operation.contains("let __rccl_blocks = __rccl_len . div_ceil (3840usize)"));
+        assert!(operation.contains("while __rccl_pass < 8usize"));
+        assert!(
+            operation.contains("LaunchConfig1D :: new (__rccl_blocks as u32 , 384usize as u32")
+        );
+        assert!(operation.contains("128 , 8192usize as u32"));
+        assert!(!operation.contains("compute_capability"));
+
+        let workspace_call: call::DeviceRadixSortWorkspaceCall =
+            syn::parse_quote! { ::<u64, sm_89>(len) };
+        let workspace = expand_device_radix_sort_workspace(workspace_call)
+            .expect("the 64-bit workspace must use the same macro-selected tile")
+            .to_string();
+        assert!(workspace.contains("let __rccl_blocks = __rccl_len . div_ceil (3840usize)"));
+    }
+
+    #[test]
+    fn radix_pairs_emit_the_exact_policy800_pair_graph_and_workspace() {
         let call: call::DeviceRadixSortPairsCall = syn::parse_quote! {
-            ::<f32, i32>(&exec, &mut keys, &mut values)
+            ::<f32, i32, sm_89>(
+                &exec,
+                &mut keys,
+                &mut values,
+                &mut scratch_keys,
+                &mut scratch_values,
+                &mut bins,
+                &mut lookback,
+                &mut counters
+            )
         };
         let operation = expand_device_radix_sort_pairs(call)
-            .expect("the explicit f32 TMP argument must select floating radix lowering");
-        let operation_text = operation.to_string();
+            .expect("the pinned Policy800 pair graph must lower")
+            .to_string();
+        assert!(operation.contains("prepare_device_radix_sort_histogram"));
+        assert!(operation.contains("prepare_device_radix_sort_exclusive_sum"));
+        assert!(operation.contains(
+            "prepare_device_radix_sort_onesweep_pairs_for :: < f32 , i32 , u32 , _ , _ , _ , _ , 17usize , 26112usize"
+        ));
+        assert!(operation.contains("let __rccl_blocks = __rccl_len . div_ceil (6528usize)"));
+        assert!(operation.contains("28160usize as u32"));
+        assert!(operation.contains("if __rccl_ordered == 0x7fff_ffffu32 { 0x8000_0000u32 }"));
+        assert!(operation.contains("__rccl_zero_ordered . rotate_right (__rccl_bit)"));
+        assert_eq!(
+            operation
+                .matches("device_radix_sort_onesweep_pairs ::")
+                .count(),
+            2
+        );
+        assert!(!operation.contains("device_merge_sort"));
+        assert!(!operation.contains("DeviceBuffer :: zeroed"));
+        assert!(!operation.contains("unsafe"));
+        assert!(!operation.contains("* mut"));
 
-        // Two encoders in each of four stable 8-bit passes prove that f32
-        // selected a 32-bit radix tree during macro expansion.
-        assert_eq!(operation_text.matches("to_bits").count(), 8);
-        assert!(operation_text.contains("2147483648"));
-        assert!(operation_text.contains("4294967295"));
-        assert!(operation_text.contains("prepare_device_merge_sort_pairs_pass"));
-        assert!(!operation_text.contains("TypeId"));
-        assert!(!operation_text.contains("unsafe"));
-        assert!(!operation_text.contains("* mut"));
+        let workspace = expand_device_radix_sort_pairs_workspace(syn::parse_quote! {
+            ::<f32, i32, sm_89>(len)
+        })
+        .expect("pair workspace must use the same macro-selected tile")
+        .to_string();
+        assert!(workspace.contains("scratch_values : __rccl_len"));
+        assert!(workspace.contains("div_ceil (6528usize)"));
+    }
+
+    #[test]
+    fn merge_sort_keys_emit_the_exact_block_partition_merge_topology() {
+        let call: call::DeviceMergeSortKeysCall = syn::parse_quote! {
+            ::<u32, sm_89>(
+                &exec,
+                &mut keys,
+                &mut scratch_keys,
+                &mut partitions,
+                |left: &u32, right: &u32| left.cmp(right)
+            )
+        };
+        let operation = expand_device_merge_sort_keys(call)
+            .expect("the pinned SM60+ merge-sort policy must lower")
+            .to_string();
+        assert!(operation.contains("prepare_device_merge_sort_block_keys_256"));
+        assert!(operation.contains("device_merge_sort_block_keys_in_place_256"));
+        assert!(
+            operation.contains(
+                "prepare_device_merge_sort_partition :: < u32 , _ , 256usize , 17usize >"
+            )
+        );
+        assert!(operation.contains("prepare_device_merge_sort_merge_keys_256"));
+        assert!(operation.contains("17424usize as u32"));
+        assert!(!operation.contains("DeviceBuffer :: zeroed"));
+        assert!(!operation.contains("device_merge_sort_keys_pass"));
+        assert!(!operation.contains("compute_capability"));
+        assert!(!operation.contains("unsafe"));
+        assert!(!operation.contains("* mut"));
+
+        let count: call::DeviceMergeSortPartitionCountCall =
+            syn::parse_quote! { ::<u32, sm_89>(len) };
+        let count = expand_device_merge_sort_partition_count(count)
+            .expect("partition storage must use the same macro-selected tile")
+            .to_string();
+        assert!(count.contains("div_ceil (4352usize)"));
+
+        let padded_call: call::DeviceMergeSortKeysCall = syn::parse_quote! {
+            ::<u64, sm_89>(
+                &exec,
+                &mut keys,
+                &mut scratch_keys,
+                &mut partitions,
+                |left: &u64, right: &u64| left.cmp(right)
+            )
+        };
+        let padded = expand_device_merge_sort_keys(padded_call)
+            .expect("u64 must lower through the padded Policy600 BlockExchange path")
+            .to_string();
+        assert!(
+            padded
+                .contains("prepare_device_merge_sort_partition :: < u64 , _ , 256usize , 8usize >")
+        );
+        assert!(padded.contains("16912usize as u32"));
+    }
+
+    #[test]
+    fn merge_sort_pairs_emit_the_exact_agents_and_borrow_all_workspace() {
+        let call: call::DeviceMergeSortPairsCall = syn::parse_quote! {
+            ::<u32, u32, sm_89>(
+                &exec,
+                &mut keys,
+                &mut values,
+                &mut scratch_keys,
+                &mut scratch_values,
+                &mut partitions,
+                |left: &u32, right: &u32| left.cmp(right)
+            )
+        };
+        let operation = expand_device_merge_sort_pairs(call)
+            .expect("the pinned key/value graph must lower")
+            .to_string();
+        assert!(operation.contains("prepare_device_merge_sort_block_pairs_256"));
+        assert!(operation.contains("device_merge_sort_block_pairs_in_place_256"));
+        assert!(operation.contains("prepare_device_merge_sort_partition"));
+        assert!(operation.contains("prepare_device_merge_sort_merge_pairs_256"));
+        assert!(operation.contains("17424usize as u32"));
+        assert!(!operation.contains("DeviceBuffer :: zeroed"));
+        assert!(!operation.contains("device_merge_sort_pairs_pass"));
+        assert!(!operation.contains("compute_capability"));
+        assert!(!operation.contains("unsafe"));
+        assert!(!operation.contains("* mut"));
     }
 
     #[test]
     fn merge_tmp_layout_selects_exact_cccl_nominal_items_and_aliases_fail_closed() {
         let keys: call::DeviceMergeKeysCall = syn::parse_quote! {
-            ::<u32>(&exec, &first, &second, &mut output, |left, right| left.cmp(right))
+            ::<u32, sm_89>(
+                &exec, &first, &second, &mut partitions, &mut output,
+                |left, right| left.cmp(right)
+            )
         };
         let key_text = expand_device_merge_keys(keys)
             .expect("primitive layout must select the pinned merge policies")
             .to_string();
-        assert!(key_text.contains("prepare_device_merge_keys :: < u32 , _ , 13usize >"));
-        assert!(key_text.contains("prepare_device_merge_keys :: < u32 , _ , 15usize >"));
-        assert!(key_text.contains("compute_capability"));
+        assert!(key_text.contains("prepare_device_partition_merge_path :: < u32 , _ , 15usize >"));
+        assert!(
+            key_text.contains(
+                "prepare_device_merge_keys_agent :: < u32 , _ , 15usize , 4usize , false >"
+            )
+        );
+        assert!(key_text.contains("30736usize as u32"));
+        assert!(!key_text.contains("prepare_device_merge_keys ::"));
+        assert!(!key_text.contains("compute_capability"));
+
+        let sm52_keys: call::DeviceMergeKeysCall = syn::parse_quote! {
+            ::<u32, sm_52>(
+                &exec, &first, &second, &mut partitions, &mut output,
+                |left, right| left.cmp(right)
+            )
+        };
+        let sm52_text = expand_device_merge_keys(sm52_keys)
+            .expect("sm_52 must select the pinned fallback policy at expansion time")
+            .to_string();
+        assert!(sm52_text.contains("prepare_device_partition_merge_path :: < u32 , _ , 13usize >"));
+        assert!(
+            sm52_text.contains(
+                "prepare_device_merge_keys_agent :: < u32 , _ , 13usize , 4usize , false >"
+            )
+        );
+        assert!(!sm52_text.contains("compute_capability"));
 
         let pairs: call::DeviceMergePairsCall = syn::parse_quote! {
-            ::<i32, u64>(
+            ::<i32, u64, sm_89>(
                 &exec,
                 &first_keys,
                 &first_values,
                 &second_keys,
                 &second_values,
+                &mut partitions,
                 &mut output_keys,
                 &mut output_values,
                 |left, right| left.cmp(right),
@@ -1939,11 +4152,75 @@ mod tests {
         let pair_text = expand_device_merge_pairs(pairs)
             .expect("combined key/value size must be TMP input")
             .to_string();
-        assert!(pair_text.contains("prepare_device_merge_pairs :: < i32 , u64 , _ , 4usize >"));
-        assert!(pair_text.contains("prepare_device_merge_pairs :: < i32 , u64 , _ , 5usize >"));
+        assert!(pair_text.contains("prepare_device_partition_merge_path :: < i32 , _ , 5usize >"));
+        assert!(pair_text.contains(
+            "prepare_device_merge_pairs_agent :: < i32 , u64 , _ , 5usize , 4usize , 8usize , false , false >"
+        ));
+        assert!(pair_text.contains("20496usize as u32"));
+
+        let async_keys: call::DeviceMergeKeysCall = syn::parse_quote! {
+            ::<u8, sm_89>(
+                &exec, &first, &second, &mut partitions, &mut output,
+                |left, right| left.cmp(right)
+            )
+        };
+        let async_key_text = expand_device_merge_keys(async_keys)
+            .expect("the SM80 byte-key policy must select BlockLoadToShared")
+            .to_string();
+        assert!(
+            async_key_text.contains(
+                "prepare_device_merge_keys_agent :: < u8 , _ , 15usize , 1usize , true >"
+            )
+        );
+        assert!(async_key_text.contains("7760usize as u32"));
+
+        let async_pairs: call::DeviceMergePairsCall = syn::parse_quote! {
+            ::<i32, u8, sm_89>(
+                &exec,
+                &first_keys,
+                &first_values,
+                &second_keys,
+                &second_values,
+                &mut partitions,
+                &mut output_keys,
+                &mut output_values,
+                |left, right| left.cmp(right),
+            )
+        };
+        let async_pair_text = expand_device_merge_pairs(async_pairs)
+            .expect("the SM80 i32/u8 policy must stage both arrays through shared memory")
+            .to_string();
+        assert!(async_pair_text.contains(
+            "prepare_device_merge_pairs_agent :: < i32 , u8 , _ , 12usize , 4usize , 1usize , true , true >"
+        ));
+        assert!(async_pair_text.contains("24656usize as u32"));
+
+        let padded_pairs: call::DeviceMergePairsCall = syn::parse_quote! {
+            ::<u16, u32, sm_52>(
+                &exec,
+                &first_keys,
+                &first_values,
+                &second_keys,
+                &second_values,
+                &mut partitions,
+                &mut output_keys,
+                &mut output_values,
+                |left, right| left.cmp(right),
+            )
+        };
+        let padded_pair_text = expand_device_merge_pairs(padded_pairs)
+            .expect("the SM52 pair policy must retain BlockExchange padding")
+            .to_string();
+        assert!(padded_pair_text.contains(
+            "prepare_device_merge_pairs_agent :: < u16 , u32 , _ , 8usize , 2usize , 4usize , false , false >"
+        ));
+        assert!(padded_pair_text.contains("16912usize as u32"));
 
         let alias: call::DeviceMergeKeysCall = syn::parse_quote! {
-            ::<Key>(&exec, &first, &second, &mut output, |left, right| left.cmp(right))
+            ::<Key, sm_89>(
+                &exec, &first, &second, &mut partitions, &mut output,
+                |left, right| left.cmp(right)
+            )
         };
         let error = expand_device_merge_keys(alias)
             .expect_err("an opaque alias must not silently receive an invented CUB schedule");

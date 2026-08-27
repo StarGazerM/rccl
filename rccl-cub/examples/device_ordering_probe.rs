@@ -18,11 +18,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     // `cub/test/catch2_test_device_merge_api.cu`, merge-keys example.
     let first = DeviceBuffer::from_host(&stream, &[0_i32, 2, 5])?;
     let second = DeviceBuffer::from_host(&stream, &[0_i32, 3, 3, 4])?;
+    let partition_count = rccl_cub::device_merge_keys_partition_count!(::<i32, sm_89>(
+        first.len(),
+        second.len(),
+    ))?;
+    let mut merge_partitions = DeviceBuffer::<usize>::zeroed(&stream, partition_count)?;
     let mut merged = DeviceBuffer::<i32>::zeroed(&stream, first.len() + second.len())?;
-    rccl_cub::device_merge_keys!(::<i32>(
+    rccl_cub::device_merge_keys!(::<i32, sm_89>(
         &exec,
         &first,
         &second,
+        &mut merge_partitions,
         &mut merged,
         |left: &i32, right: &i32| left.cmp(right),
     ))?;
@@ -33,14 +39,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     // payload; Rust `char` is a four-byte Unicode scalar and is not the match.
     let first_values = DeviceBuffer::from_host(&stream, b"abc")?;
     let second_values = DeviceBuffer::from_host(&stream, b"ABCD")?;
+    let pair_partition_count = rccl_cub::device_merge_pairs_partition_count!(::<i32, u8, sm_89>(
+        first.len(),
+        second.len(),
+    ))?;
+    let mut pair_partitions = DeviceBuffer::<usize>::zeroed(&stream, pair_partition_count)?;
     let mut merged_keys = DeviceBuffer::<i32>::zeroed(&stream, 7)?;
     let mut merged_values = DeviceBuffer::<u8>::zeroed(&stream, 7)?;
-    rccl_cub::device_merge_pairs!(::<i32, u8>(
+    rccl_cub::device_merge_pairs!(::<i32, u8, sm_89>(
         &exec,
         &first,
         &first_values,
         &second,
         &second_values,
+        &mut pair_partitions,
         &mut merged_keys,
         &mut merged_values,
         |left: &i32, right: &i32| left.cmp(right),
@@ -48,19 +60,95 @@ fn main() -> Result<(), Box<dyn Error>> {
     assert_eq!(merged_keys.to_host_vec(&stream)?, [0, 0, 2, 3, 3, 4, 5]);
     assert_eq!(merged_values.to_host_vec(&stream)?, *b"aAbBCDc");
 
+    // `catch2_test_device_merge.cu`, `DeviceMerge::MergePairs key types`,
+    // with its default 3,623/6,346 input sizes and the `int16_t` key / `int`
+    // value instantiation. Selecting the pinned SM52 policy gives eight
+    // items per thread, which exercises BlockExchange's padded storage path.
+    let first_i16 = (0..3_623)
+        .map(|index| (index * 2) as i16)
+        .collect::<Vec<_>>();
+    let second_i16 = (0..6_346)
+        .map(|index| (index * 2 + 1) as i16)
+        .collect::<Vec<_>>();
+    let first_i16_values = (0..3_623).map(|index| index as i32).collect::<Vec<_>>();
+    let second_i16_values = (0..6_346).map(|index| 10_000 + index).collect::<Vec<_>>();
+    let first_i16_device = DeviceBuffer::from_host(&stream, &first_i16)?;
+    let second_i16_device = DeviceBuffer::from_host(&stream, &second_i16)?;
+    let first_i16_values_device = DeviceBuffer::from_host(&stream, &first_i16_values)?;
+    let second_i16_values_device = DeviceBuffer::from_host(&stream, &second_i16_values)?;
+    let i16_partition_count = rccl_cub::device_merge_pairs_partition_count!(::<i16, i32, sm_52>(
+        first_i16.len(),
+        second_i16.len(),
+    ))?;
+    let mut i16_partitions = DeviceBuffer::<usize>::zeroed(&stream, i16_partition_count)?;
+    let mut merged_i16 = DeviceBuffer::<i16>::zeroed(&stream, first_i16.len() + second_i16.len())?;
+    let mut merged_i16_values =
+        DeviceBuffer::<i32>::zeroed(&stream, first_i16.len() + second_i16.len())?;
+    rccl_cub::device_merge_pairs!(::<i16, i32, sm_52>(
+        &exec,
+        &first_i16_device,
+        &first_i16_values_device,
+        &second_i16_device,
+        &second_i16_values_device,
+        &mut i16_partitions,
+        &mut merged_i16,
+        &mut merged_i16_values,
+        |left: &i16, right: &i16| left.cmp(right),
+    ))?;
+    let mut expected_i16 = Vec::with_capacity(first_i16.len() + second_i16.len());
+    let mut expected_i16_values = Vec::with_capacity(expected_i16.capacity());
+    let (mut first_index, mut second_index) = (0, 0);
+    while first_index < first_i16.len() || second_index < second_i16.len() {
+        if second_index == second_i16.len()
+            || (first_index < first_i16.len() && first_i16[first_index] <= second_i16[second_index])
+        {
+            expected_i16.push(first_i16[first_index]);
+            expected_i16_values.push(first_i16_values[first_index]);
+            first_index += 1;
+        } else {
+            expected_i16.push(second_i16[second_index]);
+            expected_i16_values.push(second_i16_values[second_index]);
+            second_index += 1;
+        }
+    }
+    assert_eq!(merged_i16.to_host_vec(&stream)?, expected_i16);
+    assert_eq!(merged_i16_values.to_host_vec(&stream)?, expected_i16_values);
+
+    let merge_sort_partitions_7 =
+        rccl_cub::device_merge_sort_partition_count!(::<i32, sm_89>(7usize))?;
+    let mut merge_sort_scratch_keys_7 = DeviceBuffer::<i32>::zeroed(&stream, 7)?;
+    let mut merge_sort_scratch_values_7 = DeviceBuffer::<u32>::zeroed(&stream, 7)?;
+    let mut merge_sort_partition_storage_7 =
+        DeviceBuffer::<usize>::zeroed(&stream, merge_sort_partitions_7)?;
+    let merge_sort_partitions_9 =
+        rccl_cub::device_merge_sort_partition_count!(::<i32, sm_89>(9usize))?;
+    let mut merge_sort_scratch_keys_9 = DeviceBuffer::<i32>::zeroed(&stream, 9)?;
+    let mut merge_sort_partition_storage_9 =
+        DeviceBuffer::<usize>::zeroed(&stream, merge_sort_partitions_9)?;
+    let merge_sort_partitions_5 =
+        rccl_cub::device_merge_sort_partition_count!(::<i32, sm_89>(5usize))?;
+    let mut merge_sort_scratch_keys_5 = DeviceBuffer::<i32>::zeroed(&stream, 5)?;
+    let mut merge_sort_scratch_values_5 = DeviceBuffer::<u32>::zeroed(&stream, 5)?;
+    let mut merge_sort_partition_storage_5 =
+        DeviceBuffer::<usize>::zeroed(&stream, merge_sort_partitions_5)?;
+
     let mut unstable_keys = DeviceBuffer::from_host(&stream, &[5_i32, 1, 3, 1, 4, 2, 0])?;
-    rccl_cub::device_merge_sort_keys!(::<i32>(
+    rccl_cub::device_merge_sort_keys!(::<i32, sm_89>(
         &exec,
         &mut unstable_keys,
+        &mut merge_sort_scratch_keys_7,
+        &mut merge_sort_partition_storage_7,
         |left: &i32, right: &i32| left.cmp(right),
     ))?;
     assert_eq!(unstable_keys.to_host_vec(&stream)?, [0, 1, 1, 2, 3, 4, 5]);
 
     let mut stable_keys_only =
         DeviceBuffer::from_host(&stream, &[25_i32, 14, 35, 16, 26, 34, 36, 24, 15])?;
-    rccl_cub::device_stable_merge_sort_keys!(::<i32>(
+    rccl_cub::device_stable_merge_sort_keys!(::<i32, sm_89>(
         &exec,
         &mut stable_keys_only,
+        &mut merge_sort_scratch_keys_9,
+        &mut merge_sort_partition_storage_9,
         |left: &i32, right: &i32| (left / 10).cmp(&(right / 10)),
     ))?;
     assert_eq!(
@@ -70,9 +158,11 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let copy_input = DeviceBuffer::from_host(&stream, &[4_i32, 1, 3, 0, 2])?;
     let mut copy_output = DeviceBuffer::<i32>::zeroed(&stream, 5)?;
-    rccl_cub::device_merge_sort_keys_copy!(::<i32>(
+    rccl_cub::device_merge_sort_keys_copy!(::<i32, sm_89>(
         &exec,
         &copy_input,
+        &mut merge_sort_scratch_keys_5,
+        &mut merge_sort_partition_storage_5,
         &mut copy_output,
         |left: &i32, right: &i32| left.cmp(right),
     ))?;
@@ -82,9 +172,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let stable_copy_input =
         DeviceBuffer::from_host(&stream, &[25_i32, 14, 35, 16, 26, 34, 36, 24, 15])?;
     let mut stable_copy_output = DeviceBuffer::<i32>::zeroed(&stream, 9)?;
-    rccl_cub::device_stable_merge_sort_keys_copy!(::<i32>(
+    rccl_cub::device_stable_merge_sort_keys_copy!(::<i32, sm_89>(
         &exec,
         &stable_copy_input,
+        &mut merge_sort_scratch_keys_9,
+        &mut merge_sort_partition_storage_9,
         &mut stable_copy_output,
         |left: &i32, right: &i32| (left / 10).cmp(&(right / 10)),
     ))?;
@@ -99,10 +191,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut keys = DeviceBuffer::from_host(&stream, &[5_i32, 1, 3, 1, 4, 2, 0])?;
     let mut values = DeviceBuffer::from_host(&stream, &[0_u32, 1, 2, 3, 4, 5, 6])?;
-    rccl_cub::device_stable_merge_sort_pairs!(::<i32, u32>(
+    rccl_cub::device_stable_merge_sort_pairs!(::<i32, u32, sm_89>(
         &exec,
         &mut keys,
         &mut values,
+        &mut merge_sort_scratch_keys_7,
+        &mut merge_sort_scratch_values_7,
+        &mut merge_sort_partition_storage_7,
         |left: &i32, right: &i32| left.cmp(right),
     ))?;
     assert_eq!(keys.to_host_vec(&stream)?, [0, 1, 1, 2, 3, 4, 5]);
@@ -110,10 +205,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut nonstable_pair_keys = DeviceBuffer::from_host(&stream, &[4_i32, 1, 3, 0, 2])?;
     let mut nonstable_pair_values = DeviceBuffer::from_host(&stream, &[40_u32, 10, 30, 0, 20])?;
-    rccl_cub::device_merge_sort_pairs!(::<i32, u32>(
+    rccl_cub::device_merge_sort_pairs!(::<i32, u32, sm_89>(
         &exec,
         &mut nonstable_pair_keys,
         &mut nonstable_pair_values,
+        &mut merge_sort_scratch_keys_5,
+        &mut merge_sort_scratch_values_5,
+        &mut merge_sort_partition_storage_5,
         |left: &i32, right: &i32| left.cmp(right),
     ))?;
     assert_eq!(nonstable_pair_keys.to_host_vec(&stream)?, [0, 1, 2, 3, 4]);
@@ -126,10 +224,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     let pair_copy_input_values = DeviceBuffer::from_host(&stream, &[40_u32, 10, 30, 0, 20])?;
     let mut pair_copy_output_keys = DeviceBuffer::<i32>::zeroed(&stream, 5)?;
     let mut pair_copy_output_values = DeviceBuffer::<u32>::zeroed(&stream, 5)?;
-    rccl_cub::device_merge_sort_pairs_copy!(::<i32, u32>(
+    rccl_cub::device_merge_sort_pairs_copy!(::<i32, u32, sm_89>(
         &exec,
         &pair_copy_input_keys,
         &pair_copy_input_values,
+        &mut merge_sort_scratch_keys_5,
+        &mut merge_sort_scratch_values_5,
+        &mut merge_sort_partition_storage_5,
         &mut pair_copy_output_keys,
         &mut pair_copy_output_values,
         |left: &i32, right: &i32| left.cmp(right),
@@ -145,95 +246,65 @@ fn main() -> Result<(), Box<dyn Error>> {
         [0, 10, 20, 30, 40]
     );
 
-    // Pinned DeviceRadixSort basic semantics: integer transforms, ascending
-    // and descending order, and stable key/value movement.
-    let mut radix_keys = DeviceBuffer::from_host(&stream, &[u32::MAX, 0, 0x8000_0000, 7, 3, 7, 1])?;
-    rccl_cub::device_radix_sort_keys!(::<u32>(&exec, &mut radix_keys))?;
+    // Pinned DeviceRadixSort keys semantics. The workspace is visible and
+    // caller-owned because hiding CUB's scratch/bins/lookback/counters behind
+    // an old convenience overload would mask the actual one-sweep contract.
+    let radix_input = [u32::MAX, 0, 0x8000_0000, 7, 3, 7, 1];
+    let mut radix_keys = DeviceBuffer::from_host(&stream, &radix_input)?;
+    let radix_workspace = rccl_cub::device_radix_sort_workspace!(::<u32, sm_89>(radix_input.len()));
+    let mut radix_scratch = DeviceBuffer::<u32>::zeroed(&stream, radix_workspace.scratch_keys)?;
+    let mut radix_bins = DeviceBuffer::<u64>::zeroed(&stream, radix_workspace.bins)?;
+    let mut radix_lookback = DeviceBuffer::<i32>::zeroed(&stream, radix_workspace.lookback)?;
+    let mut radix_counters = DeviceBuffer::<i32>::zeroed(&stream, radix_workspace.counters)?;
+    rccl_cub::device_radix_sort_keys!(::<u32, sm_89>(
+        &exec,
+        &mut radix_keys,
+        &mut radix_scratch,
+        &mut radix_bins,
+        &mut radix_lookback,
+        &mut radix_counters,
+    ))?;
     assert_eq!(
         radix_keys.to_host_vec(&stream)?,
         [0, 1, 3, 7, 7, 0x8000_0000, u32::MAX]
     );
 
-    let mut signed_radix_keys =
-        DeviceBuffer::from_host(&stream, &[0_i32, -1, i32::MIN, 7, -9, i32::MAX])?;
-    rccl_cub::device_radix_sort_keys!(::<i32>(&exec, &mut signed_radix_keys))?;
+    let signed_input = [0_i32, -1, i32::MIN, 7, -9, i32::MAX];
+    let mut signed_radix_keys = DeviceBuffer::from_host(&stream, &signed_input)?;
+    let signed_workspace =
+        rccl_cub::device_radix_sort_workspace!(::<i32, sm_89>(signed_input.len()));
+    let mut signed_scratch = DeviceBuffer::<i32>::zeroed(&stream, signed_workspace.scratch_keys)?;
+    let mut signed_bins = DeviceBuffer::<u64>::zeroed(&stream, signed_workspace.bins)?;
+    let mut signed_lookback = DeviceBuffer::<i32>::zeroed(&stream, signed_workspace.lookback)?;
+    let mut signed_counters = DeviceBuffer::<i32>::zeroed(&stream, signed_workspace.counters)?;
+    rccl_cub::device_radix_sort_keys!(::<i32, sm_89>(
+        &exec,
+        &mut signed_radix_keys,
+        &mut signed_scratch,
+        &mut signed_bins,
+        &mut signed_lookback,
+        &mut signed_counters,
+    ))?;
     assert_eq!(
         signed_radix_keys.to_host_vec(&stream)?,
         [i32::MIN, -9, -1, 0, 7, i32::MAX]
     );
 
-    rccl_cub::device_radix_sort_keys_descending!(::<i32>(
+    rccl_cub::device_radix_sort_keys_descending!(::<i32, sm_89>(
         &exec,
         &mut signed_radix_keys,
+        &mut signed_scratch,
+        &mut signed_bins,
+        &mut signed_lookback,
+        &mut signed_counters,
     ))?;
     assert_eq!(
         signed_radix_keys.to_host_vec(&stream)?,
         [i32::MAX, 7, 0, -1, -9, i32::MIN]
     );
 
-    let mut radix_pair_keys = DeviceBuffer::from_host(&stream, &[2_u32, 1, 2, 0, 1])?;
-    let mut radix_pair_values = DeviceBuffer::from_host(&stream, &[20_i32, 10, 21, 0, 11])?;
-    rccl_cub::device_radix_sort_pairs!(::<u32, i32>(
-        &exec,
-        &mut radix_pair_keys,
-        &mut radix_pair_values,
-    ))?;
-    assert_eq!(radix_pair_keys.to_host_vec(&stream)?, [0, 1, 1, 2, 2]);
-    assert_eq!(radix_pair_values.to_host_vec(&stream)?, [0, 10, 11, 20, 21]);
-
-    // `cub/device/device_radix_sort.cuh` and
-    // `cub/test/catch2_test_device_radix_sort_keys.cu` require the primitive
-    // floating transform and stable equivalence of negative and positive
-    // zero. The value tags make stability independently observable.
-    let mut float_keys = DeviceBuffer::from_host(
-        &stream,
-        &[1.25_f32, -0.0, f32::INFINITY, -3.5, 0.0, f32::NEG_INFINITY],
-    )?;
-    let mut float_values = DeviceBuffer::from_host(&stream, &[4_i32, 2, 5, 1, 3, 0])?;
-    rccl_cub::device_radix_sort_pairs!(::<f32, i32>(
-        &exec,
-        &mut float_keys,
-        &mut float_values,
-    ))?;
-    let float_result = float_keys.to_host_vec(&stream)?;
-    assert_eq!(
-        float_result
-            .iter()
-            .map(|value| value.to_bits())
-            .collect::<Vec<_>>(),
-        [
-            f32::NEG_INFINITY.to_bits(),
-            (-3.5_f32).to_bits(),
-            (-0.0_f32).to_bits(),
-            0.0_f32.to_bits(),
-            1.25_f32.to_bits(),
-            f32::INFINITY.to_bits(),
-        ]
-    );
-    assert_eq!(float_values.to_host_vec(&stream)?, [0, 1, 2, 3, 4, 5]);
-
-    rccl_cub::device_radix_sort_pairs_descending!(::<f32, i32>(
-        &exec,
-        &mut float_keys,
-        &mut float_values,
-    ))?;
-    let float_descending = float_keys.to_host_vec(&stream)?;
-    assert_eq!(
-        float_descending
-            .iter()
-            .map(|value| value.to_bits())
-            .collect::<Vec<_>>(),
-        [
-            f32::INFINITY.to_bits(),
-            1.25_f32.to_bits(),
-            (-0.0_f32).to_bits(),
-            0.0_f32.to_bits(),
-            (-3.5_f32).to_bits(),
-            f32::NEG_INFINITY.to_bits(),
-        ]
-    );
-    assert_eq!(float_values.to_host_vec(&stream)?, [5, 4, 2, 3, 1, 0]);
-
-    println!("generated CUB DeviceMerge/DeviceMergeSort/DeviceRadixSort probe: PASS");
+    // Radix pairs stay absent here: the proc-macro test requires them to fail
+    // closed until the exact CUB pair histogram/scan/scatter graph exists.
+    println!("generated CUB DeviceMerge/DeviceMergeSort/DeviceRadixSort keys probe: PASS");
     Ok(())
 }

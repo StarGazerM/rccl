@@ -114,72 +114,96 @@ macro_rules! typed_algorithm_call {
     };
 }
 
-typed_algorithm_call!(SortCall, "sort!", [key_type], execution, range);
+typed_algorithm_call!(
+    SortCall,
+    "sort!",
+    [key_type, target],
+    execution,
+    range,
+    scratch_keys,
+    bins,
+    lookback,
+    counters
+);
 typed_algorithm_call!(
     SortByCall,
     "sort_by!",
-    [key_type],
+    [key_type, target],
     execution,
     range,
+    scratch_keys,
+    partitions,
     compare
 );
 typed_algorithm_call!(
     SortByKeyCall,
     "sort_by_key!",
-    [key_type, value_type],
+    [key_type, value_type, target],
     execution,
     keys,
-    values
+    values,
+    scratch_keys,
+    scratch_values,
+    bins,
+    lookback,
+    counters
 );
 typed_algorithm_call!(
     SortByKeyWithCall,
     "sort_by_key_with!",
-    [key_type, value_type],
+    [key_type, value_type, target],
     execution,
     keys,
     values,
+    scratch_keys,
+    scratch_values,
+    partitions,
     compare,
 );
 typed_algorithm_call!(
     MergeCall,
     "merge!",
-    [value_type],
+    [value_type, target],
     execution,
     first,
     second,
+    partitions,
     output
 );
 typed_algorithm_call!(
     MergeByCall,
     "merge_by!",
-    [value_type],
+    [value_type, target],
     execution,
     first,
     second,
+    partitions,
     output,
     compare,
 );
 typed_algorithm_call!(
     MergeByKeyCall,
     "merge_by_key!",
-    [key_type, value_type],
+    [key_type, value_type, target],
     execution,
     first_keys,
     first_values,
     second_keys,
     second_values,
+    partitions,
     output_keys,
     output_values,
 );
 typed_algorithm_call!(
     MergeByKeyWithCall,
     "merge_by_key_with!",
-    [key_type, value_type],
+    [key_type, value_type, target],
     execution,
     first_keys,
     first_values,
     second_keys,
     second_values,
+    partitions,
     output_keys,
     output_values,
     compare,
@@ -195,10 +219,13 @@ algorithm_call!(
 typed_algorithm_call!(
     StableSortByKeyCall,
     "stable_sort_by_key!",
-    [key_type, value_type],
+    [key_type, value_type, target],
     execution,
     keys,
     values,
+    scratch_keys,
+    scratch_values,
+    partitions,
     compare,
 );
 
@@ -210,7 +237,13 @@ mod tests {
     #[test]
     fn sort_by_is_positional_rust_syntax_with_an_ordering_closure() {
         let call: SortByCall = syn::parse_quote! {
-            ::<i64>(&exec, &mut keys, |left: &i64, right: &i64| right.cmp(left))
+            ::<i64, sm_89>(
+                &exec,
+                &mut keys,
+                &mut scratch_keys,
+                &mut partitions,
+                |left: &i64, right: &i64| right.cmp(left)
+            )
         };
         assert!(matches!(call.compare, Expr::Closure(_)));
         assert!(matches!(call.range, Expr::Reference(_)));
@@ -218,15 +251,19 @@ mod tests {
     }
 
     #[test]
-    fn by_key_is_a_distinct_four_operand_shape() {
+    fn by_key_with_comparator_borrows_all_cub_workspace() {
         let call: StableSortByKeyCall = syn::parse_quote! {
-            ::<i64, i32>(
+            ::<i64, i32, sm_89>(
                 &exec, &mut keys, &mut values,
+                &mut scratch_keys, &mut scratch_values, &mut partitions,
                 |left: &i64, right: &i64| left.cmp(right)
             )
         };
         assert!(matches!(call.keys, Expr::Reference(_)));
         assert!(matches!(call.values, Expr::Reference(_)));
+        assert!(matches!(call.scratch_keys, Expr::Reference(_)));
+        assert!(matches!(call.scratch_values, Expr::Reference(_)));
+        assert!(matches!(call.partitions, Expr::Reference(_)));
         assert!(matches!(call.compare, Expr::Closure(_)));
     }
 
@@ -244,21 +281,38 @@ mod tests {
     #[test]
     fn parser_does_not_mask_missing_extra_or_old_named_operands() {
         let missing = syn::parse_str::<StableSortByKeyCall>(
-            "::<i64, i32>(&exec, &mut keys, |left: &i64, right: &i64| left.cmp(right))",
+            "::<i64, i32, sm_89>(&exec, &mut keys, |left: &i64, right: &i64| left.cmp(right))",
         )
         .expect_err("the values range is required by the by-key shape");
-        assert!(missing.to_string().contains("expects 4 operands"));
+        assert!(missing.to_string().contains("expects 7 operands"));
 
         let extra = syn::parse_str::<SortByCall>(
-            "::<i64>(&exec, &mut keys, |left: &i64, right: &i64| left.cmp(right), accidental)",
+            "::<i64, sm_89>(&exec, &mut keys, |left: &i64, right: &i64| left.cmp(right), accidental)",
         )
         .expect_err("an extra operand must not be ignored");
-        assert!(extra.to_string().contains("expects 3 operands"));
+        assert!(extra.to_string().contains("expects 5 operands"));
 
         let obsolete = syn::parse_str::<SortByCall>(
             "on: &exec, range: &mut keys, compare: |left: &i64, right: &i64| left.cmp(right)",
         )
         .expect_err("the invented named-field API must stay deleted");
         assert!(!obsolete.to_string().is_empty());
+
+        let hidden_key_workspace = syn::parse_str::<SortCall>("::<i64, sm_89>(&exec, &mut keys)")
+            .expect_err("natural sort must not hide allocation of CUB radix workspace");
+        assert!(
+            hidden_key_workspace
+                .to_string()
+                .contains("expects 6 operands")
+        );
+
+        let hidden_pair_workspace =
+            syn::parse_str::<SortByKeyCall>("::<i64, i32, sm_89>(&exec, &mut keys, &mut values)")
+                .expect_err("natural by-key sort must not hide allocation of CUB radix workspace");
+        assert!(
+            hidden_pair_workspace
+                .to_string()
+                .contains("expects 8 operands")
+        );
     }
 }

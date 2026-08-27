@@ -65,7 +65,7 @@ fi
 
 forbidden_codegen_loader='cuda_host::cuda_module|load_all_ptx_bundles_merged|load_module_from_ptx|nvJit|cuModuleLoadData|load_function\(|push_kernel_scalar|launch_kernel_on_stream'
 if rg -n "$forbidden_codegen_loader" \
-  rccl-cub-macros/src rccl-thrust-macros/src --glob '*.rs'; then
+  rccl-cub-macros/src rccl-thrust-macros/src --glob '*.rs' --glob '!audit.rs'; then
   printf '%s\n' 'proc-macro expansion contains a runtime loader or manual launch ABI' >&2
   exit 1
 fi
@@ -73,6 +73,7 @@ for audit in rccl-cub-macros/src/audit.rs rccl-thrust-macros/src/audit.rs; do
   for audit_rule in \
     visit_attribute \
     visit_expr_cast \
+    visit_expr_lit \
     visit_expr_method_call \
     visit_expr_raw_addr \
     visit_expr_unsafe \
@@ -182,14 +183,21 @@ mapfile -t rust_examples < <(
     -type f -name '*.rs' 2>/dev/null | sort
 )
 expected_rust_examples=(
+  rccl-cub/examples/device_merge_sort_keys_benchmark.rs
+  rccl-cub/examples/device_merge_sort_keys_probe.rs
+  rccl-cub/examples/device_merge_sort_pairs_benchmark.rs
+  rccl-cub/examples/device_merge_sort_pairs_probe.rs
   rccl-cub/examples/device_ordering_benchmark.rs
   rccl-cub/examples/device_ordering_probe.rs
+  rccl-cub/examples/device_radix_sort_keys_probe.rs
+  rccl-cub/examples/device_radix_sort_pairs_probe.rs
   rccl-cub/examples/warp_reduce.rs
   rccl-cub/examples/warp_reduce_benchmark.rs
   rccl-cub/examples/warp_reduce_catch2.rs
   rccl-cub/examples/warp_reduce_catch2_f32.rs
   rccl-thrust/examples/constant_iterator.rs
   rccl-thrust/examples/constant_iterator_benchmark.rs
+  rccl-thrust/examples/comparison_sort.rs
   rccl-thrust/examples/merge.rs
   rccl-thrust/examples/ordering_benchmark.rs
   rccl-thrust/examples/sort.rs
@@ -210,6 +218,7 @@ RUSTFLAGS='-D warnings' cargo test --workspace --no-fail-fast
 RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
 scripts/test-warp-reduce.sh
 scripts/test-thrust-constant-iterator.sh
+scripts/test-ordering-results.sh
 scripts/test-current-performance-parity.sh
 scripts/test-ordering-performance-parity.sh
 

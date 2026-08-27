@@ -383,23 +383,41 @@ operation_call!(
 typed_operation_call!(
     DeviceMergeKeysCall,
     "device_merge_keys!",
-    [key_type],
+    [key_type, target],
     execution,
     first,
     second,
+    partitions,
     output,
     order,
 );
 
 typed_operation_call!(
+    DeviceMergeKeysPartitionCountCall,
+    "device_merge_keys_partition_count!",
+    [key_type, target],
+    first_len,
+    second_len,
+);
+
+typed_operation_call!(
+    DeviceMergePairsPartitionCountCall,
+    "device_merge_pairs_partition_count!",
+    [key_type, value_type, target],
+    first_len,
+    second_len,
+);
+
+typed_operation_call!(
     DeviceMergePairsCall,
     "device_merge_pairs!",
-    [key_type, value_type],
+    [key_type, value_type, target],
     execution,
     first_keys,
     first_values,
     second_keys,
     second_values,
+    partitions,
     output_keys,
     output_values,
     order,
@@ -411,39 +429,56 @@ typed_operation_call!(
 typed_operation_call!(
     DeviceMergeSortKeysCall,
     "device_merge_sort_keys!",
-    [key_type],
+    [key_type, target],
     execution,
     keys,
+    scratch_keys,
+    partitions,
     order,
 );
 
 typed_operation_call!(
     DeviceMergeSortKeysCopyCall,
     "device_merge_sort_keys_copy!",
-    [key_type],
+    [key_type, target],
     execution,
     input,
+    scratch_keys,
+    partitions,
     output,
     order,
 );
 
 typed_operation_call!(
+    DeviceMergeSortPartitionCountCall,
+    "device_merge_sort_partition_count!",
+    [key_type, target],
+    len,
+);
+
+typed_operation_call!(
     DeviceMergeSortPairsCall,
     "device_merge_sort_pairs!",
-    [key_type, value_type],
+    [key_type, value_type, target],
     execution,
     keys,
     values,
+    scratch_keys,
+    scratch_values,
+    partitions,
     order,
 );
 
 typed_operation_call!(
     DeviceMergeSortPairsCopyCall,
     "device_merge_sort_pairs_copy!",
-    [key_type, value_type],
+    [key_type, value_type, target],
     execution,
     input_keys,
     input_values,
+    scratch_keys,
+    scratch_values,
+    partitions,
     output_keys,
     output_values,
     order,
@@ -452,18 +487,41 @@ typed_operation_call!(
 typed_operation_call!(
     DeviceRadixSortKeysCall,
     "device_radix_sort_keys!",
-    [key_type],
+    [key_type, target],
     execution,
     keys,
+    scratch_keys,
+    bins,
+    lookback,
+    counters,
+);
+
+typed_operation_call!(
+    DeviceRadixSortWorkspaceCall,
+    "device_radix_sort_workspace!",
+    [key_type, target],
+    len,
+);
+
+typed_operation_call!(
+    DeviceRadixSortPairsWorkspaceCall,
+    "device_radix_sort_pairs_workspace!",
+    [key_type, value_type, target],
+    len,
 );
 
 typed_operation_call!(
     DeviceRadixSortPairsCall,
     "device_radix_sort_pairs!",
-    [key_type, value_type],
+    [key_type, value_type, target],
     execution,
     keys,
     values,
+    scratch_keys,
+    scratch_values,
+    bins,
+    lookback,
+    counters,
 );
 
 #[cfg(test)]
@@ -643,12 +701,44 @@ mod tests {
     #[test]
     fn ordering_tmp_types_are_macro_visible_and_untyped_calls_fail_closed() {
         let keys: DeviceMergeSortKeysCall = syn::parse_quote! {
-            ::<u32>(&exec, &mut keys, |left: &u32, right: &u32| left.cmp(right))
+            ::<u32, sm_89>(
+                &exec,
+                &mut keys,
+                &mut scratch_keys,
+                &mut partitions,
+                |left: &u32, right: &u32| left.cmp(right)
+            )
         };
         assert_eq!(keys.key_type.to_token_stream().to_string(), "u32");
+        assert_eq!(keys.target.to_token_stream().to_string(), "sm_89");
 
-        let pairs: DeviceRadixSortPairsCall =
-            syn::parse_quote! { ::<u64, i32>(&exec, &mut keys, &mut values) };
+        let merge_pairs: DeviceMergeSortPairsCall = syn::parse_quote! {
+            ::<u32, u32, sm_89>(
+                &exec,
+                &mut keys,
+                &mut values,
+                &mut scratch_keys,
+                &mut scratch_values,
+                &mut partitions,
+                |left: &u32, right: &u32| left.cmp(right)
+            )
+        };
+        assert_eq!(merge_pairs.value_type.to_token_stream().to_string(), "u32");
+        assert_eq!(tokens(&merge_pairs.scratch_values), "& mut scratch_values");
+        assert_eq!(tokens(&merge_pairs.partitions), "& mut partitions");
+
+        let pairs: DeviceRadixSortPairsCall = syn::parse_quote! {
+            ::<u64, i32, sm_89>(
+                &exec,
+                &mut keys,
+                &mut values,
+                &mut scratch_keys,
+                &mut scratch_values,
+                &mut bins,
+                &mut lookback,
+                &mut counters
+            )
+        };
         assert_eq!(pairs.key_type.to_token_stream().to_string(), "u64");
         assert_eq!(pairs.value_type.to_token_stream().to_string(), "i32");
 

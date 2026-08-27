@@ -127,7 +127,7 @@ try
   std::sort(thrust_times.begin(), thrust_times.end());
   const auto print = [&](const char* name, const std::vector<double>& times) {
     std::printf(
-      "%s u32: inputs=%lld+%lld, best=%.3f ms (%.3f Gitem/s), median=%.3f ms, temp=%zu bytes\n",
+      "%s u32: inputs=%lld+%lld, best=%.6f ms (%.3f Gitem/s), median=%.6f ms, temp=%zu bytes\n",
       name,
       static_cast<long long>(count),
       static_cast<long long>(count),
@@ -229,7 +229,7 @@ try
   std::sort(thrust_pair_times.begin(), thrust_pair_times.end());
   const auto print_pairs = [&](const char* name, const std::vector<double>& times) {
     std::printf(
-      "%s u32/u64 pairs: inputs=%lld+%lld, best=%.3f ms (%.3f Gpair/s), median=%.3f ms, temp=%zu bytes\n",
+      "%s u32/u64 pairs: inputs=%lld+%lld, best=%.6f ms (%.3f Gpair/s), median=%.6f ms, temp=%zu bytes\n",
       name,
       static_cast<long long>(count),
       static_cast<long long>(count),

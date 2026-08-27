@@ -1,9 +1,9 @@
 use proc_macro2::TokenStream;
 use syn::File;
 use syn::{
-    Attribute, Error, Expr, ExprCast, ExprMethodCall, ExprRawAddr, ExprUnsafe, ItemForeignMod,
-    ItemImpl, ItemStatic, ItemTrait, ItemUnion, Macro, Path, Signature, StaticMutability,
-    TypeFnPtr, TypePtr,
+    Attribute, Error, Expr, ExprCast, ExprLit, ExprMethodCall, ExprRawAddr, ExprUnsafe,
+    ItemForeignMod, ItemImpl, ItemStatic, ItemTrait, ItemUnion, Lit, Macro, Path, Signature,
+    StaticMutability, TypeFnPtr, TypePtr,
     visit::{self, Visit},
 };
 
@@ -28,9 +28,167 @@ pub(crate) fn generated_expression(tokens: TokenStream) -> syn::Result<TokenStre
     }
 }
 
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Algorithm {
+    DeviceMerge,
+    DeviceMergeSort,
+    DeviceRadixSort,
+}
+
+/// Audit an operation lowering after ordinary Rust safety checks.
+///
+/// These checks protect semantic boundaries that Rust's type checker cannot
+/// see. In particular, an implementation with the right result type is not a
+/// CUB port when it allocates inside the call, selects a schedule at runtime,
+/// or substitutes a different algorithm.
+#[allow(dead_code)]
+pub(crate) fn generated_algorithm_expression(
+    algorithm: Algorithm,
+    tokens: TokenStream,
+) -> syn::Result<TokenStream> {
+    let expression = syn::parse2::<Expr>(tokens.clone())?;
+
+    let mut safety = SafetyAudit::default();
+    safety.visit_expr(&expression);
+    if let Some(error) = safety.error {
+        return Err(error);
+    }
+
+    let mut implementation = ImplementationAudit::new(algorithm);
+    implementation.visit_expr(&expression);
+    implementation.require_topology(&expression);
+    match implementation.error {
+        Some(error) => Err(error),
+        None => Ok(tokens),
+    }
+}
+
 #[derive(Default)]
 struct SafetyAudit {
     error: Option<Error>,
+}
+
+struct ImplementationAudit {
+    algorithm: Algorithm,
+    error: Option<Error>,
+    saw_merge_partition: bool,
+    saw_merge_agent: bool,
+    saw_merge_sort_block_sort: bool,
+    saw_merge_sort_partition: bool,
+    saw_merge_sort_merge: bool,
+    saw_radix_init: bool,
+    saw_radix_histogram: bool,
+    saw_radix_exclusive_sum: bool,
+    saw_radix_onesweep: bool,
+}
+
+impl ImplementationAudit {
+    fn new(algorithm: Algorithm) -> Self {
+        Self {
+            algorithm,
+            error: None,
+            saw_merge_partition: false,
+            saw_merge_agent: false,
+            saw_merge_sort_block_sort: false,
+            saw_merge_sort_partition: false,
+            saw_merge_sort_merge: false,
+            saw_radix_init: false,
+            saw_radix_histogram: false,
+            saw_radix_exclusive_sum: false,
+            saw_radix_onesweep: false,
+        }
+    }
+
+    fn require_topology(&mut self, expression: &Expr) {
+        match self.algorithm {
+            Algorithm::DeviceMerge => {
+                if !self.saw_merge_partition {
+                    self.reject(
+                        expression,
+                        "DeviceMerge lowering must launch CUB's merge-path partition kernel",
+                    );
+                }
+                if !self.saw_merge_agent {
+                    self.reject(
+                        expression,
+                        "DeviceMerge lowering must launch CUB's block merge agent",
+                    );
+                }
+            }
+            Algorithm::DeviceMergeSort => {
+                if !self.saw_merge_sort_block_sort {
+                    self.reject(
+                        expression,
+                        "DeviceMergeSort lowering must launch CUB's AgentBlockSort kernel",
+                    );
+                }
+                if !self.saw_merge_sort_partition {
+                    self.reject(
+                        expression,
+                        "DeviceMergeSort lowering must launch CUB's AgentPartition kernel",
+                    );
+                }
+                if !self.saw_merge_sort_merge {
+                    self.reject(
+                        expression,
+                        "DeviceMergeSort lowering must launch CUB's AgentMerge kernel",
+                    );
+                }
+            }
+            Algorithm::DeviceRadixSort => {
+                if !self.saw_radix_init {
+                    self.reject(
+                        expression,
+                        "DeviceRadixSort lowering must initialize CUB's bins and pass counters",
+                    );
+                }
+                if !self.saw_radix_histogram {
+                    self.reject(
+                        expression,
+                        "DeviceRadixSort lowering must launch CUB's multi-pass histogram agent",
+                    );
+                }
+                if !self.saw_radix_exclusive_sum {
+                    self.reject(
+                        expression,
+                        "DeviceRadixSort lowering must launch CUB's bin exclusive-sum kernel",
+                    );
+                }
+                if !self.saw_radix_onesweep {
+                    self.reject(
+                        expression,
+                        "DeviceRadixSort lowering must launch CUB's decoupled-lookback one-sweep agent",
+                    );
+                }
+            }
+        }
+    }
+
+    fn observe_merge_sort_name(&mut self, name: &str) {
+        self.saw_merge_sort_block_sort |= name.starts_with("device_merge_sort_block_keys_")
+            || name.starts_with("device_merge_sort_block_pairs_");
+        self.saw_merge_sort_partition |= name == "device_merge_sort_partition";
+        self.saw_merge_sort_merge |= name.starts_with("device_merge_sort_merge_keys_")
+            || name.starts_with("device_merge_sort_merge_pairs_");
+    }
+
+    fn observe_radix_name(&mut self, name: &str) {
+        self.saw_radix_init |= name == "device_radix_sort_init";
+        self.saw_radix_histogram |= name == "device_radix_sort_histogram";
+        self.saw_radix_exclusive_sum |= name == "device_radix_sort_exclusive_sum";
+        self.saw_radix_onesweep |=
+            name == "device_radix_sort_onesweep_keys" || name == "device_radix_sort_onesweep_pairs";
+    }
+
+    fn reject(&mut self, tokens: impl quote::ToTokens, message: &str) {
+        let error = Error::new_spanned(tokens, message);
+        if let Some(existing) = &mut self.error {
+            existing.combine(error);
+        } else {
+            self.error = Some(error);
+        }
+    }
 }
 
 impl SafetyAudit {
@@ -87,7 +245,42 @@ impl<'ast> Visit<'ast> for SafetyAudit {
                 "generated RCCL code may not use raw-pointer or unsafe-interior plumbing",
             );
         }
+        if path.segments.iter().any(|segment| {
+            matches!(
+                segment.ident.to_string().as_str(),
+                "nvrtc"
+                    | "compile_ptx"
+                    | "load_ptx"
+                    | "load_cubin"
+                    | "materialized_cubin"
+                    | "ptxas"
+                    | "cuModuleLoadData"
+                    | "cuModuleLoadDataEx"
+            )
+        }) {
+            self.reject(
+                path,
+                "generated RCCL code may not compile, embed, or load PTX/cubin artifacts; emit pure Rust for cuda-oxide",
+            );
+        }
         visit::visit_path(self, path);
+    }
+
+    fn visit_expr_lit(&mut self, expression: &'ast ExprLit) {
+        if let Lit::Str(literal) = &expression.lit {
+            let value = literal.value();
+            if value.contains(".ptx")
+                || value.contains(".cubin")
+                || value.contains(".version ")
+                || value.contains(".target sm_")
+            {
+                self.reject(
+                    expression,
+                    "generated RCCL code may not contain CUDA assembly or materialized PTX/cubin paths; emit pure Rust for cuda-oxide",
+                );
+            }
+        }
+        visit::visit_expr_lit(self, expression);
     }
 
     fn visit_type_ptr(&mut self, pointer: &'ast TypePtr) {
@@ -156,13 +349,23 @@ impl<'ast> Visit<'ast> for SafetyAudit {
     }
 
     fn visit_expr_method_call(&mut self, expression: &'ast ExprMethodCall) {
+        let method = expression.method.to_string();
         if matches!(
-            expression.method.to_string().as_str(),
+            method.as_str(),
             "as_ptr" | "as_mut_ptr" | "as_ptr_range" | "cast_mut" | "cast_const"
         ) {
             self.reject(
                 expression,
                 "generated RCCL code may not extract raw pointers from safe values",
+            );
+        }
+        if matches!(
+            method.as_str(),
+            "compile_ptx" | "load_ptx" | "load_cubin" | "materialized_cubin" | "ptxas"
+        ) {
+            self.reject(
+                expression,
+                "generated RCCL code may not compile, embed, or load PTX/cubin artifacts; emit pure Rust for cuda-oxide",
             );
         }
         visit::visit_expr_method_call(self, expression);
@@ -229,6 +432,133 @@ impl<'ast> Visit<'ast> for SafetyAudit {
     }
 }
 
+impl<'ast> Visit<'ast> for ImplementationAudit {
+    fn visit_path(&mut self, path: &'ast Path) {
+        let names = path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect::<Vec<_>>();
+
+        if names
+            .windows(2)
+            .any(|pair| pair == ["DeviceBuffer", "zeroed"])
+        {
+            self.reject(
+                path,
+                "generated CUB operations may not allocate or clear temporary storage; borrow operation workspace prepared outside the launch path",
+            );
+        }
+
+        match self.algorithm {
+            Algorithm::DeviceMerge => {
+                self.saw_merge_partition |= names
+                    .iter()
+                    .any(|name| name == "device_partition_merge_path");
+                self.saw_merge_agent |= names.iter().any(|name| {
+                    matches!(
+                        name.as_str(),
+                        "device_merge_keys_agent" | "device_merge_pairs_agent"
+                    )
+                });
+                if names.iter().any(|name| name == "stable_left_partition") {
+                    self.reject(
+                        path,
+                        "DeviceMerge may not substitute one global MergePath search per output thread; port the partition kernel and block merge agent",
+                    );
+                }
+            }
+            Algorithm::DeviceMergeSort => {
+                for name in &names {
+                    self.observe_merge_sort_name(name);
+                }
+                if names.iter().any(|name| {
+                    matches!(
+                        name.as_str(),
+                        "merge_sort_source"
+                            | "device_merge_sort_keys_pass"
+                            | "device_merge_sort_pairs_pass"
+                    )
+                }) {
+                    self.reject(
+                        path,
+                        "DeviceMergeSort may not substitute one-output-per-thread pairwise passes; port AgentBlockSort, AgentPartition, and AgentMerge",
+                    );
+                }
+            }
+            Algorithm::DeviceRadixSort => {
+                for name in &names {
+                    self.observe_radix_name(name);
+                }
+                if names.iter().any(|name| {
+                    name.starts_with("device_merge_sort") || name == "merge_sort_source"
+                }) {
+                    self.reject(
+                        path,
+                        "DeviceRadixSort may not lower a radix digit to comparison merge sort; port the selected CUB radix agent graph",
+                    );
+                }
+            }
+        }
+
+        visit::visit_path(self, path);
+    }
+
+    fn visit_expr_method_call(&mut self, expression: &'ast ExprMethodCall) {
+        if expression.method == "compute_capability" {
+            self.reject(
+                expression,
+                "generated CUB operations may not perform runtime TMP or architecture selection; the proc macro must emit the selected policy",
+            );
+        }
+        let method = expression.method.to_string();
+        if self.algorithm == Algorithm::DeviceMerge {
+            self.saw_merge_partition |= method == "device_partition_merge_path";
+            self.saw_merge_agent |= matches!(
+                method.as_str(),
+                "device_merge_keys_agent" | "device_merge_pairs_agent"
+            );
+            if matches!(method.as_str(), "device_merge_keys" | "device_merge_pairs") {
+                self.reject(
+                    expression,
+                    "DeviceMerge may not use the deleted global per-thread merge kernel",
+                );
+            }
+        }
+        match self.algorithm {
+            Algorithm::DeviceMerge if method == "stable_left_partition" => self.reject(
+                expression,
+                "DeviceMerge may not substitute one global MergePath search per output thread; port the partition kernel and block merge agent",
+            ),
+            Algorithm::DeviceMergeSort => {
+                self.observe_merge_sort_name(&method);
+                if matches!(
+                    method.as_str(),
+                    "merge_sort_source"
+                        | "device_merge_sort_keys_pass"
+                        | "device_merge_sort_pairs_pass"
+                ) {
+                    self.reject(
+                        expression,
+                        "DeviceMergeSort may not substitute one-output-per-thread pairwise passes; port AgentBlockSort, AgentPartition, and AgentMerge",
+                    );
+                }
+            }
+            Algorithm::DeviceRadixSort
+                if method.starts_with("device_merge_sort") || method == "merge_sort_source" =>
+            {
+                self.reject(
+                    expression,
+                    "DeviceRadixSort may not lower a radix digit to comparison merge sort; port the selected CUB radix agent graph",
+                );
+            }
+            Algorithm::DeviceRadixSort => self.observe_radix_name(&method),
+            _ => {}
+        }
+        visit::visit_expr_method_call(self, expression);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,5 +607,75 @@ mod tests {
         assert!(message.contains("unsafe blocks"));
         assert!(message.contains("extract raw pointers"));
         assert!(message.contains("opaque nested macro"));
+    }
+
+    #[test]
+    fn runtime_policy_and_operation_owned_workspace_are_rejected() {
+        let error = generated_algorithm_expression(
+            Algorithm::DeviceMerge,
+            quote! {{
+                let target = execution.stream().context().compute_capability()?;
+                let scratch = cuda_core::DeviceBuffer::zeroed(execution.stream(), count)?;
+                (target, scratch)
+            }},
+        )
+        .expect_err("runtime TMP and hidden workspace allocation must fail closed");
+        let message = error.into_compile_error().to_string();
+        assert!(message.contains("runtime TMP"));
+        assert!(message.contains("temporary storage"));
+    }
+
+    #[test]
+    fn generated_cuda_artifact_and_jit_paths_are_rejected() {
+        for generated in [
+            quote! {{ nvrtc::compile_ptx(source) }},
+            quote! {{ cuda_bindings::cuModuleLoadData(image) }},
+            quote! {{ loader.load_cubin("kernel.cubin") }},
+            quote! {{ invoke("ptxas", "kernel.ptx") }},
+            quote! {{ compile(".version 8.8\n.target sm_89") }},
+        ] {
+            let error = generated_expression(generated).expect_err(
+                "generated RCCL code must not own CUDA artifact compilation or loading",
+            );
+            let message = error.into_compile_error().to_string();
+            assert!(
+                message.contains("pure Rust for cuda-oxide"),
+                "unexpected rejection: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn comparison_sort_cannot_mask_a_radix_agent_gap() {
+        let error = generated_algorithm_expression(
+            Algorithm::DeviceRadixSort,
+            quote! {{
+                module.device_merge_sort_keys_pass(stream, input, output)
+            }},
+        )
+        .expect_err("a comparison-sort radix substitution must fail closed");
+        assert!(
+            error
+                .into_compile_error()
+                .to_string()
+                .contains("radix digit")
+        );
+    }
+
+    #[test]
+    fn global_per_thread_merge_partition_is_rejected() {
+        let error = generated_algorithm_expression(
+            Algorithm::DeviceMerge,
+            quote! {{
+                stable_left_partition(first, second, output_index)
+            }},
+        )
+        .expect_err("the pre-agent merge substitution must fail closed");
+        assert!(
+            error
+                .into_compile_error()
+                .to_string()
+                .contains("partition kernel")
+        );
     }
 }

@@ -46,6 +46,42 @@ test = false
 required-features = ["cuda-oxide-example"]
 
 [[example]]
+name = "device_merge_sort_keys_probe"
+path = "examples/device_merge_sort_keys_probe.rs"
+test = false
+required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "device_merge_sort_keys_benchmark"
+path = "examples/device_merge_sort_keys_benchmark.rs"
+test = false
+required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "device_merge_sort_pairs_probe"
+path = "examples/device_merge_sort_pairs_probe.rs"
+test = false
+required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "device_merge_sort_pairs_benchmark"
+path = "examples/device_merge_sort_pairs_benchmark.rs"
+test = false
+required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "device_radix_sort_keys_probe"
+path = "examples/device_radix_sort_keys_probe.rs"
+test = false
+required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "device_radix_sort_pairs_probe"
+path = "examples/device_radix_sort_pairs_probe.rs"
+test = false
+required-features = ["cuda-oxide-example"]
+
+[[example]]
 name = "device_ordering_benchmark"
 path = "examples/device_ordering_benchmark.rs"
 test = false

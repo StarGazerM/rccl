@@ -436,6 +436,7 @@ name = "rccl-memory"
 version = "0.1.0"
 dependencies = [
  "cuda-core",
+ "cuda-device",
 ]
 
 [[package]]

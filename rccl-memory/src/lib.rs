@@ -35,6 +35,7 @@ use std::{
 };
 
 mod adaptors;
+pub mod device;
 mod fixed;
 mod pool;
 
@@ -1492,6 +1493,25 @@ impl<'stream, T: DeviceCopy, A: DeviceAllocator> DeviceBuffer<'stream, T, A> {
 
     pub fn num_bytes(&self) -> usize {
         self.len.saturating_mul(std::mem::size_of::<T>())
+    }
+
+    /// Enqueue a byte-zero fill on this buffer's statically bound stream.
+    ///
+    /// Ordering workspaces use this for CUB algorithms whose published agent
+    /// graph specifies `cudaMemsetAsync` between kernel launches. The method
+    /// performs no allocation and does not synchronize the stream.
+    pub fn zero_async(&mut self) -> Result<(), MemoryError> {
+        if self.num_bytes() != 0 {
+            unsafe {
+                memset_d8_async(
+                    self.cu_deviceptr(),
+                    0,
+                    self.num_bytes(),
+                    self.stream.cu_stream(),
+                )?;
+            }
+        }
+        Ok(())
     }
 
     pub fn allocation_bytes(&self) -> usize {

@@ -35,6 +35,12 @@ test = false
 required-features = ["cuda-oxide-example"]
 
 [[example]]
+name = "comparison_sort"
+path = "examples/comparison_sort.rs"
+test = false
+required-features = ["cuda-oxide-example"]
+
+[[example]]
 name = "merge"
 path = "examples/merge.rs"
 test = false

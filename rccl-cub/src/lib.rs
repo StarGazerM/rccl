@@ -9,14 +9,38 @@ use core::alloc::{Layout, LayoutError};
 use cuda_core::DeviceCopy;
 use rccl_memory::{DeviceAllocator, DeviceBlock};
 
+mod ordering_backend;
+
 pub use rccl_cub_macros::{
-    cub_kernels, device_merge_keys, device_merge_pairs, device_merge_sort_keys,
-    device_merge_sort_keys_copy, device_merge_sort_pairs, device_merge_sort_pairs_copy,
+    cub_kernels, device_merge_keys, device_merge_keys_partition_count, device_merge_pairs,
+    device_merge_pairs_partition_count, device_merge_sort_keys, device_merge_sort_keys_copy,
+    device_merge_sort_pairs, device_merge_sort_pairs_copy, device_merge_sort_partition_count,
     device_radix_sort_keys, device_radix_sort_keys_descending, device_radix_sort_pairs,
-    device_radix_sort_pairs_descending, device_stable_merge_sort_keys,
-    device_stable_merge_sort_keys_copy, device_stable_merge_sort_pairs, warp_reduce,
-    warp_reduce_items,
+    device_radix_sort_pairs_descending, device_radix_sort_pairs_workspace,
+    device_radix_sort_workspace, device_stable_merge_sort_keys, device_stable_merge_sort_keys_copy,
+    device_stable_merge_sort_pairs, warp_reduce, warp_reduce_items,
 };
+
+/// Runtime extents for the typed buffers borrowed by a radix-sort operation.
+/// The policy that produced these numbers exists only in the proc macro.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RadixSortWorkspaceCounts {
+    pub scratch_keys: usize,
+    pub bins: usize,
+    pub lookback: usize,
+    pub counters: usize,
+}
+
+/// Runtime extents for the key and value buffers borrowed by a radix pair sort.
+/// The dominant-type scaling and target policy remain proc-macro-only facts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RadixSortPairsWorkspaceCounts {
+    pub scratch_keys: usize,
+    pub scratch_values: usize,
+    pub bins: usize,
+    pub lookback: usize,
+    pub counters: usize,
+}
 
 /// Borrowed launch context for direct CUB device-wide operations.
 ///
@@ -60,6 +84,7 @@ pub enum DeviceAlgorithmError {
         actual: usize,
     },
     SizeOverflow,
+    Memory(rccl_memory::MemoryError),
     Driver(cuda_core::DriverError),
     Launch(cuda_core::LaunchContractError),
 }
@@ -76,6 +101,7 @@ impl core::fmt::Display for DeviceAlgorithmError {
                 "{role} length {actual} does not match required length {expected}"
             ),
             Self::SizeOverflow => formatter.write_str("combined device range length overflowed"),
+            Self::Memory(error) => error.fmt(formatter),
             Self::Driver(error) => error.fmt(formatter),
             Self::Launch(error) => error.fmt(formatter),
         }
@@ -86,6 +112,7 @@ impl std::error::Error for DeviceAlgorithmError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Driver(error) => Some(error),
+            Self::Memory(error) => Some(error),
             Self::Launch(error) => Some(error),
             Self::LengthMismatch { .. } | Self::SizeOverflow => None,
         }
@@ -98,11 +125,51 @@ impl std::error::Error for DeviceAlgorithmError {
 /// caller's crate. It is not a compatibility API.
 #[doc(hidden)]
 pub mod __private {
+    #[doc(hidden)]
+    pub use crate::ordering_backend::{
+        global_merge_path, merge_keys_agent, merge_pairs_agent, merge_sort_block_keys_agent,
+        merge_sort_block_keys_in_place_agent, merge_sort_block_pairs_agent,
+        merge_sort_block_pairs_in_place_agent, merge_sort_merge_keys_agent,
+        merge_sort_merge_pairs_agent, merge_sort_partition_point, radix_exclusive_sum_agent,
+        radix_histogram_agent, radix_init_bins_and_counters_agent, radix_onesweep_keys_agent,
+        radix_onesweep_pairs_agent,
+    };
     pub use cuda_core;
     pub use cuda_device;
     pub use cuda_host;
     #[doc(hidden)]
     pub use rccl_cub_macros::{__device_kernels, __device_transform_repeat_in_place};
+    /// Normalize cuda-oxide and RCCL allocator buffers for CUB's required
+    /// stream-ordered lookback memset. Implemented only for the signed
+    /// 32-bit protocol word, so byte-zeroing cannot create an invalid value.
+    pub trait ZeroRadixLookback {
+        fn zero_radix_lookback(
+            &mut self,
+            stream: &cuda_core::CudaStream,
+        ) -> Result<(), crate::DeviceAlgorithmError>;
+    }
+
+    impl ZeroRadixLookback for cuda_core::DeviceBuffer<i32> {
+        fn zero_radix_lookback(
+            &mut self,
+            stream: &cuda_core::CudaStream,
+        ) -> Result<(), crate::DeviceAlgorithmError> {
+            self.zero_async(stream)
+                .map_err(crate::DeviceAlgorithmError::Driver)
+        }
+    }
+
+    impl<A: rccl_memory::DeviceAllocator> ZeroRadixLookback for rccl_memory::DeviceBuffer<'_, i32, A> {
+        fn zero_radix_lookback(
+            &mut self,
+            stream: &cuda_core::CudaStream,
+        ) -> Result<(), crate::DeviceAlgorithmError> {
+            rccl_memory::ContiguousDeviceRange::ensure_usable_on(self, stream)
+                .map_err(crate::DeviceAlgorithmError::Memory)?;
+            self.zero_async()
+                .map_err(crate::DeviceAlgorithmError::Memory)
+        }
+    }
 }
 
 /// A key/value product used when field names are semantically useful.

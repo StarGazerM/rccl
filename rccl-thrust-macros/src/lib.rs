@@ -144,15 +144,28 @@ fn synchronous_cub(
 
 fn expand_sort(call: call::SortCall) -> syn::Result<proc_macro2::TokenStream> {
     let key_type = call.key_type;
+    let target = call.target;
     let execution = call.execution;
     let range = call.range;
+    let scratch_keys = call.scratch_keys;
+    let bins = call.bins;
+    let lookback = call.lookback;
+    let counters = call.counters;
     synchronous_cub(
         execution,
         quote! {{
             let __rccl_range = #range;
-            ::rccl_cub::device_radix_sort_keys!(::<#key_type>(
+            let __rccl_scratch_keys = #scratch_keys;
+            let __rccl_bins = #bins;
+            let __rccl_lookback = #lookback;
+            let __rccl_counters = #counters;
+            ::rccl_cub::device_radix_sort_keys!(::<#key_type, #target>(
                 __rccl_execution,
                 __rccl_range,
+                __rccl_scratch_keys,
+                __rccl_bins,
+                __rccl_lookback,
+                __rccl_counters,
             ))
         }},
     )
@@ -160,17 +173,24 @@ fn expand_sort(call: call::SortCall) -> syn::Result<proc_macro2::TokenStream> {
 
 fn expand_sort_by(call: call::SortByCall) -> syn::Result<proc_macro2::TokenStream> {
     let key_type = call.key_type;
+    let target = call.target;
     let execution = call.execution;
     let range = call.range;
+    let scratch_keys = call.scratch_keys;
+    let partitions = call.partitions;
     let compare = call.compare;
     synchronous_cub(
         execution,
         quote! {{
             let __rccl_range = #range;
+            let __rccl_scratch_keys = #scratch_keys;
+            let __rccl_partitions = #partitions;
             let __rccl_compare = #compare;
-            ::rccl_cub::device_merge_sort_keys!(::<#key_type>(
+            ::rccl_cub::device_merge_sort_keys!(::<#key_type, #target>(
                 __rccl_execution,
                 __rccl_range,
+                __rccl_scratch_keys,
+                __rccl_partitions,
                 __rccl_compare,
             ))
         }},
@@ -179,15 +199,28 @@ fn expand_sort_by(call: call::SortByCall) -> syn::Result<proc_macro2::TokenStrea
 
 fn expand_stable_sort(call: call::SortCall) -> syn::Result<proc_macro2::TokenStream> {
     let key_type = call.key_type;
+    let target = call.target;
     let execution = call.execution;
     let range = call.range;
+    let scratch_keys = call.scratch_keys;
+    let bins = call.bins;
+    let lookback = call.lookback;
+    let counters = call.counters;
     synchronous_cub(
         execution,
         quote! {{
             let __rccl_range = #range;
-            ::rccl_cub::device_radix_sort_keys!(::<#key_type>(
+            let __rccl_scratch_keys = #scratch_keys;
+            let __rccl_bins = #bins;
+            let __rccl_lookback = #lookback;
+            let __rccl_counters = #counters;
+            ::rccl_cub::device_radix_sort_keys!(::<#key_type, #target>(
                 __rccl_execution,
                 __rccl_range,
+                __rccl_scratch_keys,
+                __rccl_bins,
+                __rccl_lookback,
+                __rccl_counters,
             ))
         }},
     )
@@ -195,17 +228,24 @@ fn expand_stable_sort(call: call::SortCall) -> syn::Result<proc_macro2::TokenStr
 
 fn expand_stable_sort_by(call: call::SortByCall) -> syn::Result<proc_macro2::TokenStream> {
     let key_type = call.key_type;
+    let target = call.target;
     let execution = call.execution;
     let range = call.range;
+    let scratch_keys = call.scratch_keys;
+    let partitions = call.partitions;
     let compare = call.compare;
     synchronous_cub(
         execution,
         quote! {{
             let __rccl_range = #range;
+            let __rccl_scratch_keys = #scratch_keys;
+            let __rccl_partitions = #partitions;
             let __rccl_compare = #compare;
-            ::rccl_cub::device_stable_merge_sort_keys!(::<#key_type>(
+            ::rccl_cub::device_stable_merge_sort_keys!(::<#key_type, #target>(
                 __rccl_execution,
                 __rccl_range,
+                __rccl_scratch_keys,
+                __rccl_partitions,
                 __rccl_compare,
             ))
         }},
@@ -215,18 +255,34 @@ fn expand_stable_sort_by(call: call::SortByCall) -> syn::Result<proc_macro2::Tok
 fn expand_sort_by_key(call: call::SortByKeyCall) -> syn::Result<proc_macro2::TokenStream> {
     let key_type = call.key_type;
     let value_type = call.value_type;
+    let target = call.target;
     let execution = call.execution;
     let keys = call.keys;
     let values = call.values;
+    let scratch_keys = call.scratch_keys;
+    let scratch_values = call.scratch_values;
+    let bins = call.bins;
+    let lookback = call.lookback;
+    let counters = call.counters;
     synchronous_cub(
         execution,
         quote! {{
             let __rccl_keys = #keys;
             let __rccl_values = #values;
-            ::rccl_cub::device_radix_sort_pairs!(::<#key_type, #value_type>(
+            let __rccl_scratch_keys = #scratch_keys;
+            let __rccl_scratch_values = #scratch_values;
+            let __rccl_bins = #bins;
+            let __rccl_lookback = #lookback;
+            let __rccl_counters = #counters;
+            ::rccl_cub::device_radix_sort_pairs!(::<#key_type, #value_type, #target>(
                 __rccl_execution,
                 __rccl_keys,
                 __rccl_values,
+                __rccl_scratch_keys,
+                __rccl_scratch_values,
+                __rccl_bins,
+                __rccl_lookback,
+                __rccl_counters,
             ))
         }},
     )
@@ -235,20 +291,30 @@ fn expand_sort_by_key(call: call::SortByKeyCall) -> syn::Result<proc_macro2::Tok
 fn expand_sort_by_key_with(call: call::SortByKeyWithCall) -> syn::Result<proc_macro2::TokenStream> {
     let key_type = call.key_type;
     let value_type = call.value_type;
+    let target = call.target;
     let execution = call.execution;
     let keys = call.keys;
     let values = call.values;
+    let scratch_keys = call.scratch_keys;
+    let scratch_values = call.scratch_values;
+    let partitions = call.partitions;
     let compare = call.compare;
     synchronous_cub(
         execution,
         quote! {{
             let __rccl_keys = #keys;
             let __rccl_values = #values;
+            let __rccl_scratch_keys = #scratch_keys;
+            let __rccl_scratch_values = #scratch_values;
+            let __rccl_partitions = #partitions;
             let __rccl_compare = #compare;
-            ::rccl_cub::device_merge_sort_pairs!(::<#key_type, #value_type>(
+            ::rccl_cub::device_merge_sort_pairs!(::<#key_type, #value_type, #target>(
                 __rccl_execution,
                 __rccl_keys,
                 __rccl_values,
+                __rccl_scratch_keys,
+                __rccl_scratch_values,
+                __rccl_partitions,
                 __rccl_compare,
             ))
         }},
@@ -258,18 +324,34 @@ fn expand_sort_by_key_with(call: call::SortByKeyWithCall) -> syn::Result<proc_ma
 fn expand_stable_sort_by_key(call: call::SortByKeyCall) -> syn::Result<proc_macro2::TokenStream> {
     let key_type = call.key_type;
     let value_type = call.value_type;
+    let target = call.target;
     let execution = call.execution;
     let keys = call.keys;
     let values = call.values;
+    let scratch_keys = call.scratch_keys;
+    let scratch_values = call.scratch_values;
+    let bins = call.bins;
+    let lookback = call.lookback;
+    let counters = call.counters;
     synchronous_cub(
         execution,
         quote! {{
             let __rccl_keys = #keys;
             let __rccl_values = #values;
-            ::rccl_cub::device_radix_sort_pairs!(::<#key_type, #value_type>(
+            let __rccl_scratch_keys = #scratch_keys;
+            let __rccl_scratch_values = #scratch_values;
+            let __rccl_bins = #bins;
+            let __rccl_lookback = #lookback;
+            let __rccl_counters = #counters;
+            ::rccl_cub::device_radix_sort_pairs!(::<#key_type, #value_type, #target>(
                 __rccl_execution,
                 __rccl_keys,
                 __rccl_values,
+                __rccl_scratch_keys,
+                __rccl_scratch_values,
+                __rccl_bins,
+                __rccl_lookback,
+                __rccl_counters,
             ))
         }},
     )
@@ -280,20 +362,30 @@ fn expand_stable_sort_by_key_with(
 ) -> syn::Result<proc_macro2::TokenStream> {
     let key_type = call.key_type;
     let value_type = call.value_type;
+    let target = call.target;
     let execution = call.execution;
     let keys = call.keys;
     let values = call.values;
+    let scratch_keys = call.scratch_keys;
+    let scratch_values = call.scratch_values;
+    let partitions = call.partitions;
     let compare = call.compare;
     synchronous_cub(
         execution,
         quote! {{
             let __rccl_keys = #keys;
             let __rccl_values = #values;
+            let __rccl_scratch_keys = #scratch_keys;
+            let __rccl_scratch_values = #scratch_values;
+            let __rccl_partitions = #partitions;
             let __rccl_compare = #compare;
-            ::rccl_cub::device_stable_merge_sort_pairs!(::<#key_type, #value_type>(
+            ::rccl_cub::device_stable_merge_sort_pairs!(::<#key_type, #value_type, #target>(
                 __rccl_execution,
                 __rccl_keys,
                 __rccl_values,
+                __rccl_scratch_keys,
+                __rccl_scratch_values,
+                __rccl_partitions,
                 __rccl_compare,
             ))
         }},
@@ -302,9 +394,11 @@ fn expand_stable_sort_by_key_with(
 
 fn expand_merge(call: call::MergeCall) -> syn::Result<proc_macro2::TokenStream> {
     let value_type = call.value_type;
+    let target = call.target;
     let execution = call.execution;
     let first = call.first;
     let second = call.second;
+    let partitions = call.partitions;
     let output = call.output;
     let order = natural_order(&value_type);
     synchronous_cub(
@@ -312,11 +406,13 @@ fn expand_merge(call: call::MergeCall) -> syn::Result<proc_macro2::TokenStream> 
         quote! {{
             let __rccl_first = #first;
             let __rccl_second = #second;
+            let __rccl_partitions = #partitions;
             let __rccl_output = #output;
-            ::rccl_cub::device_merge_keys!(::<#value_type>(
+            ::rccl_cub::device_merge_keys!(::<#value_type, #target>(
                 __rccl_execution,
                 __rccl_first,
                 __rccl_second,
+                __rccl_partitions,
                 __rccl_output,
                 #order,
             ))
@@ -326,9 +422,11 @@ fn expand_merge(call: call::MergeCall) -> syn::Result<proc_macro2::TokenStream> 
 
 fn expand_merge_by(call: call::MergeByCall) -> syn::Result<proc_macro2::TokenStream> {
     let value_type = call.value_type;
+    let target = call.target;
     let execution = call.execution;
     let first = call.first;
     let second = call.second;
+    let partitions = call.partitions;
     let output = call.output;
     let compare = call.compare;
     synchronous_cub(
@@ -336,12 +434,14 @@ fn expand_merge_by(call: call::MergeByCall) -> syn::Result<proc_macro2::TokenStr
         quote! {{
             let __rccl_first = #first;
             let __rccl_second = #second;
+            let __rccl_partitions = #partitions;
             let __rccl_output = #output;
             let __rccl_compare = #compare;
-            ::rccl_cub::device_merge_keys!(::<#value_type>(
+            ::rccl_cub::device_merge_keys!(::<#value_type, #target>(
                 __rccl_execution,
                 __rccl_first,
                 __rccl_second,
+                __rccl_partitions,
                 __rccl_output,
                 __rccl_compare,
             ))
@@ -352,11 +452,13 @@ fn expand_merge_by(call: call::MergeByCall) -> syn::Result<proc_macro2::TokenStr
 fn expand_merge_by_key(call: call::MergeByKeyCall) -> syn::Result<proc_macro2::TokenStream> {
     let key_type = call.key_type;
     let value_type = call.value_type;
+    let target = call.target;
     let execution = call.execution;
     let first_keys = call.first_keys;
     let first_values = call.first_values;
     let second_keys = call.second_keys;
     let second_values = call.second_values;
+    let partitions = call.partitions;
     let output_keys = call.output_keys;
     let output_values = call.output_values;
     let order = natural_order(&key_type);
@@ -367,14 +469,16 @@ fn expand_merge_by_key(call: call::MergeByKeyCall) -> syn::Result<proc_macro2::T
             let __rccl_first_values = #first_values;
             let __rccl_second_keys = #second_keys;
             let __rccl_second_values = #second_values;
+            let __rccl_partitions = #partitions;
             let __rccl_output_keys = #output_keys;
             let __rccl_output_values = #output_values;
-            ::rccl_cub::device_merge_pairs!(::<#key_type, #value_type>(
+            ::rccl_cub::device_merge_pairs!(::<#key_type, #value_type, #target>(
                 __rccl_execution,
                 __rccl_first_keys,
                 __rccl_first_values,
                 __rccl_second_keys,
                 __rccl_second_values,
+                __rccl_partitions,
                 __rccl_output_keys,
                 __rccl_output_values,
                 #order,
@@ -388,11 +492,13 @@ fn expand_merge_by_key_with(
 ) -> syn::Result<proc_macro2::TokenStream> {
     let key_type = call.key_type;
     let value_type = call.value_type;
+    let target = call.target;
     let execution = call.execution;
     let first_keys = call.first_keys;
     let first_values = call.first_values;
     let second_keys = call.second_keys;
     let second_values = call.second_values;
+    let partitions = call.partitions;
     let output_keys = call.output_keys;
     let output_values = call.output_values;
     let compare = call.compare;
@@ -403,15 +509,17 @@ fn expand_merge_by_key_with(
             let __rccl_first_values = #first_values;
             let __rccl_second_keys = #second_keys;
             let __rccl_second_values = #second_values;
+            let __rccl_partitions = #partitions;
             let __rccl_output_keys = #output_keys;
             let __rccl_output_values = #output_values;
             let __rccl_compare = #compare;
-            ::rccl_cub::device_merge_pairs!(::<#key_type, #value_type>(
+            ::rccl_cub::device_merge_pairs!(::<#key_type, #value_type, #target>(
                 __rccl_execution,
                 __rccl_first_keys,
                 __rccl_first_values,
                 __rccl_second_keys,
                 __rccl_second_values,
+                __rccl_partitions,
                 __rccl_output_keys,
                 __rccl_output_values,
                 __rccl_compare,
@@ -463,15 +571,25 @@ mod tests {
         let expansions = [
             (
                 "sort",
-                expand_sort(syn::parse_quote!(::<i32>(&exec, &mut keys))).expect("sort must lower"),
+                expand_sort(syn::parse_quote!(::<i32, sm_89>(
+                    &exec,
+                    &mut keys,
+                    &mut scratch_keys,
+                    &mut bins,
+                    &mut lookback,
+                    &mut counters
+                )))
+                .expect("sort must lower"),
                 "device_radix_sort_keys",
             ),
             (
                 "sort_by",
                 expand_sort_by(syn::parse_quote!(
-                    ::<i32>(
+                    ::<i32, sm_89>(
                         &exec,
                         &mut keys,
+                        &mut scratch_keys,
+                        &mut partitions,
                         |left: &i32, right: &i32| left.cmp(right)
                     )
                 ))
@@ -480,16 +598,25 @@ mod tests {
             ),
             (
                 "stable_sort",
-                expand_stable_sort(syn::parse_quote!(::<i32>(&exec, &mut keys)))
-                    .expect("stable_sort must lower"),
+                expand_stable_sort(syn::parse_quote!(::<i32, sm_89>(
+                    &exec,
+                    &mut keys,
+                    &mut scratch_keys,
+                    &mut bins,
+                    &mut lookback,
+                    &mut counters
+                )))
+                .expect("stable_sort must lower"),
                 "device_radix_sort_keys",
             ),
             (
                 "stable_sort_by",
                 expand_stable_sort_by(syn::parse_quote!(
-                    ::<i32>(
+                    ::<i32, sm_89>(
                         &exec,
                         &mut keys,
+                        &mut scratch_keys,
+                        &mut partitions,
                         |left: &i32, right: &i32| left.cmp(right)
                     )
                 ))
@@ -498,10 +625,15 @@ mod tests {
             ),
             (
                 "sort_by_key",
-                expand_sort_by_key(syn::parse_quote!(::<i32, u64>(
+                expand_sort_by_key(syn::parse_quote!(::<i32, u64, sm_89>(
                     &exec,
                     &mut keys,
-                    &mut values
+                    &mut values,
+                    &mut scratch_keys,
+                    &mut scratch_values,
+                    &mut bins,
+                    &mut lookback,
+                    &mut counters
                 )))
                 .expect("sort_by_key must lower"),
                 "device_radix_sort_pairs",
@@ -509,10 +641,13 @@ mod tests {
             (
                 "sort_by_key_with",
                 expand_sort_by_key_with(syn::parse_quote!(
-                    ::<i32, u64>(
+                    ::<i32, u64, sm_89>(
                         &exec,
                         &mut keys,
                         &mut values,
+                        &mut scratch_keys,
+                        &mut scratch_values,
+                        &mut partitions,
                         |left: &i32, right: &i32| left.cmp(right)
                     )
                 ))
@@ -521,10 +656,15 @@ mod tests {
             ),
             (
                 "stable_sort_by_key",
-                expand_stable_sort_by_key(syn::parse_quote!(::<i32, u64>(
+                expand_stable_sort_by_key(syn::parse_quote!(::<i32, u64, sm_89>(
                     &exec,
                     &mut keys,
-                    &mut values
+                    &mut values,
+                    &mut scratch_keys,
+                    &mut scratch_values,
+                    &mut bins,
+                    &mut lookback,
+                    &mut counters
                 )))
                 .expect("stable_sort_by_key must lower"),
                 "device_radix_sort_pairs",
@@ -532,10 +672,13 @@ mod tests {
             (
                 "stable_sort_by_key_with",
                 expand_stable_sort_by_key_with(syn::parse_quote!(
-                    ::<i32, u64>(
+                    ::<i32, u64, sm_89>(
                         &exec,
                         &mut keys,
                         &mut values,
+                        &mut scratch_keys,
+                        &mut scratch_values,
+                        &mut partitions,
                         |left: &i32, right: &i32| left.cmp(right)
                     )
                 ))
@@ -544,10 +687,11 @@ mod tests {
             ),
             (
                 "merge",
-                expand_merge(syn::parse_quote!(::<i32>(
+                expand_merge(syn::parse_quote!(::<i32, sm_89>(
                     &exec,
                     &first,
                     &second,
+                    &mut partitions,
                     &mut output
                 )))
                 .expect("merge must lower"),
@@ -556,10 +700,11 @@ mod tests {
             (
                 "merge_by",
                 expand_merge_by(syn::parse_quote!(
-                    ::<i32>(
+                    ::<i32, sm_89>(
                         &exec,
                         &first,
                         &second,
+                        &mut partitions,
                         &mut output,
                         |left: &i32, right: &i32| left.cmp(right)
                     )
@@ -570,12 +715,13 @@ mod tests {
             (
                 "merge_by_key",
                 expand_merge_by_key(syn::parse_quote!(
-                    ::<i32, u64>(
+                    ::<i32, u64, sm_89>(
                         &exec,
                         &first_keys,
                         &first_values,
                         &second_keys,
                         &second_values,
+                        &mut partitions,
                         &mut output_keys,
                         &mut output_values
                     )
@@ -586,12 +732,13 @@ mod tests {
             (
                 "merge_by_key_with",
                 expand_merge_by_key_with(syn::parse_quote!(
-                    ::<i32, u64>(
+                    ::<i32, u64, sm_89>(
                         &exec,
                         &first_keys,
                         &first_values,
                         &second_keys,
                         &second_values,
+                        &mut partitions,
                         &mut output_keys,
                         &mut output_values,
                         |left: &i32, right: &i32| left.cmp(right)
