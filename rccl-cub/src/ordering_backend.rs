@@ -16,14 +16,12 @@
 
 use core::mem::MaybeUninit;
 
-use cuda_device::{
-    DisjointSlice, DynamicSharedArray, LinearTiles,
-    atomic::{AtomicOrdering, BlockAtomicI32, BlockAtomicU32, DeviceAtomicI32, DeviceAtomicU64},
-    fence, thread, warp,
-};
+use cuda_device::{DisjointSlice, LinearTiles, thread, warp};
 use rccl_memory::device::{
-    MergePathSearch, OneDimensionalLaunch, WarpStripedBlockInput, WarpStripedBlockRead,
-    WarpStripedBlockTile, WarpStripedBlockWrite, warp_striped_pair_into_write,
+    BlockSharedMemory, DeviceRegion, MergePathSearch, OneDimensionalLaunch, SharedRegion,
+    WarpStripedBlockInput, WarpStripedBlockRead, WarpStripedBlockTile, WarpStripedBlockWrite,
+    commit_and_wait_async_copy, commit_async_copy, initialized_ref, initialized_value,
+    threadfence_block, wait_async_copy, warp_striped_pair_into_write,
 };
 
 // CUB marks each per-thread item loop with `_CCCL_PRAGMA_UNROLL_FULL()`. A
@@ -174,102 +172,12 @@ const fn load_to_shared_buffer_bytes(items: u32, item_size: u32) -> u32 {
     }
 }
 
-/// SM80 `BlockLoadToShared::CopyAsync` byte-for-byte copy schedule.
-///
-/// Returns the padding between `shared_buffer` and the first logical `T`.
-/// The proc macro supplies `SIZE`, so no type-layout policy is rediscovered at
-/// runtime. The only unsafe operations in the async collective stay inside
-/// this audited backend boundary.
-#[inline(always)]
-unsafe fn copy_async_to_shared<T, const THREADS: usize, const SIZE: usize>(
-    shared_buffer: *mut u8,
-    global: *const T,
-    count: u32,
-    thread_index: u32,
-) -> u32 {
-    let num_bytes = count * SIZE as u32;
-    // CCCL constructs an empty span whose returned pointer may be padded past
-    // the allocation when its (unused) source address is unaligned. Rust does
-    // not permit forming that out-of-bounds pointer. An empty range contributes
-    // no serial-merge source indices, so its canonical Rust representation is
-    // the buffer base itself.
-    if num_bytes == 0 {
-        return 0;
-    }
-    let address_mod_16 = (global as usize & 15) as u32;
-    let align_difference = if SIZE >= 16 {
-        0
-    } else {
-        (16 - address_mod_16) & 15
-    };
-    let head_padding = if SIZE >= 16 {
-        0
-    } else {
-        (16 - align_difference) & 15
-    };
-    let actual_shared = unsafe { shared_buffer.add(head_padding as usize) };
-    let head_bytes = align_difference.min(num_bytes);
-    let bulk_bytes = (num_bytes - head_bytes) / 16 * 16;
-    let aligned_global = unsafe { (global.cast::<u8>()).add(head_bytes as usize) };
-
-    let mut offset = thread_index * 16;
-    while offset < bulk_bytes {
-        // SAFETY: both addresses are 16-byte aligned and name disjoint 16-byte
-        // chunks assigned to this block thread, exactly as CUB's SM80 path.
-        unsafe {
-            cuda_device::async_copy::cp_async_cg_16(
-                actual_shared
-                    .add((head_bytes + offset) as usize)
-                    .cast::<u32>(),
-                aligned_global.add(offset as usize).cast::<u32>(),
-            )
-        };
-        offset += THREADS as u32 * 16;
-    }
-
-    // CUB peels the unaligned head and the tail with at most 30 block threads.
-    let begin_offset = if thread_index < head_bytes {
-        0
-    } else {
-        bulk_bytes
-    };
-    let byte_index = begin_offset + thread_index;
-    if byte_index < num_bytes {
-        // SAFETY: the range guard proves a byte in both source and destination.
-        unsafe {
-            actual_shared
-                .add(byte_index as usize)
-                .write(global.cast::<u8>().add(byte_index as usize).read())
-        };
-    }
-    head_padding
-}
-
-#[inline(always)]
-fn commit_async_copy() {
-    // SAFETY: callers issue all block copies before the uniform commit.
-    unsafe { cuda_device::async_copy::cp_async_commit_group() };
-}
-
-#[inline(always)]
-fn wait_async_copy() {
-    // SAFETY: a preceding uniform commit created the group being awaited.
-    unsafe { cuda_device::async_copy::cp_async_wait_group(0) };
-    thread::sync_threads();
-}
-
-#[inline(always)]
-fn commit_and_wait_async_copy() {
-    commit_async_copy();
-    wait_async_copy();
-}
-
 #[inline(always)]
 fn ordered_before<K, F>(order: &F, left: &K, right: &K) -> bool
 where
     F: Fn(&K, &K) -> core::cmp::Ordering + Copy,
 {
-    order(left, right) == core::cmp::Ordering::Less
+    order(left, right).is_lt()
 }
 
 /// Exact CUB `MergePath` over two complete global input ranges.
@@ -288,15 +196,16 @@ where
 }
 
 /// CUB `MergePath` over the two adjacent ranges already staged in shared
-/// memory. The unsafe shared-memory reads remain inside this module.
+/// memory through the checked block-shared capability.
 #[inline(always)]
 fn local_merge_path_begin(diagonal: i32, second_count: i32) -> i32 {
     (diagonal - second_count).max(0)
 }
 
 #[inline(always)]
-unsafe fn shared_merge_path<K, F>(
-    shared: *mut MaybeUninit<K>,
+fn shared_merge_path_region<K, F>(
+    shared: &SharedRegion<MaybeUninit<K>>,
+    first_offset: i32,
     second_offset: i32,
     first_count: i32,
     second_count: i32,
@@ -314,12 +223,9 @@ where
     let mut first_end = diagonal.min(first_count);
     while first_begin < first_end {
         let middle = first_begin + (first_end - first_begin) / 2;
-        // SAFETY: MergePath's interval invariants keep both indices inside the
-        // initialized first and second tile ranges.
-        let first = unsafe { shared.add(middle as usize).read().assume_init() };
-        let second_index = second_offset + diagonal - 1 - middle;
-        // SAFETY: same interval proof as the first load above.
-        let second = unsafe { shared.add(second_index as usize).read().assume_init() };
+        let first = shared.read_initialized((first_offset + middle) as usize);
+        let second_index = first_offset + second_offset + diagonal - 1 - middle;
+        let second = shared.read_initialized(second_index as usize);
         if ordered_before(order, &second, &first) {
             first_end = middle;
         } else {
@@ -344,6 +250,7 @@ pub fn merge_keys_agent<
     const ITEMS: usize,
     const K_SIZE: usize,
     const USE_LOAD_TO_SHARED: bool,
+    const SHARED_BYTES: usize,
 >(
     first: &[K],
     second: &[K],
@@ -362,12 +269,12 @@ pub fn merge_keys_agent<
     let items_in_tile = (total - tile_base).min(tile_items);
     if items_in_tile == tile_items {
         let output = WarpStripedBlockWrite::<K, THREADS, ITEMS>::new(output, launch, tile_items);
-        merge_keys_tile::<K, F, THREADS, ITEMS, K_SIZE, USE_LOAD_TO_SHARED, true>(
+        merge_keys_tile::<K, F, THREADS, ITEMS, K_SIZE, USE_LOAD_TO_SHARED, SHARED_BYTES, true>(
             first, second, partitions, order, tile_index, tile_base, tile_items, output,
         );
     } else {
         let output = WarpStripedBlockWrite::<K, THREADS, ITEMS>::new(output, launch, items_in_tile);
-        merge_keys_tile::<K, F, THREADS, ITEMS, K_SIZE, USE_LOAD_TO_SHARED, false>(
+        merge_keys_tile::<K, F, THREADS, ITEMS, K_SIZE, USE_LOAD_TO_SHARED, SHARED_BYTES, false>(
             first,
             second,
             partitions,
@@ -389,6 +296,7 @@ fn merge_keys_tile<
     const ITEMS: usize,
     const K_SIZE: usize,
     const USE_LOAD_TO_SHARED: bool,
+    const SHARED_BYTES: usize,
     const FULL: bool,
 >(
     first: &[K],
@@ -422,46 +330,39 @@ fn merge_keys_tile<
     let first_count = (first_end - first_begin) as i32;
     let second_count = (second_end - second_begin) as i32;
 
-    let shared_base = DynamicSharedArray::<u8, 16>::get_raw();
-    let storage_shared = shared_base.cast::<MaybeUninit<K>>();
+    let exchange_items = block_exchange_storage_items::<THREADS, ITEMS>();
+    let whole_buffer_bytes = load_to_shared_buffer_bytes((tile_items + 1) as u32, K_SIZE as u32)
+        + if K_SIZE < 16 { 32 } else { 0 };
+    let shared_memory = BlockSharedMemory::new(SHARED_BYTES);
+    let mut storage_shared = shared_memory
+        .region::<MaybeUninit<K>>(0, SHARED_BYTES / core::mem::size_of::<MaybeUninit<K>>());
     let mut local = [MaybeUninit::<K>::uninit(); ITEMS];
     let shared;
     let second_offset;
     if USE_LOAD_TO_SHARED {
-        let whole_buffer_bytes =
-            load_to_shared_buffer_bytes((tile_items + 1) as u32, K_SIZE as u32)
-                + if K_SIZE < 16 { 32 } else { 0 };
         let second_buffer_bytes = load_to_shared_buffer_bytes(second_count as u32, K_SIZE as u32);
         let second_buffer_offset = whole_buffer_bytes - second_buffer_bytes;
-        // SAFETY: partition bounding boxes name valid (or one-past for empty)
-        // global ranges; macro-computed dynamic storage covers both buffers.
-        let first_padding = unsafe {
-            copy_async_to_shared::<K, THREADS, K_SIZE>(
-                shared_base,
-                first.as_ptr().add(first_begin),
-                first_count as u32,
-                thread_index,
-            )
-        };
-        // SAFETY: same proof for the second input buffer.
-        let second_padding = unsafe {
-            copy_async_to_shared::<K, THREADS, K_SIZE>(
-                shared_base.add(second_buffer_offset as usize),
-                second.as_ptr().add(second_begin),
-                second_count as u32,
-                thread_index,
-            )
-        };
+        let first_copy = shared_memory.copy_async_from::<K, THREADS, K_SIZE>(
+            0,
+            first,
+            first_begin,
+            first_count as u32,
+            thread_index,
+        );
+        let second_copy = shared_memory.copy_async_from::<K, THREADS, K_SIZE>(
+            second_buffer_offset as usize,
+            second,
+            second_begin,
+            second_count as u32,
+            thread_index,
+        );
         commit_and_wait_async_copy();
-        shared = unsafe {
-            shared_base
-                .add(first_padding as usize)
-                .cast::<MaybeUninit<K>>()
-        };
-        second_offset =
-            ((second_buffer_offset + second_padding - first_padding) / K_SIZE as u32) as i32;
+        let first_padding = first_copy.head_padding();
+        second_offset = ((second_buffer_offset + second_copy.head_padding() - first_padding)
+            / K_SIZE as u32) as i32;
+        shared = first_copy.into_tail_region();
     } else {
-        shared = storage_shared;
+        shared = shared_memory.region::<MaybeUninit<K>>(0, exchange_items);
         second_offset = first_count;
         let input = output.blocked_concatenated_input::<K, FULL>(
             first,
@@ -477,8 +378,7 @@ fn merge_keys_tile<
 
         for_each_thread_item!(ITEMS, item, {
             let shared_index = (THREADS * item) as u32 + thread_index;
-            // SAFETY: macro-computed storage covers the complete key tile.
-            unsafe { storage_shared.add(shared_index as usize).write(local[item]) };
+            storage_shared.write(shared_index as usize, local[item]);
         });
         thread::sync_threads();
     }
@@ -489,30 +389,31 @@ fn merge_keys_tile<
     } else {
         (ITEMS as i32 * thread_index as i32).min(items_in_tile as i32)
     };
-    let local_first = unsafe {
-        shared_merge_path(
-            shared,
-            second_offset,
-            first_count,
-            second_count,
-            thread_diagonal,
-            &order,
-        )
-    };
+    let local_first = shared_merge_path_region(
+        &shared,
+        0,
+        second_offset,
+        first_count,
+        second_count,
+        thread_diagonal,
+        &order,
+    );
     let mut first_cursor = local_first;
     let mut second_cursor = second_offset + thread_diagonal - local_first;
     let first_limit = first_count;
     let second_limit = second_offset + second_count;
-    let mut first_key = unsafe { shared.add(first_cursor as usize).read() };
-    let mut second_key = unsafe { shared.add(second_cursor as usize).read() };
+    let mut first_key = shared.read(first_cursor as usize);
+    let mut second_key = shared.read(second_cursor as usize);
     for_each_thread_item!(ITEMS, item, {
         let first_available = first_cursor < first_limit;
         let second_available = second_cursor < second_limit;
         let take_second = second_available
             && (!first_available
-                || ordered_before(&order, unsafe { second_key.assume_init_ref() }, unsafe {
-                    first_key.assume_init_ref()
-                }));
+                || ordered_before(
+                    &order,
+                    initialized_ref(&second_key),
+                    initialized_ref(&first_key),
+                ));
         local[item] = if take_second { second_key } else { first_key };
         if take_second {
             second_cursor += 1;
@@ -520,10 +421,10 @@ fn merge_keys_tile<
             // range. The macro-sized shared allocation includes that padding
             // slot, and `MaybeUninit` lets Rust preserve the load without
             // interpreting the inactive value.
-            second_key = unsafe { shared.add(second_cursor as usize).read() };
+            second_key = shared.read(second_cursor as usize);
         } else {
             first_cursor += 1;
-            first_key = unsafe { shared.add(first_cursor as usize).read() };
+            first_key = shared.read(first_cursor as usize);
         }
     });
 
@@ -535,57 +436,31 @@ fn merge_keys_tile<
     let warp_offset = warp_index * 32 * ITEMS as u32;
     for_each_thread_item!(ITEMS, item, {
         let exchange_index = warp_offset + item as u32 + lane * ITEMS as u32;
-        // SAFETY: warp ranges are disjoint and each lane writes distinct
-        // `item + lane * ITEMS` slots inside its range.
-        unsafe {
-            storage_shared
-                .add(block_exchange_index::<ITEMS>(exchange_index))
-                .write(local[item])
-        };
+        storage_shared.write(block_exchange_index::<ITEMS>(exchange_index), local[item]);
     });
     warp::sync_mask(u32::MAX);
 
     if FULL {
         for_each_thread_item!(ITEMS, item, {
             let warp_striped = warp_offset + item as u32 * 32 + lane;
-            // SAFETY:
-            // - every transposed source in a full tile was initialized;
-            // - the full-tile launch proof places `output_index` in output;
-            // - `(block, warp, lane, item)` maps injectively to output_index.
-            unsafe {
-                let value = storage_shared
-                    .add(block_exchange_index::<ITEMS>(warp_striped))
-                    .read()
-                    .assume_init();
-                output.write_if_valid(item, value);
-            }
+            let value =
+                storage_shared.read_initialized(block_exchange_index::<ITEMS>(warp_striped));
+            output.write_if_valid(item, value);
         });
     } else {
-        let valid_slot = unsafe {
-            storage_shared
-                .add(block_exchange_storage_items::<THREADS, ITEMS>())
-                .cast::<u32>()
-        };
+        let mut valid_slot =
+            shared_memory.region::<u32>(exchange_items * core::mem::size_of::<MaybeUninit<K>>(), 1);
         if thread_index == 0 {
-            unsafe { valid_slot.write_volatile(items_in_tile as u32) };
+            valid_slot.write_volatile(0, items_in_tile as u32);
         }
         thread::sync_threads();
-        let store_items = unsafe { valid_slot.read_volatile() };
+        let store_items = valid_slot.read_volatile(0);
         for_each_thread_item!(ITEMS, item, {
             let warp_striped = warp_offset + item as u32 * 32 + lane;
             if warp_striped < store_items {
-                // SAFETY:
-                // - the range guard proves the transposed source was initialized;
-                // - `output_index < output.len()` follows from `items_in_tile`;
-                // - `(block, warp, lane, item)` maps injectively to output_index,
-                //   so no two threads write the same element.
-                unsafe {
-                    let value = storage_shared
-                        .add(block_exchange_index::<ITEMS>(warp_striped))
-                        .read()
-                        .assume_init();
-                    output.write_if_valid(item, value);
-                }
+                let value =
+                    storage_shared.read_initialized(block_exchange_index::<ITEMS>(warp_striped));
+                output.write_if_valid(item, value);
             }
         });
     }
@@ -610,6 +485,7 @@ pub fn merge_pairs_agent<
     const V_SIZE: usize,
     const USE_LOAD_TO_SHARED_KEYS: bool,
     const USE_LOAD_TO_SHARED_VALUES: bool,
+    const SHARED_BYTES: usize,
 >(
     first_keys: &[K],
     first_values: &[V],
@@ -643,6 +519,7 @@ pub fn merge_pairs_agent<
             V_SIZE,
             USE_LOAD_TO_SHARED_KEYS,
             USE_LOAD_TO_SHARED_VALUES,
+            SHARED_BYTES,
             true,
         >(
             first_keys,
@@ -671,6 +548,7 @@ pub fn merge_pairs_agent<
             V_SIZE,
             USE_LOAD_TO_SHARED_KEYS,
             USE_LOAD_TO_SHARED_VALUES,
+            SHARED_BYTES,
             false,
         >(
             first_keys,
@@ -695,7 +573,13 @@ pub fn merge_pairs_agent<
 /// launch chooses the borrowed destination, replacing CUB's runtime `ping`
 /// pointer selection without changing the tile algorithm.
 #[inline(always)]
-pub fn merge_sort_block_keys_agent<K, F, const THREADS: usize, const ITEMS: usize>(
+pub fn merge_sort_block_keys_agent<
+    K,
+    F,
+    const THREADS: usize,
+    const ITEMS: usize,
+    const SHARED_BYTES: usize,
+>(
     input: &[K],
     order: F,
     output: DisjointSlice<K, LinearTiles<ITEMS>>,
@@ -711,7 +595,7 @@ pub fn merge_sort_block_keys_agent<K, F, const THREADS: usize, const ITEMS: usiz
     if tile_index + 1 < thread::gridDim_x() as usize {
         let input = WarpStripedBlockInput::<K, THREADS, ITEMS>::new(input, launch, tile_items);
         let output = WarpStripedBlockWrite::<K, THREADS, ITEMS>::new(output, launch, tile_items);
-        merge_sort_block_keys_tile::<K, F, THREADS, ITEMS, false>(
+        merge_sort_block_keys_tile::<K, F, THREADS, ITEMS, SHARED_BYTES, false>(
             input,
             order,
             tile_items as u32,
@@ -720,7 +604,7 @@ pub fn merge_sort_block_keys_agent<K, F, const THREADS: usize, const ITEMS: usiz
     } else {
         let input = WarpStripedBlockInput::<K, THREADS, ITEMS>::new(input, launch, items_in_tile);
         let output = WarpStripedBlockWrite::<K, THREADS, ITEMS>::new(output, launch, items_in_tile);
-        merge_sort_block_keys_tile::<K, F, THREADS, ITEMS, true>(
+        merge_sort_block_keys_tile::<K, F, THREADS, ITEMS, SHARED_BYTES, true>(
             input,
             order,
             items_in_tile as u32,
@@ -731,7 +615,13 @@ pub fn merge_sort_block_keys_agent<K, F, const THREADS: usize, const ITEMS: usiz
 
 /// In-place block-sort launch represented by one exclusive Rust borrow.
 #[inline(always)]
-pub fn merge_sort_block_keys_in_place_agent<K, F, const THREADS: usize, const ITEMS: usize>(
+pub fn merge_sort_block_keys_in_place_agent<
+    K,
+    F,
+    const THREADS: usize,
+    const ITEMS: usize,
+    const SHARED_BYTES: usize,
+>(
     order: F,
     output: DisjointSlice<K, LinearTiles<ITEMS>>,
     launch: OneDimensionalLaunch<'_>,
@@ -746,14 +636,14 @@ pub fn merge_sort_block_keys_in_place_agent<K, F, const THREADS: usize, const IT
     let items_in_tile = len.saturating_sub(tile_base).min(tile_items);
     if tile_index + 1 < thread::gridDim_x() as usize {
         let input = WarpStripedBlockRead::<K, THREADS, ITEMS>::new(output, launch, tile_items);
-        merge_sort_block_keys_in_place_tile::<K, F, THREADS, ITEMS, false>(
+        merge_sort_block_keys_in_place_tile::<K, F, THREADS, ITEMS, SHARED_BYTES, false>(
             input,
             order,
             tile_items as u32,
         );
     } else {
         let input = WarpStripedBlockRead::<K, THREADS, ITEMS>::new(output, launch, items_in_tile);
-        merge_sort_block_keys_in_place_tile::<K, F, THREADS, ITEMS, true>(
+        merge_sort_block_keys_in_place_tile::<K, F, THREADS, ITEMS, SHARED_BYTES, true>(
             input,
             order,
             items_in_tile as u32,
@@ -767,7 +657,14 @@ pub fn merge_sort_block_keys_in_place_agent<K, F, const THREADS: usize, const IT
 /// every register sort and shared-memory merge round, matching the pinned
 /// agent's storage-alias order.
 #[inline(always)]
-pub fn merge_sort_block_pairs_agent<K, V, F, const THREADS: usize, const ITEMS: usize>(
+pub fn merge_sort_block_pairs_agent<
+    K,
+    V,
+    F,
+    const THREADS: usize,
+    const ITEMS: usize,
+    const SHARED_BYTES: usize,
+>(
     input_keys: &[K],
     input_values: &[V],
     order: F,
@@ -792,7 +689,7 @@ pub fn merge_sort_block_pairs_agent<K, V, F, const THREADS: usize, const ITEMS: 
             WarpStripedBlockWrite::<K, THREADS, ITEMS>::new(output_keys, launch, tile_items);
         let output_values =
             WarpStripedBlockWrite::<V, THREADS, ITEMS>::new(output_values, launch, tile_items);
-        merge_sort_block_pairs_tile::<K, V, F, _, _, THREADS, ITEMS, false>(
+        merge_sort_block_pairs_tile::<K, V, F, _, _, THREADS, ITEMS, SHARED_BYTES, false>(
             input_keys,
             input_values,
             order,
@@ -809,7 +706,7 @@ pub fn merge_sort_block_pairs_agent<K, V, F, const THREADS: usize, const ITEMS: 
             WarpStripedBlockWrite::<K, THREADS, ITEMS>::new(output_keys, launch, items_in_tile);
         let output_values =
             WarpStripedBlockWrite::<V, THREADS, ITEMS>::new(output_values, launch, items_in_tile);
-        merge_sort_block_pairs_tile::<K, V, F, _, _, THREADS, ITEMS, true>(
+        merge_sort_block_pairs_tile::<K, V, F, _, _, THREADS, ITEMS, SHARED_BYTES, true>(
             input_keys,
             input_values,
             order,
@@ -822,7 +719,14 @@ pub fn merge_sort_block_pairs_agent<K, V, F, const THREADS: usize, const ITEMS: 
 
 /// In-place key/value block-sort launch represented by two exclusive borrows.
 #[inline(always)]
-pub fn merge_sort_block_pairs_in_place_agent<K, V, F, const THREADS: usize, const ITEMS: usize>(
+pub fn merge_sort_block_pairs_in_place_agent<
+    K,
+    V,
+    F,
+    const THREADS: usize,
+    const ITEMS: usize,
+    const SHARED_BYTES: usize,
+>(
     order: F,
     output_keys: DisjointSlice<K, LinearTiles<ITEMS>>,
     output_values: DisjointSlice<V, LinearTiles<ITEMS>>,
@@ -842,7 +746,7 @@ pub fn merge_sort_block_pairs_in_place_agent<K, V, F, const THREADS: usize, cons
             WarpStripedBlockRead::<K, THREADS, ITEMS>::new(output_keys, launch, tile_items);
         let input_values =
             WarpStripedBlockRead::<V, THREADS, ITEMS>::new(output_values, launch, tile_items);
-        merge_sort_block_pairs_in_place_tile::<K, V, F, THREADS, ITEMS, false>(
+        merge_sort_block_pairs_in_place_tile::<K, V, F, THREADS, ITEMS, SHARED_BYTES, false>(
             input_keys,
             input_values,
             order,
@@ -853,7 +757,7 @@ pub fn merge_sort_block_pairs_in_place_agent<K, V, F, const THREADS: usize, cons
             WarpStripedBlockRead::<K, THREADS, ITEMS>::new(output_keys, launch, items_in_tile);
         let input_values =
             WarpStripedBlockRead::<V, THREADS, ITEMS>::new(output_values, launch, items_in_tile);
-        merge_sort_block_pairs_in_place_tile::<K, V, F, THREADS, ITEMS, true>(
+        merge_sort_block_pairs_in_place_tile::<K, V, F, THREADS, ITEMS, SHARED_BYTES, true>(
             input_keys,
             input_values,
             order,
@@ -904,6 +808,7 @@ fn merge_sort_block_pairs_tile<
     ValueSource,
     const THREADS: usize,
     const ITEMS: usize,
+    const SHARED_BYTES: usize,
     const LAST: bool,
 >(
     mut input_keys: KeySource,
@@ -920,12 +825,12 @@ fn merge_sort_block_pairs_tile<
     ValueSource: WarpStripedSource<V>,
 {
     let (local_keys, local_values) =
-        merge_sort_block_pairs_load::<K, V, KeySource, ValueSource, THREADS, ITEMS>(
+        merge_sort_block_pairs_load::<K, V, KeySource, ValueSource, THREADS, ITEMS, SHARED_BYTES>(
             &mut input_keys,
             &mut input_values,
         );
     thread::sync_threads();
-    merge_sort_block_pairs_loaded::<K, V, F, THREADS, ITEMS, LAST>(
+    merge_sort_block_pairs_loaded::<K, V, F, THREADS, ITEMS, SHARED_BYTES, LAST>(
         local_keys,
         local_values,
         order,
@@ -942,6 +847,7 @@ fn merge_sort_block_pairs_in_place_tile<
     F,
     const THREADS: usize,
     const ITEMS: usize,
+    const SHARED_BYTES: usize,
     const LAST: bool,
 >(
     mut input_keys: WarpStripedBlockRead<'_, K, THREADS, ITEMS>,
@@ -953,12 +859,13 @@ fn merge_sort_block_pairs_in_place_tile<
     V: Copy,
     F: Fn(&K, &K) -> core::cmp::Ordering + Copy,
 {
-    let (local_keys, local_values) = merge_sort_block_pairs_load::<K, V, _, _, THREADS, ITEMS>(
-        &mut input_keys,
-        &mut input_values,
-    );
+    let (local_keys, local_values) =
+        merge_sort_block_pairs_load::<K, V, _, _, THREADS, ITEMS, SHARED_BYTES>(
+            &mut input_keys,
+            &mut input_values,
+        );
     let (output_keys, output_values) = warp_striped_pair_into_write(input_keys, input_values);
-    merge_sort_block_pairs_loaded::<K, V, F, THREADS, ITEMS, LAST>(
+    merge_sort_block_pairs_loaded::<K, V, F, THREADS, ITEMS, SHARED_BYTES, LAST>(
         local_keys,
         local_values,
         order,
@@ -976,6 +883,7 @@ fn merge_sort_block_pairs_load<
     ValueSource,
     const THREADS: usize,
     const ITEMS: usize,
+    const SHARED_BYTES: usize,
 >(
     input_keys: &mut KeySource,
     input_values: &mut ValueSource,
@@ -990,55 +898,45 @@ where
     let lane = thread_index & 31;
     let warp_index = thread_index >> 5;
     let warp_offset = warp_index * 32 * ITEMS as u32;
-    let shared_bytes = DynamicSharedArray::<u8, 16>::get_raw();
+    let shared_memory = BlockSharedMemory::new(SHARED_BYTES);
 
     // AgentBlockSort deliberately loads values first, then aliases the same
     // temporary storage for keys after a block barrier.
     let value_fallback = input_values.first();
     let mut local_values = [value_fallback; ITEMS];
-    let shared_values = shared_bytes.cast::<MaybeUninit<V>>();
+    let mut shared_values = shared_memory
+        .region::<MaybeUninit<V>>(0, SHARED_BYTES / core::mem::size_of::<MaybeUninit<V>>());
     for_each_thread_item!(ITEMS, item, {
         let warp_striped = warp_offset + item as u32 * 32 + lane;
         local_values[item] = input_values.read_or(item, value_fallback);
-        unsafe {
-            shared_values
-                .add(block_exchange_index::<ITEMS>(warp_striped))
-                .write(MaybeUninit::new(local_values[item]))
-        };
+        shared_values.write(
+            block_exchange_index::<ITEMS>(warp_striped),
+            MaybeUninit::new(local_values[item]),
+        );
     });
     warp::sync_mask(u32::MAX);
     for_each_thread_item!(ITEMS, item, {
         let blocked = warp_offset + lane * ITEMS as u32 + item as u32;
-        local_values[item] = unsafe {
-            shared_values
-                .add(block_exchange_index::<ITEMS>(blocked))
-                .read()
-                .assume_init()
-        };
+        local_values[item] = shared_values.read_initialized(block_exchange_index::<ITEMS>(blocked));
     });
     thread::sync_threads();
 
     let key_fallback = input_keys.first();
     let mut local_keys = [key_fallback; ITEMS];
-    let shared_keys = shared_bytes.cast::<MaybeUninit<K>>();
+    let mut shared_keys = shared_memory
+        .region::<MaybeUninit<K>>(0, SHARED_BYTES / core::mem::size_of::<MaybeUninit<K>>());
     for_each_thread_item!(ITEMS, item, {
         let warp_striped = warp_offset + item as u32 * 32 + lane;
         local_keys[item] = input_keys.read_or(item, key_fallback);
-        unsafe {
-            shared_keys
-                .add(block_exchange_index::<ITEMS>(warp_striped))
-                .write(MaybeUninit::new(local_keys[item]))
-        };
+        shared_keys.write(
+            block_exchange_index::<ITEMS>(warp_striped),
+            MaybeUninit::new(local_keys[item]),
+        );
     });
     warp::sync_mask(u32::MAX);
     for_each_thread_item!(ITEMS, item, {
         let blocked = warp_offset + lane * ITEMS as u32 + item as u32;
-        local_keys[item] = unsafe {
-            shared_keys
-                .add(block_exchange_index::<ITEMS>(blocked))
-                .read()
-                .assume_init()
-        };
+        local_keys[item] = shared_keys.read_initialized(block_exchange_index::<ITEMS>(blocked));
     });
     (local_keys, local_values)
 }
@@ -1051,6 +949,7 @@ fn merge_sort_block_pairs_loaded<
     F,
     const THREADS: usize,
     const ITEMS: usize,
+    const SHARED_BYTES: usize,
     const LAST: bool,
 >(
     mut local_keys: [K; ITEMS],
@@ -1069,9 +968,12 @@ fn merge_sort_block_pairs_loaded<
     let warp_index = thread_index >> 5;
     let warp_offset = warp_index * 32 * ITEMS as u32;
     let tile_items = THREADS * ITEMS;
-    let shared_bytes = DynamicSharedArray::<u8, 16>::get_raw();
-    let shared_keys = shared_bytes.cast::<MaybeUninit<K>>();
-    let shared_values = shared_bytes.cast::<MaybeUninit<V>>();
+    let exchange_items = block_exchange_storage_items::<THREADS, ITEMS>();
+    let shared_memory = BlockSharedMemory::new(SHARED_BYTES);
+    let mut shared_keys = shared_memory
+        .region::<MaybeUninit<K>>(0, SHARED_BYTES / core::mem::size_of::<MaybeUninit<K>>());
+    let mut shared_values = shared_memory
+        .region::<MaybeUninit<V>>(0, SHARED_BYTES / core::mem::size_of::<MaybeUninit<V>>());
 
     if LAST {
         let blocked_begin = ITEMS as u32 * thread_index;
@@ -1103,7 +1005,8 @@ fn merge_sort_block_pairs_loaded<
                 break;
             }
             block_merge_round_pairs::<K, V, F, THREADS, ITEMS, true>(
-                shared_keys,
+                &mut shared_keys,
+                &shared_memory,
                 &mut local_keys,
                 &mut local_values,
                 valid_items,
@@ -1117,7 +1020,8 @@ fn merge_sort_block_pairs_loaded<
         let mut target_merged_threads = 2u32;
         while target_merged_threads <= THREADS as u32 {
             block_merge_round_pairs::<K, V, F, THREADS, ITEMS, false>(
-                shared_keys,
+                &mut shared_keys,
+                &shared_memory,
                 &mut local_keys,
                 &mut local_values,
                 tile_items as u32,
@@ -1131,36 +1035,27 @@ fn merge_sort_block_pairs_loaded<
     thread::sync_threads();
     for_each_thread_item!(ITEMS, item, {
         let blocked = warp_offset + lane * ITEMS as u32 + item as u32;
-        unsafe {
-            shared_keys
-                .add(block_exchange_index::<ITEMS>(blocked))
-                .write(MaybeUninit::new(local_keys[item]))
-        };
+        shared_keys.write(
+            block_exchange_index::<ITEMS>(blocked),
+            MaybeUninit::new(local_keys[item]),
+        );
     });
     warp::sync_mask(u32::MAX);
     let key_store_items = if LAST {
-        let valid_slot = unsafe {
-            shared_keys
-                .add(block_exchange_storage_items::<THREADS, ITEMS>())
-                .cast::<u32>()
-        };
+        let mut valid_slot =
+            shared_memory.region::<u32>(exchange_items * core::mem::size_of::<MaybeUninit<K>>(), 1);
         if thread_index == 0 {
-            unsafe { valid_slot.write_volatile(valid_items) };
+            valid_slot.write_volatile(0, valid_items);
         }
         thread::sync_threads();
-        unsafe { valid_slot.read_volatile() }
+        valid_slot.read_volatile(0)
     } else {
         valid_items
     };
     for_each_thread_item!(ITEMS, item, {
         let warp_striped = warp_offset + item as u32 * 32 + lane;
         if !LAST || warp_striped < key_store_items {
-            let value = unsafe {
-                shared_keys
-                    .add(block_exchange_index::<ITEMS>(warp_striped))
-                    .read()
-                    .assume_init()
-            };
+            let value = shared_keys.read_initialized(block_exchange_index::<ITEMS>(warp_striped));
             output_keys.write_if_valid(item, value);
         }
     });
@@ -1168,36 +1063,27 @@ fn merge_sort_block_pairs_loaded<
     thread::sync_threads();
     for_each_thread_item!(ITEMS, item, {
         let blocked = warp_offset + lane * ITEMS as u32 + item as u32;
-        unsafe {
-            shared_values
-                .add(block_exchange_index::<ITEMS>(blocked))
-                .write(MaybeUninit::new(local_values[item]))
-        };
+        shared_values.write(
+            block_exchange_index::<ITEMS>(blocked),
+            MaybeUninit::new(local_values[item]),
+        );
     });
     warp::sync_mask(u32::MAX);
     let value_store_items = if LAST {
-        let valid_slot = unsafe {
-            shared_values
-                .add(block_exchange_storage_items::<THREADS, ITEMS>())
-                .cast::<u32>()
-        };
+        let mut valid_slot =
+            shared_memory.region::<u32>(exchange_items * core::mem::size_of::<MaybeUninit<V>>(), 1);
         if thread_index == 0 {
-            unsafe { valid_slot.write_volatile(valid_items) };
+            valid_slot.write_volatile(0, valid_items);
         }
         thread::sync_threads();
-        unsafe { valid_slot.read_volatile() }
+        valid_slot.read_volatile(0)
     } else {
         valid_items
     };
     for_each_thread_item!(ITEMS, item, {
         let warp_striped = warp_offset + item as u32 * 32 + lane;
         if !LAST || warp_striped < value_store_items {
-            let value = unsafe {
-                shared_values
-                    .add(block_exchange_index::<ITEMS>(warp_striped))
-                    .read()
-                    .assume_init()
-            };
+            let value = shared_values.read_initialized(block_exchange_index::<ITEMS>(warp_striped));
             output_values.write_if_valid(item, value);
         }
     });
@@ -1205,7 +1091,14 @@ fn merge_sort_block_pairs_loaded<
 
 #[inline(always)]
 #[allow(unused_assignments)]
-fn merge_sort_block_keys_tile<K, F, const THREADS: usize, const ITEMS: usize, const LAST: bool>(
+fn merge_sort_block_keys_tile<
+    K,
+    F,
+    const THREADS: usize,
+    const ITEMS: usize,
+    const SHARED_BYTES: usize,
+    const LAST: bool,
+>(
     input: WarpStripedBlockInput<'_, K, THREADS, ITEMS>,
     order: F,
     valid_items: u32,
@@ -1223,32 +1116,28 @@ fn merge_sort_block_keys_tile<K, F, const THREADS: usize, const ITEMS: usize, co
     // guarded BlockLoad default for the final partial tile.
     let fallback = input.first();
     let mut local = [fallback; ITEMS];
-    let shared = DynamicSharedArray::<u8, 16>::get_raw().cast::<MaybeUninit<K>>();
+    let shared_memory = BlockSharedMemory::new(SHARED_BYTES);
+    let mut shared = shared_memory
+        .region::<MaybeUninit<K>>(0, SHARED_BYTES / core::mem::size_of::<MaybeUninit<K>>());
 
     // BLOCK_LOAD_WARP_TRANSPOSE: coalesced warp-striped loads followed by a
     // warp-local exchange into blocked per-thread registers.
     for_each_thread_item!(ITEMS, item, {
         let warp_striped = warp_offset + item as u32 * 32 + lane;
         local[item] = input.read_or(item, fallback);
-        unsafe {
-            shared
-                .add(block_exchange_index::<ITEMS>(warp_striped))
-                .write(MaybeUninit::new(local[item]))
-        };
+        shared.write(
+            block_exchange_index::<ITEMS>(warp_striped),
+            MaybeUninit::new(local[item]),
+        );
     });
     warp::sync_mask(u32::MAX);
     for_each_thread_item!(ITEMS, item, {
         let blocked = warp_offset + lane * ITEMS as u32 + item as u32;
-        local[item] = unsafe {
-            shared
-                .add(block_exchange_index::<ITEMS>(blocked))
-                .read()
-                .assume_init()
-        };
+        local[item] = shared.read_initialized(block_exchange_index::<ITEMS>(blocked));
     });
     thread::sync_threads();
 
-    merge_sort_block_keys_loaded::<K, F, THREADS, ITEMS, LAST>(
+    merge_sort_block_keys_loaded::<K, F, THREADS, ITEMS, SHARED_BYTES, LAST>(
         shared,
         local,
         order,
@@ -1264,6 +1153,7 @@ fn merge_sort_block_keys_in_place_tile<
     F,
     const THREADS: usize,
     const ITEMS: usize,
+    const SHARED_BYTES: usize,
     const LAST: bool,
 >(
     mut input: WarpStripedBlockRead<'_, K, THREADS, ITEMS>,
@@ -1279,31 +1169,27 @@ fn merge_sort_block_keys_in_place_tile<
     let warp_offset = warp_index * 32 * ITEMS as u32;
     let fallback = input.first();
     let mut local = [fallback; ITEMS];
-    let shared = DynamicSharedArray::<u8, 16>::get_raw().cast::<MaybeUninit<K>>();
+    let shared_memory = BlockSharedMemory::new(SHARED_BYTES);
+    let mut shared = shared_memory
+        .region::<MaybeUninit<K>>(0, SHARED_BYTES / core::mem::size_of::<MaybeUninit<K>>());
 
     for_each_thread_item!(ITEMS, item, {
         let warp_striped = warp_offset + item as u32 * 32 + lane;
         local[item] = input.read_or(item, fallback);
-        unsafe {
-            shared
-                .add(block_exchange_index::<ITEMS>(warp_striped))
-                .write(MaybeUninit::new(local[item]))
-        };
+        shared.write(
+            block_exchange_index::<ITEMS>(warp_striped),
+            MaybeUninit::new(local[item]),
+        );
     });
     warp::sync_mask(u32::MAX);
     for_each_thread_item!(ITEMS, item, {
         let blocked = warp_offset + lane * ITEMS as u32 + item as u32;
-        local[item] = unsafe {
-            shared
-                .add(block_exchange_index::<ITEMS>(blocked))
-                .read()
-                .assume_init()
-        };
+        local[item] = shared.read_initialized(block_exchange_index::<ITEMS>(blocked));
     });
     // Consuming the exclusive read phase performs CUB's block barrier before
     // the same allocation becomes writable again.
     let output = input.into_write();
-    merge_sort_block_keys_loaded::<K, F, THREADS, ITEMS, LAST>(
+    merge_sort_block_keys_loaded::<K, F, THREADS, ITEMS, SHARED_BYTES, LAST>(
         shared,
         local,
         order,
@@ -1314,8 +1200,15 @@ fn merge_sort_block_keys_in_place_tile<
 
 #[inline(always)]
 #[allow(unused_assignments)]
-fn merge_sort_block_keys_loaded<K, F, const THREADS: usize, const ITEMS: usize, const LAST: bool>(
-    shared: *mut MaybeUninit<K>,
+fn merge_sort_block_keys_loaded<
+    K,
+    F,
+    const THREADS: usize,
+    const ITEMS: usize,
+    const SHARED_BYTES: usize,
+    const LAST: bool,
+>(
+    mut shared: SharedRegion<MaybeUninit<K>>,
     mut local: [K; ITEMS],
     order: F,
     valid_items: u32,
@@ -1356,7 +1249,7 @@ fn merge_sort_block_keys_loaded<K, F, const THREADS: usize, const ITEMS: usize, 
                 break;
             }
             block_merge_round::<K, F, THREADS, ITEMS, true>(
-                shared,
+                &mut shared,
                 &mut local,
                 valid_items,
                 target_merged_threads,
@@ -1369,7 +1262,7 @@ fn merge_sort_block_keys_loaded<K, F, const THREADS: usize, const ITEMS: usize, 
         let mut target_merged_threads = 2u32;
         while target_merged_threads <= THREADS as u32 {
             block_merge_round::<K, F, THREADS, ITEMS, false>(
-                shared,
+                &mut shared,
                 &mut local,
                 tile_items as u32,
                 target_merged_threads,
@@ -1384,36 +1277,31 @@ fn merge_sort_block_keys_loaded<K, F, const THREADS: usize, const ITEMS: usize, 
     thread::sync_threads();
     for_each_thread_item!(ITEMS, item, {
         let blocked = warp_offset + lane * ITEMS as u32 + item as u32;
-        unsafe {
-            shared
-                .add(block_exchange_index::<ITEMS>(blocked))
-                .write(MaybeUninit::new(local[item]))
-        };
+        shared.write(
+            block_exchange_index::<ITEMS>(blocked),
+            MaybeUninit::new(local[item]),
+        );
     });
     warp::sync_mask(u32::MAX);
     let store_items = if LAST {
-        let valid_slot = unsafe {
-            shared
-                .add(block_exchange_storage_items::<THREADS, ITEMS>())
-                .cast::<u32>()
-        };
+        let shared_memory = BlockSharedMemory::new(SHARED_BYTES);
+        let mut valid_slot = shared_memory.region::<u32>(
+            block_exchange_storage_items::<THREADS, ITEMS>()
+                * core::mem::size_of::<MaybeUninit<K>>(),
+            1,
+        );
         if thread_index == 0 {
-            unsafe { valid_slot.write_volatile(valid_items) };
+            valid_slot.write_volatile(0, valid_items);
         }
         thread::sync_threads();
-        unsafe { valid_slot.read_volatile() }
+        valid_slot.read_volatile(0)
     } else {
         valid_items
     };
     for_each_thread_item!(ITEMS, item, {
         let warp_striped = warp_offset + item as u32 * 32 + lane;
         if !LAST || warp_striped < store_items {
-            let value = unsafe {
-                shared
-                    .add(block_exchange_index::<ITEMS>(warp_striped))
-                    .read()
-                    .assume_init()
-            };
+            let value = shared.read_initialized(block_exchange_index::<ITEMS>(warp_striped));
             output.write_if_valid(item, value);
         }
     });
@@ -1470,7 +1358,7 @@ fn stable_odd_even_sort_pairs<K, V, F, const ITEMS: usize>(
 #[inline(always)]
 #[allow(unused_assignments)]
 fn block_merge_round<K, F, const THREADS: usize, const ITEMS: usize, const CLAMPED: bool>(
-    shared: *mut MaybeUninit<K>,
+    shared: &mut SharedRegion<MaybeUninit<K>>,
     local: &mut [K; ITEMS],
     valid_items: u32,
     target_merged_threads: u32,
@@ -1486,19 +1374,11 @@ fn block_merge_round<K, F, const THREADS: usize, const ITEMS: usize, const CLAMP
     thread::sync_threads();
     for_each_thread_item!(ITEMS, item, {
         let blocked = ITEMS as i32 * thread_index + item as i32;
-        unsafe {
-            shared
-                .add(blocked as usize)
-                .write(MaybeUninit::new(local[item]))
-        };
+        shared.write(blocked as usize, MaybeUninit::new(local[item]));
     });
     if thread_index == 0 {
         // Exact BlockMergeSort padding contract from NVIDIA/cccl#5327.
-        unsafe {
-            shared
-                .add(tile_items as usize)
-                .write(MaybeUninit::new(local[0]))
-        };
+        shared.write(tile_items as usize, MaybeUninit::new(local[0]));
     }
     thread::sync_threads();
 
@@ -1525,16 +1405,15 @@ fn block_merge_round<K, F, const THREADS: usize, const ITEMS: usize, const CLAMP
     let second_begin = first_end;
     let first_count = first_end - first_begin;
     let second_count = second_end - second_begin;
-    let partition = unsafe {
-        shared_merge_path(
-            shared.add(first_begin as usize),
-            second_begin - first_begin,
-            first_count,
-            second_count,
-            diagonal,
-            order,
-        )
-    };
+    let partition = shared_merge_path_region(
+        shared,
+        first_begin,
+        second_begin - first_begin,
+        first_count,
+        second_count,
+        diagonal,
+        order,
+    );
     let mut first_cursor = first_begin + partition;
     let mut second_cursor = second_begin + diagonal - partition;
     let first_limit = first_end;
@@ -1544,12 +1423,12 @@ fn block_merge_round<K, F, const THREADS: usize, const ITEMS: usize, const CLAMP
     // manufacture an initialized key by reading an inactive shared slot.
     let oob_default = local[0];
     let mut first_key = if first_count != 0 {
-        unsafe { shared.add(first_cursor as usize).read().assume_init() }
+        shared.read_initialized(first_cursor as usize)
     } else {
         oob_default
     };
     let mut second_key = if second_count != 0 {
-        unsafe { shared.add(second_cursor as usize).read().assume_init() }
+        shared.read_initialized(second_cursor as usize)
     } else {
         oob_default
     };
@@ -1559,10 +1438,10 @@ fn block_merge_round<K, F, const THREADS: usize, const ITEMS: usize, const CLAMP
         local[item] = if take_second { second_key } else { first_key };
         if take_second {
             second_cursor += 1;
-            second_key = unsafe { shared.add(second_cursor as usize).read().assume_init() };
+            second_key = shared.read_initialized(second_cursor as usize);
         } else {
             first_cursor += 1;
-            first_key = unsafe { shared.add(first_cursor as usize).read().assume_init() };
+            first_key = shared.read_initialized(first_cursor as usize);
         }
     });
 }
@@ -1570,7 +1449,8 @@ fn block_merge_round<K, F, const THREADS: usize, const ITEMS: usize, const CLAMP
 #[inline(always)]
 #[allow(unused_assignments)]
 fn block_merge_round_pairs<K, V, F, const THREADS: usize, const ITEMS: usize, const CLAMPED: bool>(
-    shared_keys: *mut MaybeUninit<K>,
+    shared_keys: &mut SharedRegion<MaybeUninit<K>>,
+    shared_memory: &BlockSharedMemory,
     local_keys: &mut [K; ITEMS],
     local_values: &mut [V; ITEMS],
     valid_items: u32,
@@ -1588,18 +1468,10 @@ fn block_merge_round_pairs<K, V, F, const THREADS: usize, const ITEMS: usize, co
     thread::sync_threads();
     for_each_thread_item!(ITEMS, item, {
         let blocked = ITEMS as i32 * thread_index + item as i32;
-        unsafe {
-            shared_keys
-                .add(blocked as usize)
-                .write(MaybeUninit::new(local_keys[item]))
-        };
+        shared_keys.write(blocked as usize, MaybeUninit::new(local_keys[item]));
     });
     if thread_index == 0 {
-        unsafe {
-            shared_keys
-                .add(tile_items as usize)
-                .write(MaybeUninit::new(local_keys[0]))
-        };
+        shared_keys.write(tile_items as usize, MaybeUninit::new(local_keys[0]));
     }
     thread::sync_threads();
 
@@ -1626,28 +1498,27 @@ fn block_merge_round_pairs<K, V, F, const THREADS: usize, const ITEMS: usize, co
     let second_begin = first_end;
     let first_count = first_end - first_begin;
     let second_count = second_end - second_begin;
-    let partition = unsafe {
-        shared_merge_path(
-            shared_keys.add(first_begin as usize),
-            second_begin - first_begin,
-            first_count,
-            second_count,
-            diagonal,
-            order,
-        )
-    };
+    let partition = shared_merge_path_region(
+        shared_keys,
+        first_begin,
+        second_begin - first_begin,
+        first_count,
+        second_count,
+        diagonal,
+        order,
+    );
     let mut first_cursor = first_begin + partition;
     let mut second_cursor = second_begin + diagonal - partition;
     let first_limit = first_end;
     let second_limit = second_end;
     let oob_default = local_keys[0];
     let mut first_key = if first_count != 0 {
-        unsafe { shared_keys.add(first_cursor as usize).read().assume_init() }
+        shared_keys.read_initialized(first_cursor as usize)
     } else {
         oob_default
     };
     let mut second_key = if second_count != 0 {
-        unsafe { shared_keys.add(second_cursor as usize).read().assume_init() }
+        shared_keys.read_initialized(second_cursor as usize)
     } else {
         oob_default
     };
@@ -1659,35 +1530,29 @@ fn block_merge_round_pairs<K, V, F, const THREADS: usize, const ITEMS: usize, co
             local_keys[item] = second_key;
             indices[item] = second_cursor;
             second_cursor += 1;
-            second_key = unsafe { shared_keys.add(second_cursor as usize).read().assume_init() };
+            second_key = shared_keys.read_initialized(second_cursor as usize);
         } else {
             local_keys[item] = first_key;
             indices[item] = first_cursor;
             first_cursor += 1;
-            first_key = unsafe { shared_keys.add(first_cursor as usize).read().assume_init() };
+            first_key = shared_keys.read_initialized(first_cursor as usize);
         }
     });
 
     // CUB aliases the key union as values only after every thread has
     // completed serial key merge, then gathers the recorded source indices.
     thread::sync_threads();
-    let shared_values = shared_keys.cast::<MaybeUninit<V>>();
+    let mut shared_values = shared_memory.region::<MaybeUninit<V>>(
+        0,
+        shared_memory.bytes() / core::mem::size_of::<MaybeUninit<V>>(),
+    );
     for_each_thread_item!(ITEMS, item, {
         let blocked = ITEMS as i32 * thread_index + item as i32;
-        unsafe {
-            shared_values
-                .add(blocked as usize)
-                .write(MaybeUninit::new(local_values[item]))
-        };
+        shared_values.write(blocked as usize, MaybeUninit::new(local_values[item]));
     });
     thread::sync_threads();
     for_each_thread_item!(ITEMS, item, {
-        local_values[item] = unsafe {
-            shared_values
-                .add(indices[item] as usize)
-                .read()
-                .assume_init()
-        };
+        local_values[item] = shared_values.read_initialized(indices[item] as usize);
     });
 }
 
@@ -1732,7 +1597,13 @@ where
 
 /// Exact keys-only DeviceMergeSort merge agent for one ping-pong pass.
 #[inline(always)]
-pub fn merge_sort_merge_keys_agent<K, F, const THREADS: usize, const ITEMS: usize>(
+pub fn merge_sort_merge_keys_agent<
+    K,
+    F,
+    const THREADS: usize,
+    const ITEMS: usize,
+    const SHARED_BYTES: usize,
+>(
     source: &[K],
     partitions: &[usize],
     target_merged_tiles: usize,
@@ -1749,7 +1620,7 @@ pub fn merge_sort_merge_keys_agent<K, F, const THREADS: usize, const ITEMS: usiz
     let items_in_tile = (source.len() - tile_base).min(tile_items);
     if items_in_tile == tile_items {
         let output = WarpStripedBlockWrite::<K, THREADS, ITEMS>::new(output, launch, tile_items);
-        merge_sort_merge_keys_tile::<K, F, THREADS, ITEMS, true>(
+        merge_sort_merge_keys_tile::<K, F, THREADS, ITEMS, SHARED_BYTES, true>(
             source,
             partitions,
             target_merged_tiles,
@@ -1760,7 +1631,7 @@ pub fn merge_sort_merge_keys_agent<K, F, const THREADS: usize, const ITEMS: usiz
         );
     } else {
         let output = WarpStripedBlockWrite::<K, THREADS, ITEMS>::new(output, launch, items_in_tile);
-        merge_sort_merge_keys_tile::<K, F, THREADS, ITEMS, false>(
+        merge_sort_merge_keys_tile::<K, F, THREADS, ITEMS, SHARED_BYTES, false>(
             source,
             partitions,
             target_merged_tiles,
@@ -1774,7 +1645,14 @@ pub fn merge_sort_merge_keys_agent<K, F, const THREADS: usize, const ITEMS: usiz
 
 #[inline(always)]
 #[allow(unused_assignments)]
-fn merge_sort_merge_keys_tile<K, F, const THREADS: usize, const ITEMS: usize, const FULL: bool>(
+fn merge_sort_merge_keys_tile<
+    K,
+    F,
+    const THREADS: usize,
+    const ITEMS: usize,
+    const SHARED_BYTES: usize,
+    const FULL: bool,
+>(
     source: &[K],
     partitions: &[usize],
     target_merged_tiles: usize,
@@ -1820,43 +1698,47 @@ fn merge_sort_merge_keys_tile<K, F, const THREADS: usize, const ITEMS: usize, co
     for_each_thread_item!(ITEMS, item, {
         input.load_into(item, &mut local[item]);
     });
-    let shared = DynamicSharedArray::<u8, 16>::get_raw().cast::<MaybeUninit<K>>();
+    let exchange_items = block_exchange_storage_items::<THREADS, ITEMS>();
+    let shared_memory = BlockSharedMemory::new(SHARED_BYTES);
+    let mut shared = shared_memory
+        .region::<MaybeUninit<K>>(0, SHARED_BYTES / core::mem::size_of::<MaybeUninit<K>>());
     for_each_thread_item!(ITEMS, item, {
         let index = THREADS as i32 * item as i32 + thread_index as i32;
-        unsafe { shared.add(index as usize).write(local[item]) };
+        shared.write(index as usize, local[item]);
     });
     thread::sync_threads();
 
     let local_diagonal = (first_count + second_count).min(ITEMS as i32 * thread_index as i32);
-    let partition = unsafe {
-        shared_merge_path(
-            shared,
-            first_count,
-            first_count,
-            second_count,
-            local_diagonal,
-            &order,
-        )
-    };
+    let partition = shared_merge_path_region(
+        &shared,
+        0,
+        first_count,
+        first_count,
+        second_count,
+        local_diagonal,
+        &order,
+    );
     let mut first_cursor = partition;
     let mut second_cursor = first_count + local_diagonal - partition;
     let first_limit = first_count;
     let second_limit = first_count + second_count;
-    let mut first_key = unsafe { shared.add(first_cursor as usize).read() };
-    let mut second_key = unsafe { shared.add(second_cursor as usize).read() };
+    let mut first_key = shared.read(first_cursor as usize);
+    let mut second_key = shared.read(second_cursor as usize);
     for_each_thread_item!(ITEMS, item, {
         let take_second = second_cursor < second_limit
             && (first_cursor >= first_limit
-                || ordered_before(&order, unsafe { second_key.assume_init_ref() }, unsafe {
-                    first_key.assume_init_ref()
-                }));
+                || ordered_before(
+                    &order,
+                    initialized_ref(&second_key),
+                    initialized_ref(&first_key),
+                ));
         local[item] = if take_second { second_key } else { first_key };
         if take_second {
             second_cursor += 1;
-            second_key = unsafe { shared.add(second_cursor as usize).read() };
+            second_key = shared.read(second_cursor as usize);
         } else {
             first_cursor += 1;
-            first_key = unsafe { shared.add(first_cursor as usize).read() };
+            first_key = shared.read(first_cursor as usize);
         }
     });
 
@@ -1866,36 +1748,24 @@ fn merge_sort_merge_keys_tile<K, F, const THREADS: usize, const ITEMS: usize, co
     let warp_offset = warp_index * 32 * ITEMS as u32;
     for_each_thread_item!(ITEMS, item, {
         let blocked = warp_offset + item as u32 + lane * ITEMS as u32;
-        unsafe {
-            shared
-                .add(block_exchange_index::<ITEMS>(blocked))
-                .write(local[item])
-        };
+        shared.write(block_exchange_index::<ITEMS>(blocked), local[item]);
     });
     warp::sync_mask(u32::MAX);
     let store_items = if FULL {
         (first_count + second_count) as u32
     } else {
-        let valid_slot = unsafe {
-            shared
-                .add(block_exchange_storage_items::<THREADS, ITEMS>())
-                .cast::<u32>()
-        };
+        let mut valid_slot =
+            shared_memory.region::<u32>(exchange_items * core::mem::size_of::<MaybeUninit<K>>(), 1);
         if thread_index == 0 {
-            unsafe { valid_slot.write_volatile((first_count + second_count) as u32) };
+            valid_slot.write_volatile(0, (first_count + second_count) as u32);
         }
         thread::sync_threads();
-        unsafe { valid_slot.read_volatile() }
+        valid_slot.read_volatile(0)
     };
     for_each_thread_item!(ITEMS, item, {
         let warp_striped = warp_offset + item as u32 * 32 + lane;
         if FULL || warp_striped < store_items {
-            let value = unsafe {
-                shared
-                    .add(block_exchange_index::<ITEMS>(warp_striped))
-                    .read()
-                    .assume_init()
-            };
+            let value = shared.read_initialized(block_exchange_index::<ITEMS>(warp_striped));
             output.write_if_valid(item, value);
         }
     });
@@ -1903,7 +1773,14 @@ fn merge_sort_merge_keys_tile<K, F, const THREADS: usize, const ITEMS: usize, co
 
 /// Exact key/value DeviceMergeSort merge agent for one ping-pong pass.
 #[inline(always)]
-pub fn merge_sort_merge_pairs_agent<K, V, F, const THREADS: usize, const ITEMS: usize>(
+pub fn merge_sort_merge_pairs_agent<
+    K,
+    V,
+    F,
+    const THREADS: usize,
+    const ITEMS: usize,
+    const SHARED_BYTES: usize,
+>(
     source_keys: &[K],
     source_values: &[V],
     partitions: &[usize],
@@ -1926,7 +1803,7 @@ pub fn merge_sort_merge_pairs_agent<K, V, F, const THREADS: usize, const ITEMS: 
             WarpStripedBlockWrite::<K, THREADS, ITEMS>::new(output_keys, launch, tile_items);
         let output_values =
             WarpStripedBlockWrite::<V, THREADS, ITEMS>::new(output_values, launch, tile_items);
-        merge_sort_merge_pairs_tile::<K, V, F, THREADS, ITEMS, true>(
+        merge_sort_merge_pairs_tile::<K, V, F, THREADS, ITEMS, SHARED_BYTES, true>(
             source_keys,
             source_values,
             partitions,
@@ -1942,7 +1819,7 @@ pub fn merge_sort_merge_pairs_agent<K, V, F, const THREADS: usize, const ITEMS: 
             WarpStripedBlockWrite::<K, THREADS, ITEMS>::new(output_keys, launch, items_in_tile);
         let output_values =
             WarpStripedBlockWrite::<V, THREADS, ITEMS>::new(output_values, launch, items_in_tile);
-        merge_sort_merge_pairs_tile::<K, V, F, THREADS, ITEMS, false>(
+        merge_sort_merge_pairs_tile::<K, V, F, THREADS, ITEMS, SHARED_BYTES, false>(
             source_keys,
             source_values,
             partitions,
@@ -1964,6 +1841,7 @@ fn merge_sort_merge_pairs_tile<
     F,
     const THREADS: usize,
     const ITEMS: usize,
+    const SHARED_BYTES: usize,
     const FULL: bool,
 >(
     source_keys: &[K],
@@ -2025,47 +1903,51 @@ fn merge_sort_merge_pairs_tile<
         keys.load_into(item, &mut local_keys[item]);
         values.load_into(item, &mut local_values[item]);
     });
-    let shared_keys = DynamicSharedArray::<u8, 16>::get_raw().cast::<MaybeUninit<K>>();
+    let exchange_items = block_exchange_storage_items::<THREADS, ITEMS>();
+    let shared_memory = BlockSharedMemory::new(SHARED_BYTES);
+    let mut shared_keys = shared_memory
+        .region::<MaybeUninit<K>>(0, SHARED_BYTES / core::mem::size_of::<MaybeUninit<K>>());
     for_each_thread_item!(ITEMS, item, {
         let index = THREADS as i32 * item as i32 + thread_index as i32;
-        unsafe { shared_keys.add(index as usize).write(local_keys[item]) };
+        shared_keys.write(index as usize, local_keys[item]);
     });
     thread::sync_threads();
 
     let local_diagonal = local_count.min(ITEMS as i32 * thread_index as i32);
-    let partition = unsafe {
-        shared_merge_path(
-            shared_keys,
-            first_count,
-            first_count,
-            second_count,
-            local_diagonal,
-            &order,
-        )
-    };
+    let partition = shared_merge_path_region(
+        &shared_keys,
+        0,
+        first_count,
+        first_count,
+        second_count,
+        local_diagonal,
+        &order,
+    );
     let mut first_cursor = partition;
     let mut second_cursor = first_count + local_diagonal - partition;
     let first_limit = first_count;
     let second_limit = local_count;
-    let mut first_key = unsafe { shared_keys.add(first_cursor as usize).read() };
-    let mut second_key = unsafe { shared_keys.add(second_cursor as usize).read() };
+    let mut first_key = shared_keys.read(first_cursor as usize);
+    let mut second_key = shared_keys.read(second_cursor as usize);
     let mut indices = [0i32; ITEMS];
     for_each_thread_item!(ITEMS, item, {
         let take_second = second_cursor < second_limit
             && (first_cursor >= first_limit
-                || ordered_before(&order, unsafe { second_key.assume_init_ref() }, unsafe {
-                    first_key.assume_init_ref()
-                }));
+                || ordered_before(
+                    &order,
+                    initialized_ref(&second_key),
+                    initialized_ref(&first_key),
+                ));
         if take_second {
             local_keys[item] = second_key;
             indices[item] = second_cursor;
             second_cursor += 1;
-            second_key = unsafe { shared_keys.add(second_cursor as usize).read() };
+            second_key = shared_keys.read(second_cursor as usize);
         } else {
             local_keys[item] = first_key;
             indices[item] = first_cursor;
             first_cursor += 1;
-            first_key = unsafe { shared_keys.add(first_cursor as usize).read() };
+            first_key = shared_keys.read(first_cursor as usize);
         }
     });
 
@@ -2075,84 +1957,61 @@ fn merge_sort_merge_pairs_tile<
     let warp_offset = warp_index * 32 * ITEMS as u32;
     for_each_thread_item!(ITEMS, item, {
         let blocked = warp_offset + item as u32 + lane * ITEMS as u32;
-        unsafe {
-            shared_keys
-                .add(block_exchange_index::<ITEMS>(blocked))
-                .write(local_keys[item])
-        };
+        shared_keys.write(block_exchange_index::<ITEMS>(blocked), local_keys[item]);
     });
     warp::sync_mask(u32::MAX);
     let key_store_items = if FULL {
         local_count as u32
     } else {
-        let valid_slot = unsafe {
-            shared_keys
-                .add(block_exchange_storage_items::<THREADS, ITEMS>())
-                .cast::<u32>()
-        };
+        let mut valid_slot =
+            shared_memory.region::<u32>(exchange_items * core::mem::size_of::<MaybeUninit<K>>(), 1);
         if thread_index == 0 {
-            unsafe { valid_slot.write_volatile(local_count as u32) };
+            valid_slot.write_volatile(0, local_count as u32);
         }
         thread::sync_threads();
-        unsafe { valid_slot.read_volatile() }
+        valid_slot.read_volatile(0)
     };
     for_each_thread_item!(ITEMS, item, {
         let warp_striped = warp_offset + item as u32 * 32 + lane;
         if FULL || warp_striped < key_store_items {
-            let value = unsafe {
-                shared_keys
-                    .add(block_exchange_index::<ITEMS>(warp_striped))
-                    .read()
-                    .assume_init()
-            };
+            let value = shared_keys.read_initialized(block_exchange_index::<ITEMS>(warp_striped));
             output_keys.write_if_valid(item, value);
         }
     });
 
     thread::sync_threads();
-    let shared_values = shared_keys.cast::<MaybeUninit<V>>();
+    let mut shared_values = shared_memory
+        .region::<MaybeUninit<V>>(0, SHARED_BYTES / core::mem::size_of::<MaybeUninit<V>>());
     for_each_thread_item!(ITEMS, item, {
         let index = THREADS as u32 * item as u32 + thread_index;
-        unsafe { shared_values.add(index as usize).write(local_values[item]) };
+        shared_values.write(index as usize, local_values[item]);
     });
     thread::sync_threads();
     for_each_thread_item!(ITEMS, item, {
-        local_values[item] = unsafe { shared_values.add(indices[item] as usize).read() };
+        local_values[item] = shared_values.read(indices[item] as usize);
     });
 
     thread::sync_threads();
     for_each_thread_item!(ITEMS, item, {
         let blocked = warp_offset + item as u32 + lane * ITEMS as u32;
-        unsafe {
-            shared_values
-                .add(block_exchange_index::<ITEMS>(blocked))
-                .write(local_values[item])
-        };
+        shared_values.write(block_exchange_index::<ITEMS>(blocked), local_values[item]);
     });
     warp::sync_mask(u32::MAX);
     let value_store_items = if FULL {
         items_in_tile as u32
     } else {
-        let valid_slot = unsafe {
-            shared_values
-                .add(block_exchange_storage_items::<THREADS, ITEMS>())
-                .cast::<u32>()
-        };
+        let mut valid_slot =
+            shared_memory.region::<u32>(exchange_items * core::mem::size_of::<MaybeUninit<V>>(), 1);
         if thread_index == 0 {
-            unsafe { valid_slot.write_volatile(items_in_tile as u32) };
+            valid_slot.write_volatile(0, items_in_tile as u32);
         }
         thread::sync_threads();
-        unsafe { valid_slot.read_volatile() }
+        valid_slot.read_volatile(0)
     };
     for_each_thread_item!(ITEMS, item, {
         let warp_striped = warp_offset + item as u32 * 32 + lane;
         if FULL || warp_striped < value_store_items {
-            let value = unsafe {
-                shared_values
-                    .add(block_exchange_index::<ITEMS>(warp_striped))
-                    .read()
-                    .assume_init()
-            };
+            let value = shared_values.read_initialized(block_exchange_index::<ITEMS>(warp_striped));
             output_values.write_if_valid(item, value);
         }
     });
@@ -2170,6 +2029,7 @@ fn merge_pairs_tile<
     const V_SIZE: usize,
     const USE_LOAD_TO_SHARED_KEYS: bool,
     const USE_LOAD_TO_SHARED_VALUES: bool,
+    const SHARED_BYTES: usize,
     const FULL: bool,
 >(
     first_keys: &[K],
@@ -2204,8 +2064,10 @@ fn merge_pairs_tile<
     let first_count = (first_end - first_begin) as i32;
     let second_count = (second_end - second_begin) as i32;
 
-    let shared_base = DynamicSharedArray::<u8, 16>::get_raw();
-    let storage_keys = shared_base.cast::<MaybeUninit<K>>();
+    let exchange_items = block_exchange_storage_items::<THREADS, ITEMS>();
+    let shared_memory = BlockSharedMemory::new(SHARED_BYTES);
+    let mut storage_keys = shared_memory
+        .region::<MaybeUninit<K>>(0, SHARED_BYTES / core::mem::size_of::<MaybeUninit<K>>());
     let mut local_keys = [MaybeUninit::<K>::uninit(); ITEMS];
     let shared_keys;
     let keys2_offset;
@@ -2215,34 +2077,28 @@ fn merge_pairs_tile<
                 + if K_SIZE < 16 { 32 } else { 0 };
         let second_buffer_bytes = load_to_shared_buffer_bytes(second_count as u32, K_SIZE as u32);
         let second_buffer_offset = whole_buffer_bytes - second_buffer_bytes;
-        // SAFETY: partition bounding boxes and macro-computed shared storage.
-        let first_padding = unsafe {
-            copy_async_to_shared::<K, THREADS, K_SIZE>(
-                shared_base,
-                first_keys.as_ptr().add(first_begin),
-                first_count as u32,
-                thread_index,
-            )
-        };
-        // SAFETY: same proof for the second key range.
-        let second_padding = unsafe {
-            copy_async_to_shared::<K, THREADS, K_SIZE>(
-                shared_base.add(second_buffer_offset as usize),
-                second_keys.as_ptr().add(second_begin),
-                second_count as u32,
-                thread_index,
-            )
-        };
+        let first_copy = shared_memory.copy_async_from::<K, THREADS, K_SIZE>(
+            0,
+            first_keys,
+            first_begin,
+            first_count as u32,
+            thread_index,
+        );
+        let second_copy = shared_memory.copy_async_from::<K, THREADS, K_SIZE>(
+            second_buffer_offset as usize,
+            second_keys,
+            second_begin,
+            second_count as u32,
+            thread_index,
+        );
         commit_and_wait_async_copy();
-        shared_keys = unsafe {
-            shared_base
-                .add(first_padding as usize)
-                .cast::<MaybeUninit<K>>()
-        };
-        keys2_offset =
-            ((second_buffer_offset + second_padding - first_padding) / K_SIZE as u32) as i32;
+        let first_padding = first_copy.head_padding();
+        keys2_offset = ((second_buffer_offset + second_copy.head_padding() - first_padding)
+            / K_SIZE as u32) as i32;
+        shared_keys = first_copy.into_tail_region();
     } else {
-        shared_keys = storage_keys;
+        shared_keys = shared_memory
+            .region::<MaybeUninit<K>>(0, SHARED_BYTES / core::mem::size_of::<MaybeUninit<K>>());
         keys2_offset = first_count;
         let input = tile.blocked_concatenated_input::<K, FULL>(
             first_keys,
@@ -2258,12 +2114,7 @@ fn merge_pairs_tile<
 
         for_each_thread_item!(ITEMS, item, {
             let shared_index = (THREADS * item) as u32 + thread_index;
-            // SAFETY: launch storage covers the complete key tile.
-            unsafe {
-                storage_keys
-                    .add(shared_index as usize)
-                    .write(local_keys[item])
-            };
+            storage_keys.write(shared_index as usize, local_keys[item]);
         });
         thread::sync_threads();
     }
@@ -2273,41 +2124,42 @@ fn merge_pairs_tile<
     } else {
         (ITEMS as i32 * thread_index as i32).min(items_in_tile as i32)
     };
-    let local_first = unsafe {
-        shared_merge_path(
-            shared_keys,
-            keys2_offset,
-            first_count,
-            second_count,
-            thread_diagonal,
-            &order,
-        )
-    };
+    let local_first = shared_merge_path_region(
+        &shared_keys,
+        0,
+        keys2_offset,
+        first_count,
+        second_count,
+        thread_diagonal,
+        &order,
+    );
     let mut first_cursor = local_first;
     let mut second_cursor = keys2_offset + thread_diagonal - local_first;
     let first_limit = first_count;
     let second_limit = keys2_offset + second_count;
     let mut source_indices = [0i32; ITEMS];
-    let mut first_key = unsafe { shared_keys.add(first_cursor as usize).read() };
-    let mut second_key = unsafe { shared_keys.add(second_cursor as usize).read() };
+    let mut first_key = shared_keys.read(first_cursor as usize);
+    let mut second_key = shared_keys.read(second_cursor as usize);
     for_each_thread_item!(ITEMS, item, {
         let first_available = first_cursor < first_limit;
         let second_available = second_cursor < second_limit;
         let take_second = second_available
             && (!first_available
-                || ordered_before(&order, unsafe { second_key.assume_init_ref() }, unsafe {
-                    first_key.assume_init_ref()
-                }));
+                || ordered_before(
+                    &order,
+                    initialized_ref(&second_key),
+                    initialized_ref(&first_key),
+                ));
         if take_second {
             local_keys[item] = second_key;
             source_indices[item] = second_cursor;
             second_cursor += 1;
-            second_key = unsafe { shared_keys.add(second_cursor as usize).read() };
+            second_key = shared_keys.read(second_cursor as usize);
         } else {
             local_keys[item] = first_key;
             source_indices[item] = first_cursor;
             first_cursor += 1;
-            first_key = unsafe { shared_keys.add(first_cursor as usize).read() };
+            first_key = shared_keys.read(first_cursor as usize);
         }
     });
 
@@ -2318,54 +2170,39 @@ fn merge_pairs_tile<
     let warp_offset = warp_index * 32 * ITEMS as u32;
     for_each_thread_item!(ITEMS, item, {
         let exchange_index = warp_offset + item as u32 + lane * ITEMS as u32;
-        // SAFETY: warp-local blocked-to-striped exchange is injective.
-        unsafe {
-            storage_keys
-                .add(block_exchange_index::<ITEMS>(exchange_index))
-                .write(local_keys[item])
-        };
+        storage_keys.write(
+            block_exchange_index::<ITEMS>(exchange_index),
+            local_keys[item],
+        );
     });
     warp::sync_mask(u32::MAX);
     let mut output_keys = tile.output(output_keys);
     if FULL {
         for_each_thread_item!(ITEMS, item, {
             let warp_striped = warp_offset + item as u32 * 32 + lane;
-            // SAFETY: full-tile output range and injective warp-striped map.
-            unsafe {
-                let value = storage_keys
-                    .add(block_exchange_index::<ITEMS>(warp_striped))
-                    .read()
-                    .assume_init();
-                output_keys.write_if_valid(item, value);
-            }
+            let value = storage_keys.read_initialized(block_exchange_index::<ITEMS>(warp_striped));
+            output_keys.write_if_valid(item, value);
         });
     } else {
-        let valid_slot = unsafe {
-            storage_keys
-                .add(block_exchange_storage_items::<THREADS, ITEMS>())
-                .cast::<u32>()
-        };
+        let mut valid_slot =
+            shared_memory.region::<u32>(exchange_items * core::mem::size_of::<MaybeUninit<K>>(), 1);
         if thread_index == 0 {
-            unsafe { valid_slot.write_volatile(items_in_tile as u32) };
+            valid_slot.write_volatile(0, items_in_tile as u32);
         }
         thread::sync_threads();
-        let store_items = unsafe { valid_slot.read_volatile() };
+        let store_items = valid_slot.read_volatile(0);
         for_each_thread_item!(ITEMS, item, {
             let warp_striped = warp_offset + item as u32 * 32 + lane;
             if warp_striped < store_items {
-                // SAFETY: partial range guard plus injective warp-striped map.
-                unsafe {
-                    let value = storage_keys
-                        .add(block_exchange_index::<ITEMS>(warp_striped))
-                        .read()
-                        .assume_init();
-                    output_keys.write_if_valid(item, value);
-                }
+                let value =
+                    storage_keys.read_initialized(block_exchange_index::<ITEMS>(warp_striped));
+                output_keys.write_if_valid(item, value);
             }
         });
     }
 
-    let storage_values = shared_base.cast::<MaybeUninit<V>>();
+    let mut storage_values = shared_memory
+        .region::<MaybeUninit<V>>(0, SHARED_BYTES / core::mem::size_of::<MaybeUninit<V>>());
     let mut local_values = [MaybeUninit::<V>::uninit(); ITEMS];
     let shared_values;
     if USE_LOAD_TO_SHARED_VALUES {
@@ -2377,27 +2214,24 @@ fn merge_pairs_tile<
                 + if V_SIZE < 16 { 32 } else { 0 };
         let second_buffer_bytes = load_to_shared_buffer_bytes(second_count as u32, V_SIZE as u32);
         let second_buffer_offset = whole_buffer_bytes - second_buffer_bytes;
-        // SAFETY: value slices have already been shape-checked against keys.
-        let first_padding = unsafe {
-            copy_async_to_shared::<V, THREADS, V_SIZE>(
-                shared_base,
-                first_values.as_ptr().add(first_begin),
-                first_count as u32,
-                thread_index,
-            )
-        };
-        // SAFETY: same shape and buffer proof for the second values.
-        let second_padding = unsafe {
-            copy_async_to_shared::<V, THREADS, V_SIZE>(
-                shared_base.add(second_buffer_offset as usize),
-                second_values.as_ptr().add(second_begin),
-                second_count as u32,
-                thread_index,
-            )
-        };
+        let first_copy = shared_memory.copy_async_from::<V, THREADS, V_SIZE>(
+            0,
+            first_values,
+            first_begin,
+            first_count as u32,
+            thread_index,
+        );
+        let second_copy = shared_memory.copy_async_from::<V, THREADS, V_SIZE>(
+            second_buffer_offset as usize,
+            second_values,
+            second_begin,
+            second_count as u32,
+            thread_index,
+        );
         commit_async_copy();
-        let values2_offset =
-            ((second_buffer_offset + second_padding - first_padding) / V_SIZE as u32) as i32;
+        let first_padding = first_copy.head_padding();
+        let values2_offset = ((second_buffer_offset + second_copy.head_padding() - first_padding)
+            / V_SIZE as u32) as i32;
         let offset_difference = values2_offset - keys2_offset;
         for_each_thread_item!(ITEMS, item, {
             if source_indices[item] >= keys2_offset {
@@ -2405,11 +2239,7 @@ fn merge_pairs_tile<
             }
         });
         wait_async_copy();
-        shared_values = unsafe {
-            shared_base
-                .add(first_padding as usize)
-                .cast::<MaybeUninit<V>>()
-        };
+        shared_values = first_copy.into_tail_region();
     } else {
         // CUB overlaps independent global value loads with completion of the
         // key stores, then synchronizes before reusing shared bytes.
@@ -2426,7 +2256,8 @@ fn merge_pairs_tile<
         });
 
         thread::sync_threads();
-        shared_values = storage_values;
+        shared_values = shared_memory
+            .region::<MaybeUninit<V>>(0, SHARED_BYTES / core::mem::size_of::<MaybeUninit<V>>());
         if USE_LOAD_TO_SHARED_KEYS {
             let offset_difference = first_count - keys2_offset;
             for_each_thread_item!(ITEMS, item, {
@@ -2437,12 +2268,7 @@ fn merge_pairs_tile<
         }
         for_each_thread_item!(ITEMS, item, {
             let shared_index = (THREADS * item) as u32 + thread_index;
-            // SAFETY: preceding barrier ended every key-store shared read.
-            unsafe {
-                storage_values
-                    .add(shared_index as usize)
-                    .write(local_values[item])
-            };
+            storage_values.write(shared_index as usize, local_values[item]);
         });
         thread::sync_threads();
     }
@@ -2450,55 +2276,40 @@ fn merge_pairs_tile<
     for_each_thread_item!(ITEMS, item, {
         // Keep inactive partial outputs as MaybeUninit; the later store guard
         // is the proof before any value is interpreted.
-        local_values[item] = unsafe { shared_values.add(source_indices[item] as usize).read() };
+        local_values[item] = shared_values.read(source_indices[item] as usize);
     });
     thread::sync_threads();
 
     for_each_thread_item!(ITEMS, item, {
         let exchange_index = warp_offset + item as u32 + lane * ITEMS as u32;
-        // SAFETY: same warp-local exchange proof as the key phase.
-        unsafe {
-            storage_values
-                .add(block_exchange_index::<ITEMS>(exchange_index))
-                .write(local_values[item])
-        };
+        storage_values.write(
+            block_exchange_index::<ITEMS>(exchange_index),
+            local_values[item],
+        );
     });
     warp::sync_mask(u32::MAX);
     let mut output_values = tile.output(output_values);
     if FULL {
         for_each_thread_item!(ITEMS, item, {
             let warp_striped = warp_offset + item as u32 * 32 + lane;
-            // SAFETY: same full-tile mapping proof as the key phase.
-            unsafe {
-                let value = storage_values
-                    .add(block_exchange_index::<ITEMS>(warp_striped))
-                    .read()
-                    .assume_init();
-                output_values.write_if_valid(item, value);
-            }
+            let value =
+                storage_values.read_initialized(block_exchange_index::<ITEMS>(warp_striped));
+            output_values.write_if_valid(item, value);
         });
     } else {
-        let valid_slot = unsafe {
-            storage_values
-                .add(block_exchange_storage_items::<THREADS, ITEMS>())
-                .cast::<u32>()
-        };
+        let mut valid_slot =
+            shared_memory.region::<u32>(exchange_items * core::mem::size_of::<MaybeUninit<V>>(), 1);
         if thread_index == 0 {
-            unsafe { valid_slot.write_volatile(items_in_tile as u32) };
+            valid_slot.write_volatile(0, items_in_tile as u32);
         }
         thread::sync_threads();
-        let store_items = unsafe { valid_slot.read_volatile() };
+        let store_items = valid_slot.read_volatile(0);
         for_each_thread_item!(ITEMS, item, {
             let warp_striped = warp_offset + item as u32 * 32 + lane;
             if warp_striped < store_items {
-                // SAFETY: same guarded partial mapping proof as the key phase.
-                unsafe {
-                    let value = storage_values
-                        .add(block_exchange_index::<ITEMS>(warp_striped))
-                        .read()
-                        .assume_init();
-                    output_values.write_if_valid(item, value);
-                }
+                let value =
+                    storage_values.read_initialized(block_exchange_index::<ITEMS>(warp_striped));
+                output_values.write_if_valid(item, value);
             }
         });
     }
@@ -2552,7 +2363,7 @@ pub fn radix_histogram_agent<K, B, ToOrdered, Digit, const ITEMS: usize, const M
     sentinel: B,
     to_ordered: ToOrdered,
     digit: Digit,
-    mut bins: DisjointSlice<u64>,
+    bins: DisjointSlice<u64>,
 ) where
     K: Copy,
     B: Copy,
@@ -2563,15 +2374,16 @@ pub fn radix_histogram_agent<K, B, ToOrdered, Digit, const ITEMS: usize, const M
     let thread_index = thread::threadIdx_x() as usize;
     let block_threads = thread::blockDim_x() as usize;
     let tile_items = block_threads * ITEMS;
-    let shared = DynamicSharedArray::<u8, 16>::get_raw().cast::<u32>();
+    let shared_memory =
+        BlockSharedMemory::new(MAX_PASSES * RADIX_DIGITS * core::mem::size_of::<u32>());
+    let mut shared = shared_memory.region::<u32>(0, MAX_PASSES * RADIX_DIGITS);
+    let mut bins = DeviceRegion::new(bins);
     let num_passes = (end_bit - begin_bit).div_ceil(8) as usize;
 
     for bin in (thread_index..RADIX_DIGITS).step_by(block_threads) {
         let mut pass = 0usize;
         while pass < num_passes {
-            // SAFETY: `(pass, bin)` is unique to this block thread and the
-            // macro-sized dynamic allocation covers MAX_PASSES * 256 counters.
-            unsafe { shared.add(pass * RADIX_DIGITS + bin).write(0) };
+            shared.write(pass * RADIX_DIGITS + bin, 0);
             pass += 1;
         }
     }
@@ -2600,15 +2412,11 @@ pub fn radix_histogram_agent<K, B, ToOrdered, Digit, const ITEMS: usize, const M
             let num_bits = (end_bit - current_bit).min(8);
             for_each_thread_item!(ITEMS, item, {
                 let bin = digit(
-                    unsafe { ordered_keys[item].assume_init() },
+                    initialized_value(&ordered_keys[item]),
                     current_bit,
                     num_bits,
                 ) as usize;
-                // SAFETY: the shared slot is aligned and live for this block;
-                // block-scoped atomic addition is exactly CUB's atomicAdd.
-                let counter =
-                    unsafe { BlockAtomicU32::from_ptr(shared.add(pass * RADIX_DIGITS + bin)) };
-                counter.fetch_add(1, AtomicOrdering::Relaxed);
+                shared.fetch_add_block(pass * RADIX_DIGITS + bin, 1);
             });
             current_bit += 8;
             pass += 1;
@@ -2620,17 +2428,9 @@ pub fn radix_histogram_agent<K, B, ToOrdered, Digit, const ITEMS: usize, const M
     for bin in (thread_index..RADIX_DIGITS).step_by(block_threads) {
         let mut pass = 0usize;
         while pass < num_passes {
-            // SAFETY: the preceding block barrier completed all shared atomic
-            // updates and this thread owns the `(pass, bin)` reduction slot.
-            let count = unsafe { shared.add(pass * RADIX_DIGITS + bin).read() };
+            let count = shared.read(pass * RADIX_DIGITS + bin);
             if count != 0 {
-                // SAFETY: all blocks intentionally accumulate into this bin;
-                // the exclusive kernel borrow prevents host/device aliasing and
-                // the device-scoped atomic prevents inter-block data races.
-                let global = unsafe {
-                    DeviceAtomicU64::from_ptr(bins.as_mut_ptr().add(pass * RADIX_DIGITS + bin))
-                };
-                global.fetch_add(count as u64, AtomicOrdering::Relaxed);
+                bins.fetch_add_device(pass * RADIX_DIGITS + bin, count as u64);
             }
             pass += 1;
         }
@@ -2653,24 +2453,22 @@ fn warp_exclusive_sum_u64(value: u64, lane: u32) -> (u64, u64) {
 }
 
 #[inline(always)]
-unsafe fn block_exclusive_sum_raking_256_u64(value: u64, temp_base: *mut u8) -> u64 {
+fn block_exclusive_sum_raking_256_u64(value: u64, grid: &mut SharedRegion<u64>) -> u64 {
     const SEGMENT_LENGTH: usize = 8;
     const RAKING_THREADS: usize = 32;
-    const GRID_OFFSET_BYTES: usize = 16;
     let thread_index = thread::threadIdx_x() as usize;
     // `BlockRakingLayout<u64, 256>` pads every eight-value segment. CUB's
     // `BlockScan` temp storage starts with a one-byte NullType warp-scan
     // member, then aligns the raking grid to 16 bytes.
-    let grid = unsafe { temp_base.add(GRID_OFFSET_BYTES).cast::<u64>() };
     let placement = thread_index + thread_index / SEGMENT_LENGTH;
-    unsafe { grid.add(placement).write(value) };
+    grid.write(placement, value);
     thread::sync_threads();
 
     if thread_index < RAKING_THREADS {
-        let segment = unsafe { grid.add(thread_index * (SEGMENT_LENGTH + 1)) };
+        let segment = thread_index * (SEGMENT_LENGTH + 1);
         let mut cached = [0u64; SEGMENT_LENGTH];
         for_each_raking_item!(SEGMENT_LENGTH, item, {
-            cached[item] = unsafe { segment.add(item).read() };
+            cached[item] = grid.read(segment + item);
         });
         let mut aggregate = cached[0];
         for_each_raking_item!(SEGMENT_LENGTH - 1, offset, {
@@ -2681,7 +2479,7 @@ unsafe fn block_exclusive_sum_raking_256_u64(value: u64, temp_base: *mut u8) -> 
         // Policy default is BLOCK_SCAN_RAKING, not memoize: the downsweep
         // deliberately reloads the segment from shared memory.
         for_each_raking_item!(SEGMENT_LENGTH, item, {
-            cached[item] = unsafe { segment.add(item).read() };
+            cached[item] = grid.read(segment + item);
         });
         let mut running = segment_prefix;
         for_each_raking_item!(SEGMENT_LENGTH, item, {
@@ -2691,11 +2489,11 @@ unsafe fn block_exclusive_sum_raking_256_u64(value: u64, temp_base: *mut u8) -> 
         });
         let _ = running;
         for_each_raking_item!(SEGMENT_LENGTH, item, {
-            unsafe { segment.add(item).write(cached[item]) };
+            grid.write(segment + item, cached[item]);
         });
     }
     thread::sync_threads();
-    unsafe { grid.add(placement).read() }
+    grid.read(placement)
 }
 
 /// One 256-thread block per radix pass, matching
@@ -2710,12 +2508,18 @@ pub fn radix_exclusive_sum_agent<const PASSES: usize>(
     if pass >= PASSES {
         return;
     }
-    let shared = DynamicSharedArray::<u8, 16>::get_raw();
+    const SHARED_BYTES: usize = 2_336;
+    const GRID_OFFSET_BYTES: usize = 16;
+    let shared_memory = BlockSharedMemory::new(SHARED_BYTES);
+    let mut grid = shared_memory.region::<u64>(
+        GRID_OFFSET_BYTES,
+        (SHARED_BYTES - GRID_OFFSET_BYTES) / core::mem::size_of::<u64>(),
+    );
     let Some(mut slot) = bins.element_thread32(bin_thread) else {
         return;
     };
     let value = slot.read();
-    let block_prefix = unsafe { block_exclusive_sum_raking_256_u64(value, shared) };
+    let block_prefix = block_exclusive_sum_raking_256_u64(value, &mut grid);
     slot.write(block_prefix);
 }
 
@@ -2739,7 +2543,7 @@ fn warp_exclusive_sum_i32(value: i32, lane: u32) -> (i32, i32) {
 ///
 /// CUB deliberately uses one ballot per label bit because `match.any.sync`
 /// is slower for this eight-bit rank policy. Express the same predicate
-/// network through cuda-oxide intrinsics; no PTX assembly string belongs in
+/// network through cuda-oxide intrinsics; no handwritten device assembly belongs in
 /// RCCL's Rust implementation.
 #[inline(always)]
 fn radix_match_any_8(label: u32) -> u32 {
@@ -2765,21 +2569,19 @@ fn radix_match_any_8(label: u32) -> u32 {
 }
 
 #[inline(always)]
-unsafe fn block_exclusive_sum_raking_memoize_384_i32(value: i32, temp_base: *mut u8) -> i32 {
+fn block_exclusive_sum_raking_memoize_384_i32(value: i32, grid: &mut SharedRegion<i32>) -> i32 {
     const SEGMENT_LENGTH: usize = 12;
     const RAKING_THREADS: usize = 32;
-    const GRID_OFFSET_BYTES: usize = 16;
     let thread_index = thread::threadIdx_x() as usize;
-    let grid = unsafe { temp_base.add(GRID_OFFSET_BYTES).cast::<i32>() };
     let placement = thread_index + thread_index / SEGMENT_LENGTH;
-    unsafe { grid.add(placement).write(value) };
+    grid.write(placement, value);
     thread::sync_threads();
 
     if thread_index < RAKING_THREADS {
-        let segment = unsafe { grid.add(thread_index * (SEGMENT_LENGTH + 1)) };
+        let segment = thread_index * (SEGMENT_LENGTH + 1);
         let mut cached = [0i32; SEGMENT_LENGTH];
         for_each_raking_item!(SEGMENT_LENGTH, item, {
-            cached[item] = unsafe { segment.add(item).read() };
+            cached[item] = grid.read(segment + item);
         });
         let mut aggregate = cached[0];
         for_each_raking_item!(SEGMENT_LENGTH - 1, offset, {
@@ -2797,20 +2599,20 @@ unsafe fn block_exclusive_sum_raking_memoize_384_i32(value: i32, temp_base: *mut
         });
         let _ = running;
         for_each_raking_item!(SEGMENT_LENGTH, item, {
-            unsafe { segment.add(item).write(cached[item]) };
+            grid.write(segment + item, cached[item]);
         });
     }
     thread::sync_threads();
-    unsafe { grid.add(placement).read() }
+    grid.read(placement)
 }
 
 #[inline(always)]
-unsafe fn radix_lookback_global(
+fn radix_lookback_global(
     bin: usize,
     block_index: i32,
     local_count: i32,
-    lookback: *mut i32,
-    global_offsets: *mut u64,
+    lookback: &mut DeviceRegion<'_, i32>,
+    global_offsets: &mut SharedRegion<u64>,
 ) {
     const RADIX_DIGITS: usize = 256;
     const GLOBAL_MASK: i32 = 0x8000_0000u32 as i32;
@@ -2819,16 +2621,14 @@ unsafe fn radix_lookback_global(
     let mut wanted = u32::MAX;
     let mut previous = block_index - 1;
     while previous >= 0 {
-        let location = unsafe { lookback.add(previous as usize * RADIX_DIGITS + bin) };
+        let location = previous as usize * RADIX_DIGITS + bin;
         let mut value;
         loop {
             // This is CUB's anti-hoisting fence immediately before its
             // volatile lookback load. Inter-block visibility is provided by
             // the volatile global publication protocol, not CTA ownership.
-            fence::threadfence_block();
-            // SAFETY: the caller allocates one entry per `(block, bin)` and
-            // every value is published before a consumer accepts it.
-            value = unsafe { location.read_volatile() };
+            threadfence_block();
+            value = lookback.read_volatile(location);
             if value != 0 {
                 break;
             }
@@ -2841,19 +2641,9 @@ unsafe fn radix_lookback_global(
         previous -= 1;
     }
     let publication = inclusive | GLOBAL_MASK;
-    // SAFETY: this block exclusively publishes its own `(block, bin)` entry.
-    unsafe {
-        lookback
-            .add(block_index as usize * RADIX_DIGITS + bin)
-            .write_volatile(publication)
-    };
-    // SAFETY: each of the first 256 block threads owns one global offset.
-    let current = unsafe { global_offsets.add(bin).read() };
-    unsafe {
-        global_offsets
-            .add(bin)
-            .write(current + (inclusive - local_count) as u64)
-    };
+    lookback.write_volatile(block_index as usize * RADIX_DIGITS + bin, publication);
+    let current = global_offsets.read(bin);
+    global_offsets.write(bin, current + (inclusive - local_count) as u64);
     let _ = wanted;
 }
 
@@ -2874,11 +2664,11 @@ pub fn radix_onesweep_keys_agent<
     const ITEMS: usize,
     const UNION_BYTES: usize,
 >(
-    mut lookback: DisjointSlice<i32>,
-    mut counter: DisjointSlice<i32>,
+    lookback: DisjointSlice<i32>,
+    counter: DisjointSlice<i32>,
     bins: &[u64],
     input: &[K],
-    mut output: DisjointSlice<K>,
+    output: DisjointSlice<K>,
     bin_offset: usize,
     counter_offset: usize,
     current_bit: u32,
@@ -2902,19 +2692,27 @@ pub fn radix_onesweep_keys_agent<
     let warp_index = thread_index >> 5;
     let tile_items = (THREADS * ITEMS) as u32;
     let num_items = input.len() as u32;
-    let shared_base = DynamicSharedArray::<u8, 16>::get_raw();
-    let warp_offsets = shared_base.cast::<i32>();
+    let shared_bytes = UNION_BYTES + RADIX_DIGITS * core::mem::size_of::<u64>();
+    let warp_offsets_bytes = (THREADS / 32) * RADIX_DIGITS * core::mem::size_of::<u32>();
+    let prefix_storage_offset = warp_offsets_bytes + RADIX_DIGITS * core::mem::size_of::<u32>();
+    let prefix_grid_offset = prefix_storage_offset + 16;
+    let shared_memory = BlockSharedMemory::new(shared_bytes);
+    let mut warp_offsets = shared_memory.region::<i32>(0, (THREADS / 32) * RADIX_DIGITS);
     // CUB retains one guard allocation of `match_masks[1][RADIX_DIGITS]`
     // even for WARP_MATCH_ANY. Use that otherwise-idle region to lower the
     // block-vote result without aliasing the following `prefix_tmp` storage.
-    let short_flags = unsafe {
-        shared_base
-            .add((THREADS / 32) * RADIX_DIGITS * core::mem::size_of::<u32>())
-            .cast::<u32>()
-    };
-    let prefix_temp = unsafe { short_flags.add(RADIX_DIGITS).cast::<u8>() };
-    let keys_shared = shared_base.cast::<MaybeUninit<B>>();
-    let global_offsets = unsafe { shared_base.add(UNION_BYTES).cast::<u64>() };
+    let mut short_flags = shared_memory.region::<u32>(warp_offsets_bytes, RADIX_DIGITS);
+    let mut prefix_grid = shared_memory.region::<i32>(
+        prefix_grid_offset,
+        (UNION_BYTES - prefix_grid_offset) / core::mem::size_of::<i32>(),
+    );
+    let mut keys_shared = shared_memory
+        .region::<MaybeUninit<B>>(0, UNION_BYTES / core::mem::size_of::<MaybeUninit<B>>());
+    let mut global_offsets = shared_memory.region::<u64>(UNION_BYTES, RADIX_DIGITS);
+    let mut block_index_slot = shared_memory.region::<i32>(UNION_BYTES, 1);
+    let mut lookback = DeviceRegion::new(lookback);
+    let mut counter = DeviceRegion::new(counter);
+    let mut output = DeviceRegion::new(output);
     // The pass offset is uniform for the launch. Prove its complete 256-bin
     // band once instead of retaining a bounds check at each callback read.
     let Some(pass_bins) = bins.get(bin_offset..bin_offset + RADIX_DIGITS) else {
@@ -2922,21 +2720,19 @@ pub fn radix_onesweep_keys_agent<
     };
 
     if thread_index == 0 {
-        let block_counter =
-            unsafe { DeviceAtomicI32::from_ptr(counter.as_mut_ptr().add(counter_offset)) };
-        let dynamic_block = block_counter.fetch_add(1, AtomicOrdering::Relaxed);
+        let dynamic_block = counter.fetch_add_device(counter_offset, 1);
         // CUB aliases `block_idx` with `global_offsets` and broadcasts it with
         // a block barrier. Retain that phase change instead of assuming CUDA's
         // physical block order is the one-sweep tile order.
-        unsafe { global_offsets.cast::<i32>().write(dynamic_block) };
+        block_index_slot.write(0, dynamic_block);
     }
     thread::sync_threads();
-    let block_index = unsafe { global_offsets.cast::<i32>().read() };
+    let block_index = block_index_slot.read(0);
     if thread_index == 0 {
         // cuda-oxide does not yet expose CUDA's `__syncthreads_or`. Reserve
         // one cell in CUB's guard match-mask allocation; the histogram's
         // later block barrier publishes this initialization before the vote.
-        unsafe { short_flags.write(0) };
+        short_flags.write(0, 0);
     }
     let tile_base = block_index as u32 * tile_items;
     let full_block = tile_base + tile_items <= num_items;
@@ -2981,21 +2777,14 @@ pub fn radix_onesweep_keys_agent<
     // SM80 policy. The warp-strided input arrangement preserves source order.
     for_each_radix_warp_bin!(slot, {
         let bin = (lane + slot * 32) as usize;
-        unsafe {
-            warp_offsets
-                .add(warp_index as usize * RADIX_DIGITS + bin)
-                .write(0)
-        };
+        warp_offsets.write(warp_index as usize * RADIX_DIGITS + bin, 0);
     });
     warp::sync_mask(u32::MAX);
     for_each_thread_item!(ITEMS, item, {
-        unsafe {
-            BlockAtomicI32::from_ptr(warp_offsets.add(
-                warp_index as usize * RADIX_DIGITS
-                    + digit(keys[item], current_bit, num_bits) as usize,
-            ))
-        }
-        .fetch_add(1, AtomicOrdering::Relaxed);
+        warp_offsets.fetch_add_block(
+            warp_index as usize * RADIX_DIGITS + digit(keys[item], current_bit, num_bits) as usize,
+            1,
+        );
     });
     thread::sync_threads();
 
@@ -3004,31 +2793,26 @@ pub fn radix_onesweep_keys_agent<
     let mut local_count = 0i32;
     if active_bin {
         for_each_policy800_warp!(source_warp, {
-            let location = unsafe { warp_offsets.add(source_warp * RADIX_DIGITS + bin) };
-            let count = unsafe { location.read() };
-            unsafe { location.write(local_count) };
+            let location = source_warp * RADIX_DIGITS + bin;
+            let count = warp_offsets.read(location);
+            warp_offsets.write(location, local_count);
             local_count += count;
         });
         let partial = local_count | 0x4000_0000;
-        unsafe {
-            lookback
-                .as_mut_ptr()
-                .add(block_index as usize * RADIX_DIGITS + bin)
-                .write_volatile(partial)
-        };
+        lookback.write_volatile(block_index as usize * RADIX_DIGITS + bin, partial);
     }
 
     // CUB invokes `__syncthreads_or` in the lookback callback. At most one
     // digit can own the whole tile, so its bin thread uniquely publishes the
     // true case into the otherwise-idle guard match-mask cell.
     if active_bin && local_count == tile_items as i32 {
-        unsafe { short_flags.write(1) };
+        short_flags.write(0, 1);
     }
     thread::sync_threads();
     // A same-address shared load is a warp multicast. Every thread consumes
     // the block-wide result directly, which is the safe cuda-oxide capability
     // replacement for CUB's currently unavailable `__syncthreads_or` result.
-    let short_circuit = unsafe { short_flags.read() } != 0;
+    let short_circuit = short_flags.read(0) != 0;
 
     // CUB performs the short-circuit from its counts callback, before the
     // block-wide exclusive scan and rank downsweep. A uniform digit tile must
@@ -3037,50 +2821,37 @@ pub fn radix_onesweep_keys_agent<
     if short_circuit {
         let common_bin = digit(keys[0], current_bit, num_bits) as usize;
         if active_bin {
-            unsafe {
-                global_offsets.add(bin).write(
-                    pass_bins[bin]
-                        - if bin > common_bin {
-                            tile_items as u64
-                        } else {
-                            0
-                        },
-                )
-            };
-            unsafe {
-                radix_lookback_global(
-                    bin,
-                    block_index,
-                    local_count,
-                    lookback.as_mut_ptr(),
-                    global_offsets,
-                )
-            };
+            global_offsets.write(
+                bin,
+                pass_bins[bin]
+                    - if bin > common_bin {
+                        tile_items as u64
+                    } else {
+                        0
+                    },
+            );
+            radix_lookback_global(
+                bin,
+                block_index,
+                local_count,
+                &mut lookback,
+                &mut global_offsets,
+            );
         }
         thread::sync_threads();
-        let output_base = unsafe { global_offsets.add(common_bin).read() } as usize;
+        let output_base = global_offsets.read(common_bin) as usize;
         if full_block {
             for_each_thread_item!(ITEMS, item, {
                 let local_index = warp_base + item as u32 * 32;
                 let value = from_ordered(keys[item]);
-                unsafe {
-                    output
-                        .as_mut_ptr()
-                        .add(output_base + local_index as usize)
-                        .write(value)
-                };
+                output.write(output_base + local_index as usize, value);
             });
         } else {
             for_each_thread_item!(ITEMS, item, {
                 let local_index = warp_base + item as u32 * 32;
                 if local_index < valid_items {
                     let value = from_ordered(keys[item]);
-                    unsafe {
-                        output
-                            .as_mut_ptr()
-                            .add(output_base + local_index as usize)
-                            .write(value)
-                    };
+                    output.write(output_base + local_index as usize, value);
                 }
             });
         }
@@ -3088,12 +2859,12 @@ pub fn radix_onesweep_keys_agent<
     }
 
     let exclusive_digit_prefix =
-        unsafe { block_exclusive_sum_raking_memoize_384_i32(local_count, prefix_temp) };
+        block_exclusive_sum_raking_memoize_384_i32(local_count, &mut prefix_grid);
     if active_bin {
         for_each_policy800_warp!(source_warp, {
-            let location = unsafe { warp_offsets.add(source_warp * RADIX_DIGITS + bin) };
-            let prior_warps = unsafe { location.read() };
-            unsafe { location.write(prior_warps + exclusive_digit_prefix) };
+            let location = source_warp * RADIX_DIGITS + bin;
+            let prior_warps = warp_offsets.read(location);
+            warp_offsets.write(location, prior_warps + exclusive_digit_prefix);
         });
     }
     thread::sync_threads();
@@ -3110,12 +2881,10 @@ pub fn radix_onesweep_keys_agent<
         let within_match = (matching & warp::lanemask_le()).count_ones() as i32;
         let mut warp_offset = 0i32;
         if lane == leader {
-            let location = unsafe {
-                BlockAtomicI32::from_ptr(
-                    warp_offsets.add(warp_index as usize * RADIX_DIGITS + item_bin as usize),
-                )
-            };
-            warp_offset = location.fetch_add(within_match, AtomicOrdering::Relaxed);
+            warp_offset = warp_offsets.fetch_add_block(
+                warp_index as usize * RADIX_DIGITS + item_bin as usize,
+                within_match,
+            );
         }
         warp_offset = warp::shuffle_sync(u32::MAX, warp_offset as u32, leader) as i32;
         ranks[item] = warp_offset + within_match - 1;
@@ -3129,11 +2898,7 @@ pub fn radix_onesweep_keys_agent<
     for_each_thread_item!(ITEMS, item, {
         let ordered = keys[item];
         let rank = ranks[item];
-        unsafe {
-            keys_shared
-                .add(rank as usize)
-                .write(MaybeUninit::new(ordered))
-        };
+        keys_shared.write(rank as usize, MaybeUninit::new(ordered));
     });
 
     // CUB overlaps independent key-scatter and lookback work here. The single
@@ -3141,53 +2906,34 @@ pub fn radix_onesweep_keys_agent<
     // any thread reads either; inserting an earlier barrier serializes the
     // phases and changes the one-sweep schedule.
     if active_bin {
-        unsafe {
-            global_offsets
-                .add(bin)
-                .write(pass_bins[bin] - exclusive_digit_prefix as u64)
-        };
-        unsafe {
-            radix_lookback_global(
-                bin,
-                block_index,
-                local_count,
-                lookback.as_mut_ptr(),
-                global_offsets,
-            )
-        };
+        global_offsets.write(bin, pass_bins[bin] - exclusive_digit_prefix as u64);
+        radix_lookback_global(
+            bin,
+            block_index,
+            local_count,
+            &mut lookback,
+            &mut global_offsets,
+        );
     }
     thread::sync_threads();
 
     if full_block {
         for_each_thread_item!(ITEMS, item, {
             let blocked_index = thread_index + item as u32 * THREADS as u32;
-            let ordered = unsafe { keys_shared.add(blocked_index as usize).read().assume_init() };
+            let ordered = keys_shared.read_initialized(blocked_index as usize);
             let item_bin = digit(ordered, current_bit, num_bits) as usize;
-            let output_index =
-                blocked_index as usize + unsafe { global_offsets.add(item_bin).read() } as usize;
-            unsafe {
-                output
-                    .as_mut_ptr()
-                    .add(output_index)
-                    .write(from_ordered(ordered))
-            };
+            let output_index = blocked_index as usize + global_offsets.read(item_bin) as usize;
+            output.write(output_index, from_ordered(ordered));
             warp::sync_mask(u32::MAX);
         });
     } else {
         for_each_thread_item!(ITEMS, item, {
             let blocked_index = thread_index + item as u32 * THREADS as u32;
             if blocked_index < valid_items {
-                let ordered =
-                    unsafe { keys_shared.add(blocked_index as usize).read().assume_init() };
+                let ordered = keys_shared.read_initialized(blocked_index as usize);
                 let item_bin = digit(ordered, current_bit, num_bits) as usize;
-                let output_index = blocked_index as usize
-                    + unsafe { global_offsets.add(item_bin).read() } as usize;
-                unsafe {
-                    output
-                        .as_mut_ptr()
-                        .add(output_index)
-                        .write(from_ordered(ordered))
-                };
+                let output_index = blocked_index as usize + global_offsets.read(item_bin) as usize;
+                output.write(output_index, from_ordered(ordered));
             }
             warp::sync_mask(u32::MAX);
         });
@@ -3213,13 +2959,13 @@ pub fn radix_onesweep_pairs_agent<
     const ITEMS: usize,
     const UNION_BYTES: usize,
 >(
-    mut lookback: DisjointSlice<i32>,
-    mut counter: DisjointSlice<i32>,
+    lookback: DisjointSlice<i32>,
+    counter: DisjointSlice<i32>,
     bins: &[u64],
     input_keys: &[K],
     input_values: &[V],
-    mut output_keys: DisjointSlice<K>,
-    mut output_values: DisjointSlice<V>,
+    output_keys: DisjointSlice<K>,
+    output_values: DisjointSlice<V>,
     bin_offset: usize,
     counter_offset: usize,
     current_bit: u32,
@@ -3244,31 +2990,39 @@ pub fn radix_onesweep_pairs_agent<
     let warp_index = thread_index >> 5;
     let tile_items = (THREADS * ITEMS) as u32;
     let num_items = input_keys.len() as u32;
-    let shared_base = DynamicSharedArray::<u8, 16>::get_raw();
-    let warp_offsets = shared_base.cast::<i32>();
-    let short_flags = unsafe {
-        shared_base
-            .add((THREADS / 32) * RADIX_DIGITS * core::mem::size_of::<u32>())
-            .cast::<u32>()
-    };
-    let prefix_temp = unsafe { short_flags.add(RADIX_DIGITS).cast::<u8>() };
-    let keys_shared = shared_base.cast::<MaybeUninit<B>>();
-    let values_shared = shared_base.cast::<MaybeUninit<V>>();
-    let global_offsets = unsafe { shared_base.add(UNION_BYTES).cast::<u64>() };
+    let shared_bytes = UNION_BYTES + RADIX_DIGITS * core::mem::size_of::<u64>();
+    let warp_offsets_bytes = (THREADS / 32) * RADIX_DIGITS * core::mem::size_of::<u32>();
+    let prefix_storage_offset = warp_offsets_bytes + RADIX_DIGITS * core::mem::size_of::<u32>();
+    let prefix_grid_offset = prefix_storage_offset + 16;
+    let shared_memory = BlockSharedMemory::new(shared_bytes);
+    let mut warp_offsets = shared_memory.region::<i32>(0, (THREADS / 32) * RADIX_DIGITS);
+    let mut short_flags = shared_memory.region::<u32>(warp_offsets_bytes, RADIX_DIGITS);
+    let mut prefix_grid = shared_memory.region::<i32>(
+        prefix_grid_offset,
+        (UNION_BYTES - prefix_grid_offset) / core::mem::size_of::<i32>(),
+    );
+    let mut keys_shared = shared_memory
+        .region::<MaybeUninit<B>>(0, UNION_BYTES / core::mem::size_of::<MaybeUninit<B>>());
+    let mut values_shared = shared_memory
+        .region::<MaybeUninit<V>>(0, UNION_BYTES / core::mem::size_of::<MaybeUninit<V>>());
+    let mut global_offsets = shared_memory.region::<u64>(UNION_BYTES, RADIX_DIGITS);
+    let mut block_index_slot = shared_memory.region::<i32>(UNION_BYTES, 1);
+    let mut lookback = DeviceRegion::new(lookback);
+    let mut counter = DeviceRegion::new(counter);
+    let mut output_keys = DeviceRegion::new(output_keys);
+    let mut output_values = DeviceRegion::new(output_values);
     let Some(pass_bins) = bins.get(bin_offset..bin_offset + RADIX_DIGITS) else {
         return;
     };
 
     if thread_index == 0 {
-        let block_counter =
-            unsafe { DeviceAtomicI32::from_ptr(counter.as_mut_ptr().add(counter_offset)) };
-        let dynamic_block = block_counter.fetch_add(1, AtomicOrdering::Relaxed);
-        unsafe { global_offsets.cast::<i32>().write(dynamic_block) };
+        let dynamic_block = counter.fetch_add_device(counter_offset, 1);
+        block_index_slot.write(0, dynamic_block);
     }
     thread::sync_threads();
-    let block_index = unsafe { global_offsets.cast::<i32>().read() };
+    let block_index = block_index_slot.read(0);
     if thread_index == 0 {
-        unsafe { short_flags.write(0) };
+        short_flags.write(0, 0);
     }
     let tile_base = block_index as u32 * tile_items;
     let full_block = tile_base + tile_items <= num_items;
@@ -3303,21 +3057,14 @@ pub fn radix_onesweep_pairs_agent<
 
     for_each_radix_warp_bin!(slot, {
         let bin = (lane + slot * 32) as usize;
-        unsafe {
-            warp_offsets
-                .add(warp_index as usize * RADIX_DIGITS + bin)
-                .write(0)
-        };
+        warp_offsets.write(warp_index as usize * RADIX_DIGITS + bin, 0);
     });
     warp::sync_mask(u32::MAX);
     for_each_thread_item!(ITEMS, item, {
-        unsafe {
-            BlockAtomicI32::from_ptr(warp_offsets.add(
-                warp_index as usize * RADIX_DIGITS
-                    + digit(keys[item], current_bit, num_bits) as usize,
-            ))
-        }
-        .fetch_add(1, AtomicOrdering::Relaxed);
+        warp_offsets.fetch_add_block(
+            warp_index as usize * RADIX_DIGITS + digit(keys[item], current_bit, num_bits) as usize,
+            1,
+        );
     });
     thread::sync_threads();
 
@@ -3326,58 +3073,48 @@ pub fn radix_onesweep_pairs_agent<
     let mut local_count = 0i32;
     if active_bin {
         for_each_policy800_warp!(source_warp, {
-            let location = unsafe { warp_offsets.add(source_warp * RADIX_DIGITS + bin) };
-            let count = unsafe { location.read() };
-            unsafe { location.write(local_count) };
+            let location = source_warp * RADIX_DIGITS + bin;
+            let count = warp_offsets.read(location);
+            warp_offsets.write(location, local_count);
             local_count += count;
         });
-        unsafe {
-            lookback
-                .as_mut_ptr()
-                .add(block_index as usize * RADIX_DIGITS + bin)
-                .write_volatile(local_count | 0x4000_0000)
-        };
+        lookback.write_volatile(
+            block_index as usize * RADIX_DIGITS + bin,
+            local_count | 0x4000_0000,
+        );
     }
     if active_bin && local_count == tile_items as i32 {
-        unsafe { short_flags.write(1) };
+        short_flags.write(0, 1);
     }
     thread::sync_threads();
-    let short_circuit = unsafe { short_flags.read() } != 0;
+    let short_circuit = short_flags.read(0) != 0;
 
     if short_circuit {
         let common_bin = digit(keys[0], current_bit, num_bits) as usize;
         if active_bin {
-            unsafe {
-                global_offsets.add(bin).write(
-                    pass_bins[bin]
-                        - if bin > common_bin {
-                            tile_items as u64
-                        } else {
-                            0
-                        },
-                )
-            };
-            unsafe {
-                radix_lookback_global(
-                    bin,
-                    block_index,
-                    local_count,
-                    lookback.as_mut_ptr(),
-                    global_offsets,
-                )
-            };
+            global_offsets.write(
+                bin,
+                pass_bins[bin]
+                    - if bin > common_bin {
+                        tile_items as u64
+                    } else {
+                        0
+                    },
+            );
+            radix_lookback_global(
+                bin,
+                block_index,
+                local_count,
+                &mut lookback,
+                &mut global_offsets,
+            );
         }
         thread::sync_threads();
-        let output_base = unsafe { global_offsets.add(common_bin).read() } as usize;
+        let output_base = global_offsets.read(common_bin) as usize;
         for_each_thread_item!(ITEMS, item, {
             let local_index = warp_base + item as u32 * 32;
             if full_block || local_index < valid_items {
-                unsafe {
-                    output_keys
-                        .as_mut_ptr()
-                        .add(output_base + local_index as usize)
-                        .write(from_ordered(keys[item]))
-                };
+                output_keys.write(output_base + local_index as usize, from_ordered(keys[item]));
             }
         });
 
@@ -3400,24 +3137,22 @@ pub fn radix_onesweep_pairs_agent<
         for_each_thread_item!(ITEMS, item, {
             let local_index = warp_base + item as u32 * 32;
             if full_block || local_index < valid_items {
-                unsafe {
-                    output_values
-                        .as_mut_ptr()
-                        .add(output_base + local_index as usize)
-                        .write(values[item].assume_init())
-                };
+                output_values.write(
+                    output_base + local_index as usize,
+                    initialized_value(&values[item]),
+                );
             }
         });
         return;
     }
 
     let exclusive_digit_prefix =
-        unsafe { block_exclusive_sum_raking_memoize_384_i32(local_count, prefix_temp) };
+        block_exclusive_sum_raking_memoize_384_i32(local_count, &mut prefix_grid);
     if active_bin {
         for_each_policy800_warp!(source_warp, {
-            let location = unsafe { warp_offsets.add(source_warp * RADIX_DIGITS + bin) };
-            let prior_warps = unsafe { location.read() };
-            unsafe { location.write(prior_warps + exclusive_digit_prefix) };
+            let location = source_warp * RADIX_DIGITS + bin;
+            let prior_warps = warp_offsets.read(location);
+            warp_offsets.write(location, prior_warps + exclusive_digit_prefix);
         });
     }
     thread::sync_threads();
@@ -3430,12 +3165,10 @@ pub fn radix_onesweep_pairs_agent<
         let within_match = (matching & warp::lanemask_le()).count_ones() as i32;
         let mut warp_offset = 0i32;
         if lane == leader {
-            let location = unsafe {
-                BlockAtomicI32::from_ptr(
-                    warp_offsets.add(warp_index as usize * RADIX_DIGITS + item_bin as usize),
-                )
-            };
-            warp_offset = location.fetch_add(within_match, AtomicOrdering::Relaxed);
+            warp_offset = warp_offsets.fetch_add_block(
+                warp_index as usize * RADIX_DIGITS + item_bin as usize,
+                within_match,
+            );
         }
         warp_offset = warp::shuffle_sync(u32::MAX, warp_offset as u32, leader) as i32;
         ranks[item] = warp_offset + within_match - 1;
@@ -3443,64 +3176,41 @@ pub fn radix_onesweep_pairs_agent<
     thread::sync_threads();
 
     for_each_thread_item!(ITEMS, item, {
-        unsafe {
-            keys_shared
-                .add(ranks[item] as usize)
-                .write(MaybeUninit::new(keys[item]))
-        };
+        keys_shared.write(ranks[item] as usize, MaybeUninit::new(keys[item]));
     });
 
     // Match CUB's overlap: bin threads may perform lookback after their key
     // scatter while the rest of the block finishes scattering. The following
     // barrier is the sole join before global key reads.
     if active_bin {
-        unsafe {
-            global_offsets
-                .add(bin)
-                .write(pass_bins[bin] - exclusive_digit_prefix as u64)
-        };
-        unsafe {
-            radix_lookback_global(
-                bin,
-                block_index,
-                local_count,
-                lookback.as_mut_ptr(),
-                global_offsets,
-            )
-        };
+        global_offsets.write(bin, pass_bins[bin] - exclusive_digit_prefix as u64);
+        radix_lookback_global(
+            bin,
+            block_index,
+            local_count,
+            &mut lookback,
+            &mut global_offsets,
+        );
     }
     thread::sync_threads();
 
     if full_block {
         for_each_thread_item!(ITEMS, item, {
             let blocked_index = thread_index + item as u32 * THREADS as u32;
-            let ordered = unsafe { keys_shared.add(blocked_index as usize).read().assume_init() };
+            let ordered = keys_shared.read_initialized(blocked_index as usize);
             let item_bin = digit(ordered, current_bit, num_bits) as usize;
-            let output_index =
-                blocked_index as usize + unsafe { global_offsets.add(item_bin).read() } as usize;
-            unsafe {
-                output_keys
-                    .as_mut_ptr()
-                    .add(output_index)
-                    .write(from_ordered(ordered))
-            };
+            let output_index = blocked_index as usize + global_offsets.read(item_bin) as usize;
+            output_keys.write(output_index, from_ordered(ordered));
             warp::sync_mask(u32::MAX);
         });
     } else {
         for_each_thread_item!(ITEMS, item, {
             let blocked_index = thread_index + item as u32 * THREADS as u32;
             if blocked_index < valid_items {
-                let ordered =
-                    unsafe { keys_shared.add(blocked_index as usize).read().assume_init() };
+                let ordered = keys_shared.read_initialized(blocked_index as usize);
                 let item_bin = digit(ordered, current_bit, num_bits) as usize;
-                let output_index = blocked_index as usize
-                    + unsafe { global_offsets.add(item_bin).read() } as usize;
-                unsafe {
-                    output_keys
-                        .as_mut_ptr()
-                        .add(output_index)
-                        .write(from_ordered(ordered))
-                };
+                let output_index = blocked_index as usize + global_offsets.read(item_bin) as usize;
+                output_keys.write(output_index, from_ordered(ordered));
             }
             warp::sync_mask(u32::MAX);
         });
@@ -3509,7 +3219,7 @@ pub fn radix_onesweep_pairs_agent<
     let mut value_digits = [0u32; ITEMS];
     for_each_thread_item!(ITEMS, item, {
         let blocked_index = thread_index + item as u32 * THREADS as u32;
-        let ordered = unsafe { keys_shared.add(blocked_index as usize).read().assume_init() };
+        let ordered = keys_shared.read_initialized(blocked_index as usize);
         value_digits[item] = digit(ordered, current_bit, num_bits);
     });
 
@@ -3531,22 +3241,17 @@ pub fn radix_onesweep_pairs_agent<
     });
     thread::sync_threads();
     for_each_thread_item!(ITEMS, item, {
-        unsafe { values_shared.add(ranks[item] as usize).write(values[item]) };
+        values_shared.write(ranks[item] as usize, values[item]);
     });
     thread::sync_threads();
 
     for_each_thread_item!(ITEMS, item, {
         let blocked_index = thread_index + item as u32 * THREADS as u32;
         if full_block || blocked_index < valid_items {
-            let value = unsafe {
-                values_shared
-                    .add(blocked_index as usize)
-                    .read()
-                    .assume_init()
-            };
-            let output_index = blocked_index as usize
-                + unsafe { global_offsets.add(value_digits[item] as usize).read() } as usize;
-            unsafe { output_values.as_mut_ptr().add(output_index).write(value) };
+            let value = values_shared.read_initialized(blocked_index as usize);
+            let output_index =
+                blocked_index as usize + global_offsets.read(value_digits[item] as usize) as usize;
+            output_values.write(output_index, value);
         }
         warp::sync_mask(u32::MAX);
     });
@@ -3589,9 +3294,14 @@ mod tests {
                 "global MergePath lost its affine range capability: {required}"
             );
         }
-        for forbidden in ["first[", "second[", "get_unchecked", "unsafe"] {
+        for forbidden in [
+            "first[".to_owned(),
+            "second[".to_owned(),
+            "get_unchecked".to_owned(),
+            ["un", "safe"].concat(),
+        ] {
             assert!(
-                !merge_path.contains(forbidden),
+                !merge_path.contains(&forbidden),
                 "global MergePath must not recreate C++ iterator arithmetic: {forbidden}"
             );
         }
@@ -3604,7 +3314,7 @@ mod tests {
             .find("fn radix_match_any_8")
             .expect("Policy800 match-any helper must exist");
         let end = source[begin..]
-            .find("unsafe fn block_exclusive_sum_raking_memoize_384_i32")
+            .find("fn block_exclusive_sum_raking_memoize_384_i32")
             .map(|offset| begin + offset)
             .expect("Policy800 block scan must follow match-any");
         let match_any = &source[begin..end];
@@ -3618,7 +3328,7 @@ mod tests {
         );
         for forbidden in [
             ["warp::", "match_any_sync"].concat(),
-            ["ptx_", "a", "sm", "!"].concat(),
+            ["p", "tx_", "a", "sm", "!"].concat(),
             ["a", "sm", "!"].concat(),
         ] {
             assert!(
@@ -3642,7 +3352,7 @@ mod tests {
 
         for required in [
             "let num_items = input.len() as u32",
-            "let warp_offsets = shared_base.cast::<i32>()",
+            "let mut warp_offsets =",
             "let mut local_count = 0i32",
             "let mut ranks = [0i32; ITEMS]",
             "bins.get(bin_offset..bin_offset + RADIX_DIGITS)",
@@ -3662,7 +3372,7 @@ mod tests {
         }
 
         let constructor_begin = agent
-            .find("let dynamic_block = block_counter.fetch_add")
+            .find("let dynamic_block = counter.fetch_add_device")
             .expect("the dynamic block-index publication must remain explicit");
         let constructor_end = agent[constructor_begin..]
             .find("let block_index =")
@@ -3676,10 +3386,7 @@ mod tests {
             "the pinned AgentRadixSortOnesweep constructor has exactly one CTA barrier"
         );
 
-        for scatter_marker in [
-            ".write(MaybeUninit::new(ordered))",
-            ".write(MaybeUninit::new(keys[item]))",
-        ] {
+        for scatter_marker in ["MaybeUninit::new(ordered)", "MaybeUninit::new(keys[item])"] {
             let scatter = agent
                 .find(scatter_marker)
                 .expect("both one-sweep agents must scatter keys into their shared union");
@@ -3966,9 +3673,15 @@ mod tests {
                 "block-sort global range lost its Rust ownership capability: {required}"
             );
         }
-        for forbidden in [".as_ptr()", ".as_mut_ptr()", "cast_const", "*const", "*mut"] {
+        for forbidden in [
+            ".as_ptr()".to_owned(),
+            ".as_mut_ptr()".to_owned(),
+            "cast_const".to_owned(),
+            ["*", "const"].concat(),
+            ["*", "mut"].concat(),
+        ] {
             assert!(
-                !agents_and_pair_io.contains(forbidden),
+                !agents_and_pair_io.contains(&forbidden),
                 "block-sort global range recovered a raw pointer: {forbidden}"
             );
         }
@@ -4016,7 +3729,7 @@ mod tests {
         let init = &source[begin..end];
         assert_eq!(init.matches("grid_stride_runs32").count(), 2);
         assert!(!init.contains("as_mut_ptr"));
-        assert!(!init.contains("unsafe"));
+        assert!(!init.contains(&["un", "safe"].concat()));
     }
 
     #[test]

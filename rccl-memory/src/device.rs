@@ -6,9 +6,14 @@
 //! algorithms consume the safe capabilities; raw pointer extraction stays in
 //! this memory layer and is never emitted by an operation macro.
 
-use core::mem::MaybeUninit;
+use core::{
+    marker::PhantomData,
+    mem::{MaybeUninit, align_of, size_of},
+};
 use cuda_device::{
-    DisjointSlice, LinearTiles,
+    DisjointSlice, DynamicSharedArray, LinearTiles,
+    atomic::{AtomicOrdering, BlockAtomicI32, BlockAtomicU32, DeviceAtomicI32, DeviceAtomicU64},
+    fence,
     thread::{self, __internal, LaunchContextRef},
 };
 
@@ -66,6 +71,405 @@ impl<'a, T> MergePathSearch<'a, T> {
 /// 32-bit coordinate launch contract.
 pub type OneDimensionalLaunch<'kernel> =
     LaunchContextRef<'kernel, __internal::Domain1, __internal::U32Coordinates>;
+
+/// One block's dynamically-sized shared-memory allocation.
+///
+/// cuda-oxide exposes dynamic shared storage as an address because the launch
+/// determines its extent. RCCL's proc macros already determine that extent;
+/// this capability records it once and hands algorithms checked typed regions
+/// instead of making every collective recover and cast the address.
+pub struct BlockSharedMemory {
+    base: *mut u8,
+    bytes: usize,
+    _not_send_or_sync: PhantomData<*mut ()>,
+}
+
+impl BlockSharedMemory {
+    /// Bind the macro-declared dynamic shared extent for this kernel block.
+    #[inline(always)]
+    pub fn new(bytes: usize) -> Self {
+        if bytes == 0 {
+            cuda_device::debug::trap();
+        }
+        Self {
+            base: DynamicSharedArray::<u8, 16>::get_raw(),
+            bytes,
+            _not_send_or_sync: PhantomData,
+        }
+    }
+
+    #[inline(always)]
+    pub fn bytes(&self) -> usize {
+        self.bytes
+    }
+
+    /// Create a typed region after validating its complete byte range and
+    /// alignment against the macro-declared allocation.
+    #[inline(always)]
+    pub fn region<T>(&self, byte_offset: usize, len: usize) -> SharedRegion<T> {
+        let element_bytes = size_of::<T>();
+        if element_bytes == 0
+            || byte_offset % align_of::<T>() != 0
+            || byte_offset > self.bytes
+            || len > (self.bytes - byte_offset) / element_bytes
+        {
+            cuda_device::debug::trap();
+        }
+        SharedRegion {
+            // SAFETY: the checks above prove the complete region lies in the
+            // launch-provided allocation with the alignment required by T.
+            base: unsafe { self.base.add(byte_offset).cast::<T>() },
+            len,
+            _not_send_or_sync: PhantomData,
+        }
+    }
+
+    /// Copy one checked global range into this block's byte storage using the
+    /// pinned SM80 16-byte asynchronous-copy schedule.
+    #[inline(always)]
+    pub fn copy_async_from<T, const THREADS: usize, const SIZE: usize>(
+        &self,
+        destination_offset: usize,
+        source: &[T],
+        source_begin: usize,
+        count: u32,
+        thread_index: u32,
+    ) -> AsyncSharedCopy<T> {
+        let count = count as usize;
+        if SIZE != size_of::<T>()
+            || align_of::<T>() > 16
+            || destination_offset & 15 != 0
+            || destination_offset > self.bytes
+            || source_begin > source.len()
+            || count > source.len() - source_begin
+        {
+            cuda_device::debug::trap();
+        }
+        let num_bytes = count * SIZE;
+        if num_bytes == 0 {
+            return AsyncSharedCopy {
+                region: SharedRegion {
+                    // SAFETY: the destination check above proves the empty
+                    // tail starts within the 16-byte-aligned allocation.
+                    base: unsafe { self.base.add(destination_offset).cast::<MaybeUninit<T>>() },
+                    len: (self.bytes - destination_offset) / SIZE,
+                    _not_send_or_sync: PhantomData,
+                },
+                head_padding: 0,
+            };
+        }
+
+        // SAFETY: the nonempty checked range has a first element, and the
+        // returned address remains borrowed from `source` for this call.
+        let global = unsafe { source.as_ptr().add(source_begin) };
+        let address_mod_16 = global.addr() & 15;
+        let align_difference = if SIZE >= 16 {
+            0
+        } else {
+            (16 - address_mod_16) & 15
+        };
+        let head_padding = if SIZE >= 16 {
+            0
+        } else {
+            (16 - align_difference) & 15
+        };
+        let destination_begin = destination_offset + head_padding;
+        if destination_begin > self.bytes || num_bytes > self.bytes - destination_begin {
+            cuda_device::debug::trap();
+        }
+
+        // SAFETY: the preceding allocation check covers the destination, and
+        // the source range check covers the same number of bytes.
+        let actual_shared = unsafe { self.base.add(destination_begin) };
+        let head_bytes = align_difference.min(num_bytes);
+        let bulk_bytes = (num_bytes - head_bytes) / 16 * 16;
+        let aligned_global = unsafe { global.cast::<u8>().add(head_bytes) };
+
+        let mut offset = thread_index as usize * 16;
+        while offset < bulk_bytes {
+            // SAFETY: both addresses are 16-byte aligned and each block thread
+            // owns a distinct 16-byte chunk in this grid-stride loop.
+            unsafe {
+                cuda_device::async_copy::cp_async_cg_16(
+                    actual_shared.add(head_bytes + offset).cast::<u32>(),
+                    aligned_global.add(offset).cast::<u32>(),
+                )
+            };
+            offset += THREADS * 16;
+        }
+
+        let begin_offset = if (thread_index as usize) < head_bytes {
+            0
+        } else {
+            bulk_bytes
+        };
+        let byte_index = begin_offset + thread_index as usize;
+        if byte_index < num_bytes {
+            // SAFETY: the branch proves one byte in each checked range.
+            unsafe {
+                actual_shared
+                    .add(byte_index)
+                    .write(global.cast::<u8>().add(byte_index).read())
+            };
+        }
+        AsyncSharedCopy {
+            region: SharedRegion {
+                // SAFETY: `destination_offset` is 16-byte aligned and the
+                // computed padding gives this address the same modulo-16
+                // alignment as the borrowed `T` source address. The checked
+                // destination range starts here and lies in the allocation.
+                base: actual_shared.cast::<MaybeUninit<T>>(),
+                len: (self.bytes - destination_begin) / SIZE,
+                _not_send_or_sync: PhantomData,
+            },
+            head_padding: head_padding as u32,
+        }
+    }
+}
+
+/// Proof produced by one checked asynchronous global-to-shared copy.
+///
+/// Besides the copied prefix, CUB's merge agents address a second copied range
+/// relative to the first range's aligned start. The tail region preserves that
+/// coordinate system without asking the algorithm to reconstruct or recheck a
+/// raw shared-memory address.
+pub struct AsyncSharedCopy<T> {
+    region: SharedRegion<MaybeUninit<T>>,
+    head_padding: u32,
+}
+
+impl<T> AsyncSharedCopy<T> {
+    #[inline(always)]
+    pub fn head_padding(&self) -> u32 {
+        self.head_padding
+    }
+
+    #[inline(always)]
+    pub fn into_tail_region(self) -> SharedRegion<MaybeUninit<T>> {
+        self.region
+    }
+}
+
+/// Typed, bounds-checked view into one block's dynamic shared allocation.
+///
+/// The view deliberately does not yield references: CUDA barriers and warp
+/// collectives define phase ownership, which ordinary Rust borrows cannot
+/// express across hardware threads. Loads and stores remain small reviewed
+/// operations in this memory layer.
+pub struct SharedRegion<T> {
+    base: *mut T,
+    len: usize,
+    _not_send_or_sync: PhantomData<*mut ()>,
+}
+
+impl<T> SharedRegion<T> {
+    #[inline(always)]
+    fn checked(&self, index: usize) -> *mut T {
+        debug_assert!(index < self.len);
+        // SAFETY: the branch proves the requested element lies in the region
+        // that BlockSharedMemory validated as a whole. Release kernels rely on
+        // the collective's reviewed phase/index invariant, just as Rust's
+        // standard-library sort internals rely on their partition invariant.
+        unsafe { self.base.add(index) }
+    }
+
+    #[inline(always)]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    #[inline(always)]
+    pub fn read(&self, index: usize) -> T
+    where
+        T: Copy,
+    {
+        // SAFETY: `checked` proves the address; the collective's phase
+        // protocol establishes initialization before this read.
+        unsafe { self.checked(index).read() }
+    }
+
+    #[inline(always)]
+    pub fn write(&mut self, index: usize, value: T) {
+        // SAFETY: `checked` proves the address; each collective supplies an
+        // injective lane/index mapping or an atomic operation for collisions.
+        unsafe { self.checked(index).write(value) };
+    }
+
+    #[inline(always)]
+    pub fn read_volatile(&self, index: usize) -> T
+    where
+        T: Copy,
+    {
+        // SAFETY: same checked-region proof as `read`; volatile preserves the
+        // CUDA publication protocol required by the caller.
+        unsafe { self.checked(index).read_volatile() }
+    }
+
+    #[inline(always)]
+    pub fn write_volatile(&mut self, index: usize, value: T) {
+        // SAFETY: same checked-region proof as `write`; volatile preserves the
+        // CUDA publication protocol required by the caller.
+        unsafe { self.checked(index).write_volatile(value) };
+    }
+}
+
+impl<T: Copy> SharedRegion<MaybeUninit<T>> {
+    /// Load a slot after the collective's barrier/range proof establishes
+    /// that it was initialized in the current shared-memory phase.
+    #[inline(always)]
+    pub fn read_initialized(&self, index: usize) -> T {
+        // SAFETY: the caller-visible operation is tied to a CUB phase whose
+        // initialized subset is established before it selects this index.
+        unsafe { self.read(index).assume_init() }
+    }
+}
+
+impl SharedRegion<u32> {
+    #[inline(always)]
+    pub fn fetch_add_block(&mut self, index: usize, value: u32) -> u32 {
+        // SAFETY: `checked` returns an aligned u32 in shared memory.
+        let atomic = unsafe { BlockAtomicU32::from_ptr(self.checked(index)) };
+        atomic.fetch_add(value, AtomicOrdering::Relaxed)
+    }
+}
+
+impl SharedRegion<i32> {
+    #[inline(always)]
+    pub fn fetch_add_block(&mut self, index: usize, value: i32) -> i32 {
+        // SAFETY: `checked` returns an aligned i32 in shared memory.
+        let atomic = unsafe { BlockAtomicI32::from_ptr(self.checked(index)) };
+        atomic.fetch_add(value, AtomicOrdering::Relaxed)
+    }
+}
+
+/// Commit all asynchronous shared-memory copies issued by this block thread.
+#[inline(always)]
+pub fn commit_async_copy() {
+    // SAFETY: collectives call this uniformly after issuing their copy set.
+    unsafe { cuda_device::async_copy::cp_async_commit_group() };
+}
+
+/// Wait for the committed asynchronous group and publish it to the block.
+#[inline(always)]
+pub fn wait_async_copy() {
+    // SAFETY: a preceding uniform commit created the group being awaited.
+    unsafe { cuda_device::async_copy::cp_async_wait_group(0) };
+    thread::sync_threads();
+}
+
+/// Commit, await, and publish one block asynchronous-copy phase.
+#[inline(always)]
+pub fn commit_and_wait_async_copy() {
+    commit_async_copy();
+    wait_async_copy();
+}
+
+/// Borrow a register/shared slot after the surrounding collective has proved
+/// that the selected lane is active in the current phase.
+#[inline(always)]
+pub fn initialized_ref<T>(slot: &MaybeUninit<T>) -> &T {
+    // SAFETY: RCCL collectives call this only on the active side of their
+    // guarded-load or serial-merge availability predicate.
+    unsafe { slot.assume_init_ref() }
+}
+
+/// Copy a register slot after the surrounding active-lane predicate has
+/// established initialization.
+#[inline(always)]
+pub fn initialized_value<T: Copy>(slot: &MaybeUninit<T>) -> T {
+    // SAFETY: same active-lane invariant as `initialized_ref`.
+    unsafe { slot.assume_init() }
+}
+
+/// Exclusive device allocation viewed through one algorithm-defined index
+/// protocol.
+///
+/// cuda-oxide's `DisjointSlice` intentionally cannot describe a destination
+/// index produced by a data-dependent permutation. This wrapper keeps that
+/// escape hatch in the memory audit layer while retaining the exclusive
+/// allocation borrow and bounds extent as ordinary Rust state.
+pub struct DeviceRegion<'a, T> {
+    storage: DisjointSlice<'a, T>,
+}
+
+impl<'a, T> DeviceRegion<'a, T> {
+    #[inline(always)]
+    pub fn new(storage: DisjointSlice<'a, T>) -> Self {
+        Self { storage }
+    }
+
+    #[inline(always)]
+    pub fn len(&self) -> usize {
+        self.storage.len()
+    }
+
+    #[inline(always)]
+    fn checked(&mut self, index: usize) -> *mut T {
+        debug_assert!(index < self.storage.len());
+        // SAFETY: release collectives derive the index from their reviewed
+        // disjoint/permutation protocol; debug kernels retain the extent check.
+        unsafe { self.storage.as_mut_ptr().add(index) }
+    }
+
+    #[inline(always)]
+    pub fn read(&mut self, index: usize) -> T
+    where
+        T: Copy,
+    {
+        // SAFETY: `checked` supplies the allocation proof and the collective
+        // phase establishes initialization.
+        unsafe { self.checked(index).read() }
+    }
+
+    #[inline(always)]
+    pub fn write(&mut self, index: usize, value: T) {
+        // SAFETY: the algorithm-defined index protocol is injective for
+        // ordinary writes; colliding protocols use the atomic methods below.
+        unsafe { self.checked(index).write(value) };
+    }
+
+    #[inline(always)]
+    pub fn read_volatile(&mut self, index: usize) -> T
+    where
+        T: Copy,
+    {
+        // SAFETY: same allocation proof as `read`; volatile retains the
+        // inter-block publication load.
+        unsafe { self.checked(index).read_volatile() }
+    }
+
+    #[inline(always)]
+    pub fn write_volatile(&mut self, index: usize, value: T) {
+        // SAFETY: same allocation proof as `write`; volatile retains the
+        // inter-block publication store.
+        unsafe { self.checked(index).write_volatile(value) };
+    }
+}
+
+impl DeviceRegion<'_, i32> {
+    #[inline(always)]
+    pub fn fetch_add_device(&mut self, index: usize, value: i32) -> i32 {
+        // SAFETY: `checked` returns one aligned element in device memory.
+        let atomic = unsafe { DeviceAtomicI32::from_ptr(self.checked(index)) };
+        atomic.fetch_add(value, AtomicOrdering::Relaxed)
+    }
+}
+
+impl DeviceRegion<'_, u64> {
+    #[inline(always)]
+    pub fn fetch_add_device(&mut self, index: usize, value: u64) -> u64 {
+        // SAFETY: `checked` returns one aligned element in device memory.
+        let atomic = unsafe { DeviceAtomicU64::from_ptr(self.checked(index)) };
+        atomic.fetch_add(value, AtomicOrdering::Relaxed)
+    }
+}
+
+/// Preserve CUB's block-scoped anti-hoisting fence in a reviewed device-memory
+/// publication protocol.
+#[inline(always)]
+pub fn threadfence_block() {
+    fence::threadfence_block();
+}
 
 #[inline(always)]
 const fn warp_striped_local<const THREADS: usize, const ITEMS: usize>(

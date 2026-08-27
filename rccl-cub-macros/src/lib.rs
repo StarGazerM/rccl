@@ -581,6 +581,7 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                 const ITEMS: usize,
                 const K_SIZE: usize,
                 const USE_LOAD_TO_SHARED: bool,
+                const SHARED_BYTES: usize,
             >(
                 first: &[K],
                 second: &[K],
@@ -599,6 +600,7 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                     ITEMS,
                     K_SIZE,
                     USE_LOAD_TO_SHARED,
+                    SHARED_BYTES,
                 >(
                     first,
                     second,
@@ -627,6 +629,7 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                 const V_SIZE: usize,
                 const USE_LOAD_TO_SHARED_KEYS: bool,
                 const USE_LOAD_TO_SHARED_VALUES: bool,
+                const SHARED_BYTES: usize,
             >(
                 first_keys: &[K],
                 first_values: &[V],
@@ -652,6 +655,7 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                     V_SIZE,
                     USE_LOAD_TO_SHARED_KEYS,
                     USE_LOAD_TO_SHARED_VALUES,
+                    SHARED_BYTES,
                 >(
                     first_keys,
                     first_values,
@@ -674,7 +678,12 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                 dynamic_shared_range = (0, 49152),
                 dynamic_shared_alignment = 16,
             )]
-            pub fn device_merge_sort_block_keys_256<K, F, const ITEMS: usize>(
+            pub fn device_merge_sort_block_keys_256<
+                K,
+                F,
+                const ITEMS: usize,
+                const SHARED_BYTES: usize,
+            >(
                 input: &[K],
                 order: F,
                 output: DisjointSlice<K, LinearTiles<ITEMS>>,
@@ -683,7 +692,7 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                 K: Copy,
                 F: Fn(&K, &K) -> ::core::cmp::Ordering + Copy,
             {
-                ::rccl_cub::__private::merge_sort_block_keys_agent::<K, F, 256, ITEMS>(
+                ::rccl_cub::__private::merge_sort_block_keys_agent::<K, F, 256, ITEMS, SHARED_BYTES>(
                     input,
                     order,
                     output,
@@ -700,7 +709,12 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                 dynamic_shared_range = (0, 49152),
                 dynamic_shared_alignment = 16,
             )]
-            pub fn device_merge_sort_block_keys_in_place_256<K, F, const ITEMS: usize>(
+            pub fn device_merge_sort_block_keys_in_place_256<
+                K,
+                F,
+                const ITEMS: usize,
+                const SHARED_BYTES: usize,
+            >(
                 order: F,
                 output: DisjointSlice<K, LinearTiles<ITEMS>>,
             )
@@ -708,7 +722,7 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                 K: Copy,
                 F: Fn(&K, &K) -> ::core::cmp::Ordering + Copy,
             {
-                ::rccl_cub::__private::merge_sort_block_keys_in_place_agent::<K, F, 256, ITEMS>(
+                ::rccl_cub::__private::merge_sort_block_keys_in_place_agent::<K, F, 256, ITEMS, SHARED_BYTES>(
                     order,
                     output,
                     launch_context,
@@ -724,7 +738,12 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                 dynamic_shared_range = (0, 49152),
                 dynamic_shared_alignment = 16,
             )]
-            pub fn device_merge_sort_block_keys_512<K, F, const ITEMS: usize>(
+            pub fn device_merge_sort_block_keys_512<
+                K,
+                F,
+                const ITEMS: usize,
+                const SHARED_BYTES: usize,
+            >(
                 input: &[K],
                 order: F,
                 output: DisjointSlice<K, LinearTiles<ITEMS>>,
@@ -733,7 +752,7 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                 K: Copy,
                 F: Fn(&K, &K) -> ::core::cmp::Ordering + Copy,
             {
-                ::rccl_cub::__private::merge_sort_block_keys_agent::<K, F, 512, ITEMS>(
+                ::rccl_cub::__private::merge_sort_block_keys_agent::<K, F, 512, ITEMS, SHARED_BYTES>(
                     input,
                     order,
                     output,
@@ -750,7 +769,12 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                 dynamic_shared_range = (0, 49152),
                 dynamic_shared_alignment = 16,
             )]
-            pub fn device_merge_sort_block_keys_in_place_512<K, F, const ITEMS: usize>(
+            pub fn device_merge_sort_block_keys_in_place_512<
+                K,
+                F,
+                const ITEMS: usize,
+                const SHARED_BYTES: usize,
+            >(
                 order: F,
                 output: DisjointSlice<K, LinearTiles<ITEMS>>,
             )
@@ -758,7 +782,7 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                 K: Copy,
                 F: Fn(&K, &K) -> ::core::cmp::Ordering + Copy,
             {
-                ::rccl_cub::__private::merge_sort_block_keys_in_place_agent::<K, F, 512, ITEMS>(
+                ::rccl_cub::__private::merge_sort_block_keys_in_place_agent::<K, F, 512, ITEMS, SHARED_BYTES>(
                     order,
                     output,
                     launch_context,
@@ -774,7 +798,13 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                 dynamic_shared_range = (0, 49152),
                 dynamic_shared_alignment = 16,
             )]
-            pub fn device_merge_sort_block_pairs_256<K, V, F, const ITEMS: usize>(
+            pub fn device_merge_sort_block_pairs_256<
+                K,
+                V,
+                F,
+                const ITEMS: usize,
+                const SHARED_BYTES: usize,
+            >(
                 input_keys: &[K],
                 input_values: &[V],
                 order: F,
@@ -786,7 +816,7 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                 V: Copy,
                 F: Fn(&K, &K) -> ::core::cmp::Ordering + Copy,
             {
-                ::rccl_cub::__private::merge_sort_block_pairs_agent::<K, V, F, 256, ITEMS>(
+                ::rccl_cub::__private::merge_sort_block_pairs_agent::<K, V, F, 256, ITEMS, SHARED_BYTES>(
                     input_keys,
                     input_values,
                     order,
@@ -805,7 +835,13 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                 dynamic_shared_range = (0, 49152),
                 dynamic_shared_alignment = 16,
             )]
-            pub fn device_merge_sort_block_pairs_in_place_256<K, V, F, const ITEMS: usize>(
+            pub fn device_merge_sort_block_pairs_in_place_256<
+                K,
+                V,
+                F,
+                const ITEMS: usize,
+                const SHARED_BYTES: usize,
+            >(
                 order: F,
                 output_keys: DisjointSlice<K, LinearTiles<ITEMS>>,
                 output_values: DisjointSlice<V, LinearTiles<ITEMS>>,
@@ -821,6 +857,7 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                     F,
                     256,
                     ITEMS,
+                    SHARED_BYTES,
                 >(order, output_keys, output_values, launch_context);
             }
 
@@ -833,7 +870,13 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                 dynamic_shared_range = (0, 49152),
                 dynamic_shared_alignment = 16,
             )]
-            pub fn device_merge_sort_block_pairs_512<K, V, F, const ITEMS: usize>(
+            pub fn device_merge_sort_block_pairs_512<
+                K,
+                V,
+                F,
+                const ITEMS: usize,
+                const SHARED_BYTES: usize,
+            >(
                 input_keys: &[K],
                 input_values: &[V],
                 order: F,
@@ -845,7 +888,7 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                 V: Copy,
                 F: Fn(&K, &K) -> ::core::cmp::Ordering + Copy,
             {
-                ::rccl_cub::__private::merge_sort_block_pairs_agent::<K, V, F, 512, ITEMS>(
+                ::rccl_cub::__private::merge_sort_block_pairs_agent::<K, V, F, 512, ITEMS, SHARED_BYTES>(
                     input_keys,
                     input_values,
                     order,
@@ -864,7 +907,13 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                 dynamic_shared_range = (0, 49152),
                 dynamic_shared_alignment = 16,
             )]
-            pub fn device_merge_sort_block_pairs_in_place_512<K, V, F, const ITEMS: usize>(
+            pub fn device_merge_sort_block_pairs_in_place_512<
+                K,
+                V,
+                F,
+                const ITEMS: usize,
+                const SHARED_BYTES: usize,
+            >(
                 order: F,
                 output_keys: DisjointSlice<K, LinearTiles<ITEMS>>,
                 output_values: DisjointSlice<V, LinearTiles<ITEMS>>,
@@ -880,6 +929,7 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                     F,
                     512,
                     ITEMS,
+                    SHARED_BYTES,
                 >(order, output_keys, output_values, launch_context);
             }
 
@@ -924,7 +974,12 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                 dynamic_shared_range = (0, 49152),
                 dynamic_shared_alignment = 16,
             )]
-            pub fn device_merge_sort_merge_keys_256<K, F, const ITEMS: usize>(
+            pub fn device_merge_sort_merge_keys_256<
+                K,
+                F,
+                const ITEMS: usize,
+                const SHARED_BYTES: usize,
+            >(
                 source: &[K],
                 partitions: &[usize],
                 target_merged_tiles: usize,
@@ -935,7 +990,7 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                 K: Copy,
                 F: Fn(&K, &K) -> ::core::cmp::Ordering + Copy,
             {
-                ::rccl_cub::__private::merge_sort_merge_keys_agent::<K, F, 256, ITEMS>(
+                ::rccl_cub::__private::merge_sort_merge_keys_agent::<K, F, 256, ITEMS, SHARED_BYTES>(
                     source,
                     partitions,
                     target_merged_tiles,
@@ -954,7 +1009,12 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                 dynamic_shared_range = (0, 49152),
                 dynamic_shared_alignment = 16,
             )]
-            pub fn device_merge_sort_merge_keys_512<K, F, const ITEMS: usize>(
+            pub fn device_merge_sort_merge_keys_512<
+                K,
+                F,
+                const ITEMS: usize,
+                const SHARED_BYTES: usize,
+            >(
                 source: &[K],
                 partitions: &[usize],
                 target_merged_tiles: usize,
@@ -965,7 +1025,7 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                 K: Copy,
                 F: Fn(&K, &K) -> ::core::cmp::Ordering + Copy,
             {
-                ::rccl_cub::__private::merge_sort_merge_keys_agent::<K, F, 512, ITEMS>(
+                ::rccl_cub::__private::merge_sort_merge_keys_agent::<K, F, 512, ITEMS, SHARED_BYTES>(
                     source,
                     partitions,
                     target_merged_tiles,
@@ -984,7 +1044,13 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                 dynamic_shared_range = (0, 49152),
                 dynamic_shared_alignment = 16,
             )]
-            pub fn device_merge_sort_merge_pairs_256<K, V, F, const ITEMS: usize>(
+            pub fn device_merge_sort_merge_pairs_256<
+                K,
+                V,
+                F,
+                const ITEMS: usize,
+                const SHARED_BYTES: usize,
+            >(
                 source_keys: &[K],
                 source_values: &[V],
                 partitions: &[usize],
@@ -998,7 +1064,7 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                 V: Copy,
                 F: Fn(&K, &K) -> ::core::cmp::Ordering + Copy,
             {
-                ::rccl_cub::__private::merge_sort_merge_pairs_agent::<K, V, F, 256, ITEMS>(
+                ::rccl_cub::__private::merge_sort_merge_pairs_agent::<K, V, F, 256, ITEMS, SHARED_BYTES>(
                     source_keys,
                     source_values,
                     partitions,
@@ -1019,7 +1085,13 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                 dynamic_shared_range = (0, 49152),
                 dynamic_shared_alignment = 16,
             )]
-            pub fn device_merge_sort_merge_pairs_512<K, V, F, const ITEMS: usize>(
+            pub fn device_merge_sort_merge_pairs_512<
+                K,
+                V,
+                F,
+                const ITEMS: usize,
+                const SHARED_BYTES: usize,
+            >(
                 source_keys: &[K],
                 source_values: &[V],
                 partitions: &[usize],
@@ -1033,7 +1105,7 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                 V: Copy,
                 F: Fn(&K, &K) -> ::core::cmp::Ordering + Copy,
             {
-                ::rccl_cub::__private::merge_sort_merge_pairs_agent::<K, V, F, 512, ITEMS>(
+                ::rccl_cub::__private::merge_sort_merge_pairs_agent::<K, V, F, 512, ITEMS, SHARED_BYTES>(
                     source_keys,
                     source_values,
                     partitions,
@@ -1606,7 +1678,7 @@ fn merge_keys_launch(
                         );
                     match __rccl_execution
                         .module()
-                        .prepare_device_merge_keys_agent::<#key_type, _, #items, #key_size, #use_load_to_shared>(
+                        .prepare_device_merge_keys_agent::<#key_type, _, #items, #key_size, #use_load_to_shared, #shared_bytes>(
                             __rccl_agent_launch,
                         )
                     {
@@ -1617,7 +1689,7 @@ fn merge_keys_launch(
                         }
                         ::core::result::Result::Ok(__rccl_agent_prepared) => __rccl_execution
                             .module()
-                            .device_merge_keys_agent::<#key_type, _, #items, #key_size, #use_load_to_shared>(
+                            .device_merge_keys_agent::<#key_type, _, #items, #key_size, #use_load_to_shared, #shared_bytes>(
                                 __rccl_execution.stream(),
                                 &__rccl_agent_prepared,
                                 __rccl_first,
@@ -1690,7 +1762,7 @@ fn merge_pairs_launch(
                         );
                     match __rccl_execution
                         .module()
-                        .prepare_device_merge_pairs_agent::<#key_type, #value_type, _, #items, #key_size, #value_size, #use_load_to_shared_keys, #use_load_to_shared_values>(
+                        .prepare_device_merge_pairs_agent::<#key_type, #value_type, _, #items, #key_size, #value_size, #use_load_to_shared_keys, #use_load_to_shared_values, #shared_bytes>(
                             __rccl_agent_launch,
                         )
                     {
@@ -1701,7 +1773,7 @@ fn merge_pairs_launch(
                         }
                         ::core::result::Result::Ok(__rccl_agent_prepared) => __rccl_execution
                             .module()
-                            .device_merge_pairs_agent::<#key_type, #value_type, _, #items, #key_size, #value_size, #use_load_to_shared_keys, #use_load_to_shared_values>(
+                            .device_merge_pairs_agent::<#key_type, #value_type, _, #items, #key_size, #value_size, #use_load_to_shared_keys, #use_load_to_shared_values, #shared_bytes>(
                                 __rccl_execution.stream(),
                                 &__rccl_agent_prepared,
                                 __rccl_first_keys,
@@ -2041,7 +2113,7 @@ fn expand_device_merge_sort_keys(
                     let mut __rccl_result = if __rccl_ping {
                         match __rccl_execution
                             .module()
-                            .#prepare_block_in_place::<#key_type, _, #items>(__rccl_agent_launch)
+                            .#prepare_block_in_place::<#key_type, _, #items, #shared_bytes>(__rccl_agent_launch)
                         {
                             ::core::result::Result::Err(__rccl_error) => {
                                 ::core::result::Result::Err(
@@ -2050,7 +2122,7 @@ fn expand_device_merge_sort_keys(
                             }
                             ::core::result::Result::Ok(__rccl_prepared) => __rccl_execution
                                 .module()
-                                .#launch_block_in_place::<#key_type, _, #items>(
+                                .#launch_block_in_place::<#key_type, _, #items, #shared_bytes>(
                                     __rccl_execution.stream(),
                                     &__rccl_prepared,
                                     __rccl_order,
@@ -2061,7 +2133,7 @@ fn expand_device_merge_sort_keys(
                     } else {
                         match __rccl_execution
                             .module()
-                            .#prepare_block::<#key_type, _, #items>(__rccl_agent_launch)
+                            .#prepare_block::<#key_type, _, #items, #shared_bytes>(__rccl_agent_launch)
                         {
                             ::core::result::Result::Err(__rccl_error) => {
                                 ::core::result::Result::Err(
@@ -2070,7 +2142,7 @@ fn expand_device_merge_sort_keys(
                             }
                             ::core::result::Result::Ok(__rccl_prepared) => __rccl_execution
                                 .module()
-                                .#launch_block::<#key_type, _, #items>(
+                                .#launch_block::<#key_type, _, #items, #shared_bytes>(
                                     __rccl_execution.stream(),
                                     &__rccl_prepared,
                                     &*__rccl_keys,
@@ -2137,7 +2209,7 @@ fn expand_device_merge_sort_keys(
                         if __rccl_result.is_ok() {
                             __rccl_result = match __rccl_execution
                                 .module()
-                                .#prepare_merge::<#key_type, _, #items>(__rccl_agent_launch)
+                                .#prepare_merge::<#key_type, _, #items, #shared_bytes>(__rccl_agent_launch)
                             {
                                 ::core::result::Result::Err(__rccl_error) => {
                                     ::core::result::Result::Err(
@@ -2150,6 +2222,7 @@ fn expand_device_merge_sort_keys(
                                             #key_type,
                                             _,
                                             #items,
+                                            #shared_bytes,
                                         >(
                                             __rccl_execution.stream(),
                                             &__rccl_prepared,
@@ -2164,6 +2237,7 @@ fn expand_device_merge_sort_keys(
                                             #key_type,
                                             _,
                                             #items,
+                                            #shared_bytes,
                                         >(
                                             __rccl_execution.stream(),
                                             &__rccl_prepared,
@@ -2270,7 +2344,7 @@ fn expand_device_merge_sort_keys_copy(
                         );
                     let mut __rccl_result = match __rccl_execution
                         .module()
-                        .#prepare_block::<#key_type, _, #items>(__rccl_agent_launch)
+                        .#prepare_block::<#key_type, _, #items, #shared_bytes>(__rccl_agent_launch)
                     {
                         ::core::result::Result::Err(__rccl_error) => {
                             ::core::result::Result::Err(
@@ -2279,7 +2353,7 @@ fn expand_device_merge_sort_keys_copy(
                         }
                         ::core::result::Result::Ok(__rccl_prepared) => {
                             let __rccl_launch_result = if __rccl_ping {
-                                __rccl_execution.module().#launch_block::<#key_type, _, #items>(
+                                __rccl_execution.module().#launch_block::<#key_type, _, #items, #shared_bytes>(
                                     __rccl_execution.stream(),
                                     &__rccl_prepared,
                                     __rccl_input,
@@ -2287,7 +2361,7 @@ fn expand_device_merge_sort_keys_copy(
                                     &mut *__rccl_output,
                                 )
                             } else {
-                                __rccl_execution.module().#launch_block::<#key_type, _, #items>(
+                                __rccl_execution.module().#launch_block::<#key_type, _, #items, #shared_bytes>(
                                     __rccl_execution.stream(),
                                     &__rccl_prepared,
                                     __rccl_input,
@@ -2355,7 +2429,7 @@ fn expand_device_merge_sort_keys_copy(
                         if __rccl_result.is_ok() {
                             __rccl_result = match __rccl_execution
                                 .module()
-                                .#prepare_merge::<#key_type, _, #items>(__rccl_agent_launch)
+                                .#prepare_merge::<#key_type, _, #items, #shared_bytes>(__rccl_agent_launch)
                             {
                                 ::core::result::Result::Err(__rccl_error) => {
                                     ::core::result::Result::Err(
@@ -2368,6 +2442,7 @@ fn expand_device_merge_sort_keys_copy(
                                             #key_type,
                                             _,
                                             #items,
+                                            #shared_bytes,
                                         >(
                                             __rccl_execution.stream(),
                                             &__rccl_prepared,
@@ -2382,6 +2457,7 @@ fn expand_device_merge_sort_keys_copy(
                                             #key_type,
                                             _,
                                             #items,
+                                            #shared_bytes,
                                         >(
                                             __rccl_execution.stream(),
                                             &__rccl_prepared,
@@ -2512,7 +2588,7 @@ fn expand_device_merge_sort_pairs_operation(
             quote! {
                 match __rccl_execution
                     .module()
-                    .#prepare_block::<#key_type, #value_type, _, #items>(__rccl_agent_launch)
+                    .#prepare_block::<#key_type, #value_type, _, #items, #shared_bytes>(__rccl_agent_launch)
                 {
                     ::core::result::Result::Err(__rccl_error) => {
                         ::core::result::Result::Err(
@@ -2526,6 +2602,7 @@ fn expand_device_merge_sort_pairs_operation(
                                 #value_type,
                                 _,
                                 #items,
+                                #shared_bytes,
                             >(
                                 __rccl_execution.stream(),
                                 &__rccl_prepared,
@@ -2541,6 +2618,7 @@ fn expand_device_merge_sort_pairs_operation(
                                 #value_type,
                                 _,
                                 #items,
+                                #shared_bytes,
                             >(
                                 __rccl_execution.stream(),
                                 &__rccl_prepared,
@@ -2576,7 +2654,7 @@ fn expand_device_merge_sort_pairs_operation(
                 if __rccl_ping {
                     match __rccl_execution
                         .module()
-                        .#prepare_block_in_place::<#key_type, #value_type, _, #items>(
+                        .#prepare_block_in_place::<#key_type, #value_type, _, #items, #shared_bytes>(
                             __rccl_agent_launch,
                         )
                     {
@@ -2587,7 +2665,7 @@ fn expand_device_merge_sort_pairs_operation(
                         }
                         ::core::result::Result::Ok(__rccl_prepared) => __rccl_execution
                             .module()
-                            .#launch_block_in_place::<#key_type, #value_type, _, #items>(
+                            .#launch_block_in_place::<#key_type, #value_type, _, #items, #shared_bytes>(
                                 __rccl_execution.stream(),
                                 &__rccl_prepared,
                                 __rccl_order,
@@ -2599,7 +2677,7 @@ fn expand_device_merge_sort_pairs_operation(
                 } else {
                     match __rccl_execution
                         .module()
-                        .#prepare_block::<#key_type, #value_type, _, #items>(__rccl_agent_launch)
+                        .#prepare_block::<#key_type, #value_type, _, #items, #shared_bytes>(__rccl_agent_launch)
                     {
                         ::core::result::Result::Err(__rccl_error) => {
                             ::core::result::Result::Err(
@@ -2608,7 +2686,7 @@ fn expand_device_merge_sort_pairs_operation(
                         }
                         ::core::result::Result::Ok(__rccl_prepared) => __rccl_execution
                             .module()
-                            .#launch_block::<#key_type, #value_type, _, #items>(
+                            .#launch_block::<#key_type, #value_type, _, #items, #shared_bytes>(
                                 __rccl_execution.stream(),
                                 &__rccl_prepared,
                                 &*__rccl_primary_keys,
@@ -2729,7 +2807,7 @@ fn expand_device_merge_sort_pairs_operation(
                         if __rccl_result.is_ok() {
                             __rccl_result = match __rccl_execution
                                 .module()
-                                .#prepare_merge::<#key_type, #value_type, _, #items>(
+                                .#prepare_merge::<#key_type, #value_type, _, #items, #shared_bytes>(
                                     __rccl_agent_launch,
                                 )
                             {
@@ -2745,6 +2823,7 @@ fn expand_device_merge_sort_pairs_operation(
                                             #value_type,
                                             _,
                                             #items,
+                                            #shared_bytes,
                                         >(
                                             __rccl_execution.stream(),
                                             &__rccl_prepared,
@@ -2762,6 +2841,7 @@ fn expand_device_merge_sort_pairs_operation(
                                             #value_type,
                                             _,
                                             #items,
+                                            #shared_bytes,
                                         >(
                                             __rccl_execution.stream(),
                                             &__rccl_prepared,
@@ -4110,11 +4190,9 @@ mod tests {
             .expect("primitive layout must select the pinned merge policies")
             .to_string();
         assert!(key_text.contains("prepare_device_partition_merge_path :: < u32 , _ , 15usize >"));
-        assert!(
-            key_text.contains(
-                "prepare_device_merge_keys_agent :: < u32 , _ , 15usize , 4usize , false >"
-            )
-        );
+        assert!(key_text.contains(
+            "prepare_device_merge_keys_agent :: < u32 , _ , 15usize , 4usize , false , 30736usize >"
+        ));
         assert!(key_text.contains("30736usize as u32"));
         assert!(!key_text.contains("prepare_device_merge_keys ::"));
         assert!(!key_text.contains("compute_capability"));
@@ -4129,11 +4207,9 @@ mod tests {
             .expect("sm_52 must select the pinned fallback policy at expansion time")
             .to_string();
         assert!(sm52_text.contains("prepare_device_partition_merge_path :: < u32 , _ , 13usize >"));
-        assert!(
-            sm52_text.contains(
-                "prepare_device_merge_keys_agent :: < u32 , _ , 13usize , 4usize , false >"
-            )
-        );
+        assert!(sm52_text.contains(
+            "prepare_device_merge_keys_agent :: < u32 , _ , 13usize , 4usize , false , 26640usize >"
+        ));
         assert!(!sm52_text.contains("compute_capability"));
 
         let pairs: call::DeviceMergePairsCall = syn::parse_quote! {
@@ -4154,7 +4230,7 @@ mod tests {
             .to_string();
         assert!(pair_text.contains("prepare_device_partition_merge_path :: < i32 , _ , 5usize >"));
         assert!(pair_text.contains(
-            "prepare_device_merge_pairs_agent :: < i32 , u64 , _ , 5usize , 4usize , 8usize , false , false >"
+            "prepare_device_merge_pairs_agent :: < i32 , u64 , _ , 5usize , 4usize , 8usize , false , false , 20496usize >"
         ));
         assert!(pair_text.contains("20496usize as u32"));
 
@@ -4167,11 +4243,9 @@ mod tests {
         let async_key_text = expand_device_merge_keys(async_keys)
             .expect("the SM80 byte-key policy must select BlockLoadToShared")
             .to_string();
-        assert!(
-            async_key_text.contains(
-                "prepare_device_merge_keys_agent :: < u8 , _ , 15usize , 1usize , true >"
-            )
-        );
+        assert!(async_key_text.contains(
+            "prepare_device_merge_keys_agent :: < u8 , _ , 15usize , 1usize , true , 7760usize >"
+        ));
         assert!(async_key_text.contains("7760usize as u32"));
 
         let async_pairs: call::DeviceMergePairsCall = syn::parse_quote! {
@@ -4191,7 +4265,7 @@ mod tests {
             .expect("the SM80 i32/u8 policy must stage both arrays through shared memory")
             .to_string();
         assert!(async_pair_text.contains(
-            "prepare_device_merge_pairs_agent :: < i32 , u8 , _ , 12usize , 4usize , 1usize , true , true >"
+            "prepare_device_merge_pairs_agent :: < i32 , u8 , _ , 12usize , 4usize , 1usize , true , true , 24656usize >"
         ));
         assert!(async_pair_text.contains("24656usize as u32"));
 
@@ -4212,7 +4286,7 @@ mod tests {
             .expect("the SM52 pair policy must retain BlockExchange padding")
             .to_string();
         assert!(padded_pair_text.contains(
-            "prepare_device_merge_pairs_agent :: < u16 , u32 , _ , 8usize , 2usize , 4usize , false , false >"
+            "prepare_device_merge_pairs_agent :: < u16 , u32 , _ , 8usize , 2usize , 4usize , false , false , 16912usize >"
         ));
         assert!(padded_pair_text.contains("16912usize as u32"));
 
