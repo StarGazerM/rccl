@@ -199,9 +199,11 @@ struct PrimitiveRadix {
 struct PrimitiveRadixLowering {
     bit_type: syn::Type,
     sentinel: proc_macro2::TokenStream,
+    default_key: proc_macro2::TokenStream,
     to_ordered: proc_macro2::TokenStream,
     from_ordered: proc_macro2::TokenStream,
     digit: proc_macro2::TokenStream,
+    rank_digit: proc_macro2::TokenStream,
 }
 
 /// Pinned CUB `detail::RegBoundScaling` evaluated by the proc macro.
@@ -224,147 +226,139 @@ fn primitive_radix_lowering(
     primitive: PrimitiveRadix,
     descending: bool,
 ) -> syn::Result<PrimitiveRadixLowering> {
-    let invert32 = if descending {
-        quote!(let __rccl_ordered = !__rccl_ordered;)
-    } else {
-        quote!()
-    };
-    let uninvert32 = invert32.clone();
-    let invert64 = invert32.clone();
-    let uninvert64 = invert32.clone();
     match (primitive.bits, primitive.kind) {
-        (32, PrimitiveRadixKind::Unsigned) => Ok(PrimitiveRadixLowering {
-            bit_type: syn::parse_quote!(u32),
-            sentinel: quote!(u32::MAX),
-            to_ordered: quote!(|__rccl_key: #key_type| {
-                let __rccl_ordered = __rccl_key;
-                #invert32
-                __rccl_ordered
-            }),
-            from_ordered: quote!(|__rccl_ordered: u32| {
-                let __rccl_ordered = __rccl_ordered;
-                #uninvert32
-                __rccl_ordered
-            }),
-            digit: quote!(|__rccl_ordered: u32, __rccl_bit: u32, __rccl_bits: u32| {
-                ((__rccl_ordered >> __rccl_bit) & ((1u32 << __rccl_bits) - 1)) as u32
-            }),
-        }),
-        (64, PrimitiveRadixKind::Unsigned) => Ok(PrimitiveRadixLowering {
-            bit_type: syn::parse_quote!(u64),
-            sentinel: quote!(u64::MAX),
-            to_ordered: quote!(|__rccl_key: #key_type| {
-                let __rccl_ordered = __rccl_key;
-                #invert64
-                __rccl_ordered
-            }),
-            from_ordered: quote!(|__rccl_ordered: u64| {
-                let __rccl_ordered = __rccl_ordered;
-                #uninvert64
-                __rccl_ordered
-            }),
-            digit: quote!(|__rccl_ordered: u64, __rccl_bit: u32, __rccl_bits: u32| {
-                ((__rccl_ordered >> __rccl_bit) & ((1u64 << __rccl_bits) - 1)) as u32
-            }),
-        }),
-        (32, PrimitiveRadixKind::Signed) => Ok(PrimitiveRadixLowering {
-            bit_type: syn::parse_quote!(u32),
-            sentinel: quote!(u32::MAX),
-            to_ordered: quote!(|__rccl_key: #key_type| {
-                let __rccl_ordered = (__rccl_key as u32) ^ 0x8000_0000u32;
-                #invert32
-                __rccl_ordered
-            }),
-            from_ordered: quote!(|__rccl_ordered: u32| {
-                let __rccl_ordered = __rccl_ordered;
-                #uninvert32
-                (__rccl_ordered ^ 0x8000_0000u32) as #key_type
-            }),
-            digit: quote!(|__rccl_ordered: u32, __rccl_bit: u32, __rccl_bits: u32| {
-                ((__rccl_ordered >> __rccl_bit) & ((1u32 << __rccl_bits) - 1)) as u32
-            }),
-        }),
-        (64, PrimitiveRadixKind::Signed) => Ok(PrimitiveRadixLowering {
-            bit_type: syn::parse_quote!(u64),
-            sentinel: quote!(u64::MAX),
-            to_ordered: quote!(|__rccl_key: #key_type| {
-                let __rccl_ordered = (__rccl_key as u64) ^ 0x8000_0000_0000_0000u64;
-                #invert64
-                __rccl_ordered
-            }),
-            from_ordered: quote!(|__rccl_ordered: u64| {
-                let __rccl_ordered = __rccl_ordered;
-                #uninvert64
-                (__rccl_ordered ^ 0x8000_0000_0000_0000u64) as #key_type
-            }),
-            digit: quote!(|__rccl_ordered: u64, __rccl_bit: u32, __rccl_bits: u32| {
-                ((__rccl_ordered >> __rccl_bit) & ((1u64 << __rccl_bits) - 1)) as u32
-            }),
-        }),
-        (32, PrimitiveRadixKind::Floating) => Ok(PrimitiveRadixLowering {
-            bit_type: syn::parse_quote!(u32),
-            sentinel: quote!(u32::MAX),
-            to_ordered: quote!(|__rccl_key: #key_type| {
-                let __rccl_raw = __rccl_key.to_bits();
-                let __rccl_ordered = if __rccl_raw & 0x8000_0000u32 != 0 {
-                    !__rccl_raw
-                } else {
-                    __rccl_raw ^ 0x8000_0000u32
-                };
-                #invert32
-                __rccl_ordered
-            }),
-            from_ordered: quote!(|__rccl_ordered: u32| {
-                let __rccl_ordered = __rccl_ordered;
-                #uninvert32
-                let __rccl_raw = if __rccl_ordered & 0x8000_0000u32 != 0 {
-                    __rccl_ordered ^ 0x8000_0000u32
-                } else {
-                    !__rccl_ordered
-                };
-                #key_type::from_bits(__rccl_raw)
-            }),
-            digit: quote!(|__rccl_ordered: u32, __rccl_bit: u32, __rccl_bits: u32| {
-                let __rccl_zero_ordered = if __rccl_ordered == 0x7fff_ffffu32 {
-                    0x8000_0000u32
-                } else {
-                    __rccl_ordered
-                };
-                ((__rccl_zero_ordered >> __rccl_bit) & ((1u32 << __rccl_bits) - 1)) as u32
-            }),
-        }),
-        (64, PrimitiveRadixKind::Floating) => Ok(PrimitiveRadixLowering {
-            bit_type: syn::parse_quote!(u64),
-            sentinel: quote!(u64::MAX),
-            to_ordered: quote!(|__rccl_key: #key_type| {
-                let __rccl_raw = __rccl_key.to_bits();
-                let __rccl_ordered = if __rccl_raw & 0x8000_0000_0000_0000u64 != 0 {
-                    !__rccl_raw
-                } else {
-                    __rccl_raw ^ 0x8000_0000_0000_0000u64
-                };
-                #invert64
-                __rccl_ordered
-            }),
-            from_ordered: quote!(|__rccl_ordered: u64| {
-                let __rccl_ordered = __rccl_ordered;
-                #uninvert64
-                let __rccl_raw = if __rccl_ordered & 0x8000_0000_0000_0000u64 != 0 {
-                    __rccl_ordered ^ 0x8000_0000_0000_0000u64
-                } else {
-                    !__rccl_ordered
-                };
-                #key_type::from_bits(__rccl_raw)
-            }),
-            digit: quote!(|__rccl_ordered: u64, __rccl_bit: u32, __rccl_bits: u32| {
-                let __rccl_zero_ordered = if __rccl_ordered == 0x7fff_ffff_ffff_ffffu64 {
-                    0x8000_0000_0000_0000u64
-                } else {
-                    __rccl_ordered
-                };
-                ((__rccl_zero_ordered >> __rccl_bit) & ((1u64 << __rccl_bits) - 1)) as u32
-            }),
-        }),
+        (32, PrimitiveRadixKind::Unsigned) => {
+            let (to_ordered, from_ordered) = if descending {
+                (
+                    quote!(::rccl_cub::__private::radix_u32_to_ordered_descending),
+                    quote!(::rccl_cub::__private::radix_u32_from_ordered_descending),
+                )
+            } else {
+                (
+                    quote!(::rccl_cub::__private::radix_u32_to_ordered_ascending),
+                    quote!(::rccl_cub::__private::radix_u32_from_ordered_ascending),
+                )
+            };
+            Ok(PrimitiveRadixLowering {
+                bit_type: syn::parse_quote!(u32),
+                sentinel: quote!(u32::MAX),
+                default_key: quote!(::rccl_cub::__private::radix_default_u32),
+                to_ordered,
+                from_ordered,
+                digit: quote!(::rccl_cub::__private::radix_digit_u32),
+                rank_digit: quote!(::rccl_cub::__private::radix_rank_digit_u32),
+            })
+        }
+        (32, PrimitiveRadixKind::Signed) => {
+            let (to_ordered, from_ordered) = if descending {
+                (
+                    quote!(::rccl_cub::__private::radix_i32_to_ordered_descending),
+                    quote!(::rccl_cub::__private::radix_i32_from_ordered_descending),
+                )
+            } else {
+                (
+                    quote!(::rccl_cub::__private::radix_i32_to_ordered_ascending),
+                    quote!(::rccl_cub::__private::radix_i32_from_ordered_ascending),
+                )
+            };
+            Ok(PrimitiveRadixLowering {
+                bit_type: syn::parse_quote!(u32),
+                sentinel: quote!(u32::MAX),
+                default_key: quote!(::rccl_cub::__private::radix_default_u32),
+                to_ordered,
+                from_ordered,
+                digit: quote!(::rccl_cub::__private::radix_digit_u32),
+                rank_digit: quote!(::rccl_cub::__private::radix_rank_digit_u32),
+            })
+        }
+        (32, PrimitiveRadixKind::Floating) => {
+            let (to_ordered, from_ordered) = if descending {
+                (
+                    quote!(::rccl_cub::__private::radix_f32_to_ordered_descending),
+                    quote!(::rccl_cub::__private::radix_f32_from_ordered_descending),
+                )
+            } else {
+                (
+                    quote!(::rccl_cub::__private::radix_f32_to_ordered_ascending),
+                    quote!(::rccl_cub::__private::radix_f32_from_ordered_ascending),
+                )
+            };
+            Ok(PrimitiveRadixLowering {
+                bit_type: syn::parse_quote!(u32),
+                sentinel: quote!(u32::MAX),
+                default_key: quote!(::rccl_cub::__private::radix_default_u32),
+                to_ordered,
+                from_ordered,
+                digit: quote!(::rccl_cub::__private::radix_float_digit_u32),
+                rank_digit: quote!(::rccl_cub::__private::radix_float_rank_digit_u32),
+            })
+        }
+        (64, PrimitiveRadixKind::Unsigned) => {
+            let (to_ordered, from_ordered) = if descending {
+                (
+                    quote!(::rccl_cub::__private::radix_u64_to_ordered_descending),
+                    quote!(::rccl_cub::__private::radix_u64_from_ordered_descending),
+                )
+            } else {
+                (
+                    quote!(::rccl_cub::__private::radix_u64_to_ordered_ascending),
+                    quote!(::rccl_cub::__private::radix_u64_from_ordered_ascending),
+                )
+            };
+            Ok(PrimitiveRadixLowering {
+                bit_type: syn::parse_quote!(u64),
+                sentinel: quote!(u64::MAX),
+                default_key: quote!(::rccl_cub::__private::radix_default_u64),
+                to_ordered,
+                from_ordered,
+                digit: quote!(::rccl_cub::__private::radix_digit_u64),
+                rank_digit: quote!(::rccl_cub::__private::radix_rank_digit_u64),
+            })
+        }
+        (64, PrimitiveRadixKind::Signed) => {
+            let (to_ordered, from_ordered) = if descending {
+                (
+                    quote!(::rccl_cub::__private::radix_i64_to_ordered_descending),
+                    quote!(::rccl_cub::__private::radix_i64_from_ordered_descending),
+                )
+            } else {
+                (
+                    quote!(::rccl_cub::__private::radix_i64_to_ordered_ascending),
+                    quote!(::rccl_cub::__private::radix_i64_from_ordered_ascending),
+                )
+            };
+            Ok(PrimitiveRadixLowering {
+                bit_type: syn::parse_quote!(u64),
+                sentinel: quote!(u64::MAX),
+                default_key: quote!(::rccl_cub::__private::radix_default_u64),
+                to_ordered,
+                from_ordered,
+                digit: quote!(::rccl_cub::__private::radix_digit_u64),
+                rank_digit: quote!(::rccl_cub::__private::radix_rank_digit_u64),
+            })
+        }
+        (64, PrimitiveRadixKind::Floating) => {
+            let (to_ordered, from_ordered) = if descending {
+                (
+                    quote!(::rccl_cub::__private::radix_f64_to_ordered_descending),
+                    quote!(::rccl_cub::__private::radix_f64_from_ordered_descending),
+                )
+            } else {
+                (
+                    quote!(::rccl_cub::__private::radix_f64_to_ordered_ascending),
+                    quote!(::rccl_cub::__private::radix_f64_from_ordered_ascending),
+                )
+            };
+            Ok(PrimitiveRadixLowering {
+                bit_type: syn::parse_quote!(u64),
+                sentinel: quote!(u64::MAX),
+                default_key: quote!(::rccl_cub::__private::radix_default_u64),
+                to_ordered,
+                from_ordered,
+                digit: quote!(::rccl_cub::__private::radix_float_digit_u64),
+                rank_digit: quote!(::rccl_cub::__private::radix_float_rank_digit_u64),
+            })
+        }
         _ => Err(syn::Error::new_spanned(
             key_type,
             "the exact pinned SM80 one-sweep path requires a 32-bit or 64-bit primitive key; smaller keys use CUB's different multi-pass policy",
@@ -374,45 +368,6 @@ fn primitive_radix_lowering(
 
 /// Re-express CUB's second digit extraction as a distinct Rust operation.
 ///
-/// The one-sweep agent recomputes digits after ranking and its block scan. A
-/// second `>>` expression is folded back into the first phase by LLVM GVN,
-/// retaining every per-item digit across the synchronization boundary and
-/// reducing Policy800 occupancy. The proc macro has already proved that every
-/// pass is a complete byte at a byte-aligned offset, so rotate-and-mask has the
-/// same value. Floating keys must retain CUB's signed-zero equivalence in both
-/// phases; omitting it makes the histogram and rank disagree for `-0.0`.
-fn primitive_radix_rank_digit(primitive: PrimitiveRadix) -> proc_macro2::TokenStream {
-    match (primitive.bits, primitive.kind) {
-        (32, PrimitiveRadixKind::Floating) => {
-            quote!(|__rccl_ordered: u32, __rccl_bit: u32, __rccl_bits: u32| {
-                let __rccl_zero_ordered = if __rccl_ordered == 0x7fff_ffffu32 {
-                    0x8000_0000u32
-                } else {
-                    __rccl_ordered
-                };
-                (__rccl_zero_ordered.rotate_right(__rccl_bit) & ((1u32 << __rccl_bits) - 1)) as u32
-            })
-        }
-        (64, PrimitiveRadixKind::Floating) => {
-            quote!(|__rccl_ordered: u64, __rccl_bit: u32, __rccl_bits: u32| {
-                let __rccl_zero_ordered = if __rccl_ordered == 0x7fff_ffff_ffff_ffffu64 {
-                    0x8000_0000_0000_0000u64
-                } else {
-                    __rccl_ordered
-                };
-                (__rccl_zero_ordered.rotate_right(__rccl_bit) & ((1u64 << __rccl_bits) - 1)) as u32
-            })
-        }
-        (32, _) => quote!(|__rccl_ordered: u32, __rccl_bit: u32, __rccl_bits: u32| {
-            (__rccl_ordered.rotate_right(__rccl_bit) & ((1u32 << __rccl_bits) - 1)) as u32
-        }),
-        (64, _) => quote!(|__rccl_ordered: u64, __rccl_bit: u32, __rccl_bits: u32| {
-            (__rccl_ordered.rotate_right(__rccl_bit) & ((1u64 << __rccl_bits) - 1)) as u32
-        }),
-        _ => unreachable!("primitive radix widths are validated before lowering"),
-    }
-}
-
 fn primitive_radix(key_type: &syn::Type) -> syn::Result<PrimitiveRadix> {
     let syn::Type::Path(path) = key_type else {
         return Err(syn::Error::new_spanned(
@@ -2881,7 +2836,7 @@ fn expand_device_merge_sort_pairs_operation(
 fn expand_device_radix_sort_keys(
     call: call::DeviceRadixSortKeysCall,
 ) -> syn::Result<proc_macro2::TokenStream> {
-    expand_device_radix_sort_keys_order(call, false)
+    expand_device_radix_sort_keys_via_buffer(call, false)
 }
 
 fn expand_device_radix_sort_workspace(
@@ -2949,352 +2904,7 @@ fn expand_device_radix_sort_pairs_workspace(
 fn expand_device_radix_sort_keys_descending(
     call: call::DeviceRadixSortKeysCall,
 ) -> syn::Result<proc_macro2::TokenStream> {
-    expand_device_radix_sort_keys_order(call, true)
-}
-
-fn expand_device_radix_sort_keys_order(
-    call: call::DeviceRadixSortKeysCall,
-    descending: bool,
-) -> syn::Result<proc_macro2::TokenStream> {
-    let target = tmp_cuda_target(&call.target)?;
-    if !(80..90).contains(&target.capability) {
-        return Err(syn::Error::new_spanned(
-            call.target,
-            "this lowering contains the exact pinned Policy800 one-sweep graph only; another architecture must add its own macro-selected CUB policy",
-        ));
-    }
-    let primitive = primitive_radix(&call.key_type)?;
-    let lowering = primitive_radix_lowering(&call.key_type, primitive, descending)?;
-    let key_type = call.key_type;
-    let bit_type = lowering.bit_type;
-    let sentinel = lowering.sentinel;
-    let to_ordered = lowering.to_ordered;
-    let from_ordered = lowering.from_ordered;
-    let digit = lowering.digit;
-    // CUB recomputes digits after the rank callback and block scan. LLVM GVN
-    // otherwise retains all first-phase digit values across that boundary and
-    // halves Policy800 occupancy. Every primitive policy here executes complete
-    // eight-bit passes at byte-aligned offsets, so rotate-and-mask is the same
-    // digit extractor under the macro-proved pass domain, expressed as a
-    // distinct Rust operation for the second phase.
-    let rank_digit = primitive_radix_rank_digit(primitive);
-    let execution = call.execution;
-    let keys = call.keys;
-    let scratch_keys = call.scratch_keys;
-    let bins = call.bins;
-    let lookback = call.lookback;
-    let counters = call.counters;
-    let passes = primitive.bits.div_ceil(8) as usize;
-    let end_bit = primitive.bits;
-    let histogram_items = 16usize;
-    let bit_size = (primitive.bits / 8) as usize;
-    let (onesweep_threads, onesweep_items) = reg_bound_policy(384, 21, bit_size);
-    let tile_items = onesweep_threads * onesweep_items;
-    let histogram_shared_bytes = passes * 256usize * core::mem::size_of::<u32>();
-    let union_bytes = tile_items * bit_size;
-    let shared_bytes = union_bytes + 256usize * core::mem::size_of::<u64>();
-    let portion_size = ((1usize << 28) - 1) / tile_items * tile_items;
-    audit::generated_algorithm_expression(
-        audit::Algorithm::RadixSort,
-        quote! {{
-            let __rccl_execution = #execution;
-            let __rccl_keys = #keys;
-            let __rccl_scratch_keys = #scratch_keys;
-            let __rccl_bins = #bins;
-            let __rccl_lookback = #lookback;
-            let __rccl_counters = #counters;
-            let __rccl_len = __rccl_keys.len();
-            (|| -> ::core::result::Result<(), ::rccl_cub::DeviceAlgorithmError> {
-                if __rccl_scratch_keys.len() != __rccl_len {
-                    return ::core::result::Result::Err(
-                        ::rccl_cub::DeviceAlgorithmError::LengthMismatch {
-                            role: "radix scratch keys",
-                            expected: __rccl_len,
-                            actual: __rccl_scratch_keys.len(),
-                        },
-                    );
-                }
-                let __rccl_blocks = __rccl_len.div_ceil(#tile_items);
-                if __rccl_len > #portion_size {
-                    return ::core::result::Result::Err(
-                        ::rccl_cub::DeviceAlgorithmError::LengthMismatch {
-                            role: "Policy800 one-portion maximum",
-                            expected: #portion_size,
-                            actual: __rccl_len,
-                        },
-                    );
-                }
-                if __rccl_bins.len() != #passes * 256usize {
-                    return ::core::result::Result::Err(
-                        ::rccl_cub::DeviceAlgorithmError::LengthMismatch {
-                            role: "radix bins",
-                            expected: #passes * 256usize,
-                            actual: __rccl_bins.len(),
-                        },
-                    );
-                }
-                if __rccl_lookback.len() != __rccl_blocks * 256usize {
-                    return ::core::result::Result::Err(
-                        ::rccl_cub::DeviceAlgorithmError::LengthMismatch {
-                            role: "radix lookback",
-                            expected: __rccl_blocks * 256usize,
-                            actual: __rccl_lookback.len(),
-                        },
-                    );
-                }
-                if __rccl_counters.len() != #passes {
-                    return ::core::result::Result::Err(
-                        ::rccl_cub::DeviceAlgorithmError::LengthMismatch {
-                            role: "radix pass counters",
-                            expected: #passes,
-                            actual: __rccl_counters.len(),
-                        },
-                    );
-                }
-                if __rccl_len == 0 {
-                    return ::core::result::Result::Ok(());
-                }
-
-                let __rccl_init_launch =
-                    ::rccl_cub::__private::cuda_core::LaunchConfig1D::new(
-                        #passes as u32,
-                        256,
-                        0,
-                    );
-                let __rccl_init = __rccl_execution
-                    .module()
-                    .prepare_device_radix_sort_init(__rccl_init_launch)
-                    .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
-                __rccl_execution
-                    .module()
-                    .device_radix_sort_init(
-                        __rccl_execution.stream(),
-                        &__rccl_init,
-                        &mut *__rccl_counters,
-                        &mut *__rccl_bins,
-                    )
-                    .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
-
-                let __rccl_default_key = || #sentinel;
-                let __rccl_to_ordered = #to_ordered;
-                let __rccl_from_ordered = #from_ordered;
-                let __rccl_digit = #digit;
-                let __rccl_rank_digit = #rank_digit;
-                let __rccl_key_witness: #key_type = 0 as #key_type;
-                let __rccl_bit_witness: #bit_type = #sentinel;
-                let __rccl_histogram_probe_launch =
-                    ::rccl_cub::__private::cuda_core::LaunchConfig1D::new(
-                        1,
-                        128,
-                        #histogram_shared_bytes as u32,
-                    );
-                let __rccl_histogram_probe = __rccl_execution
-                    .module()
-                    .prepare_device_radix_sort_histogram_for::<
-                        #key_type,
-                        #bit_type,
-                        _,
-                        _,
-                        _,
-                        #histogram_items,
-                        #passes,
-                    >(
-                        &__rccl_key_witness,
-                        &__rccl_bit_witness,
-                        &__rccl_default_key,
-                        &__rccl_to_ordered,
-                        &__rccl_digit,
-                        __rccl_histogram_probe_launch,
-                    )
-                    .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
-                let __rccl_histogram_blocks_per_sm = __rccl_histogram_probe
-                    .function()
-                    .max_active_blocks_per_multiprocessor(128, #histogram_shared_bytes as u32)
-                    .map_err(::rccl_cub::DeviceAlgorithmError::Driver)?;
-                let __rccl_multiprocessors = __rccl_execution
-                    .stream()
-                    .context()
-                    .multiprocessor_count()
-                    .map_err(::rccl_cub::DeviceAlgorithmError::Driver)?;
-                let __rccl_histogram_launch =
-                    ::rccl_cub::__private::cuda_core::LaunchConfig1D::new(
-                        __rccl_histogram_blocks_per_sm * __rccl_multiprocessors,
-                        128,
-                        #histogram_shared_bytes as u32,
-                    );
-                let __rccl_histogram = __rccl_execution
-                    .module()
-                    .prepare_device_radix_sort_histogram_for::<
-                        #key_type,
-                        #bit_type,
-                        _,
-                        _,
-                        _,
-                        #histogram_items,
-                        #passes,
-                    >(
-                        &__rccl_key_witness,
-                        &__rccl_bit_witness,
-                        &__rccl_default_key,
-                        &__rccl_to_ordered,
-                        &__rccl_digit,
-                        __rccl_histogram_launch,
-                    )
-                    .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
-                __rccl_execution
-                    .module()
-                    .device_radix_sort_histogram::<
-                        #key_type,
-                        #bit_type,
-                        _,
-                        _,
-                        _,
-                        #histogram_items,
-                        #passes,
-                    >(
-                        __rccl_execution.stream(),
-                        &__rccl_histogram,
-                        &*__rccl_keys,
-                        0u32,
-                        #end_bit,
-                        __rccl_default_key,
-                        __rccl_to_ordered,
-                        __rccl_digit,
-                        &mut *__rccl_bins,
-                    )
-                    .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
-
-                let __rccl_scan_launch =
-                    ::rccl_cub::__private::cuda_core::LaunchConfig1D::new(
-                        #passes as u32,
-                        256,
-                        2336,
-                    );
-                let __rccl_scan = __rccl_execution
-                    .module()
-                    .prepare_device_radix_sort_exclusive_sum::<#passes>(__rccl_scan_launch)
-                    .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
-                __rccl_execution
-                    .module()
-                    .device_radix_sort_exclusive_sum::<#passes>(
-                        __rccl_execution.stream(),
-                        &__rccl_scan,
-                        &mut *__rccl_bins,
-                    )
-                    .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
-
-                let __rccl_onesweep_launch =
-                    ::rccl_cub::__private::cuda_core::LaunchConfig1D::new(
-                        __rccl_blocks as u32,
-                        #onesweep_threads as u32,
-                        #shared_bytes as u32,
-                    );
-                let __rccl_onesweep = __rccl_execution
-                    .module()
-                    .prepare_device_radix_sort_onesweep_keys_for::<
-                        #key_type,
-                        #bit_type,
-                        _,
-                        _,
-                        _,
-                        _,
-                        _,
-                        #onesweep_items,
-                        #union_bytes,
-                    >(
-                        &__rccl_key_witness,
-                        &__rccl_bit_witness,
-                        &__rccl_default_key,
-                        &__rccl_to_ordered,
-                        &__rccl_from_ordered,
-                        &__rccl_digit,
-                        &__rccl_rank_digit,
-                        __rccl_onesweep_launch,
-                    )
-                    .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
-                // CUB's pass number and DoubleBuffer selector are ordinary
-                // dispatch state, not template parameters. Keep the policy
-                // pass count macro-selected, but execute the launch loop at
-                // runtime exactly like DispatchRadixSort::Dispatch.
-                let mut __rccl_pass = 0usize;
-                while __rccl_pass < #passes {
-                    ::rccl_cub::__private::ZeroRadixLookback::zero_radix_lookback(
-                        &mut *__rccl_lookback,
-                        __rccl_execution.stream(),
-                    )?;
-                    let __rccl_bin_offset = __rccl_pass * 256usize;
-                    let __rccl_current_bit = (__rccl_pass * 8usize) as u32;
-                    let __rccl_pass_result = if (__rccl_pass & 1usize) == 0 {
-                        __rccl_execution
-                            .module()
-                            .device_radix_sort_onesweep_keys::<
-                                #key_type,
-                                #bit_type,
-                                _,
-                                _,
-                                _,
-                                _,
-                                _,
-                                #onesweep_items,
-                                #union_bytes,
-                            >(
-                                __rccl_execution.stream(),
-                                &__rccl_onesweep,
-                                &mut *__rccl_lookback,
-                                &mut *__rccl_counters,
-                                &*__rccl_bins,
-                                &*__rccl_keys,
-                                &mut *__rccl_scratch_keys,
-                                __rccl_bin_offset,
-                                __rccl_pass,
-                                __rccl_current_bit,
-                                8u32,
-                                __rccl_default_key,
-                                __rccl_to_ordered,
-                                __rccl_from_ordered,
-                                __rccl_digit,
-                                __rccl_rank_digit,
-                            )
-                    } else {
-                        __rccl_execution
-                            .module()
-                            .device_radix_sort_onesweep_keys::<
-                                #key_type,
-                                #bit_type,
-                                _,
-                                _,
-                                _,
-                                _,
-                                _,
-                                #onesweep_items,
-                                #union_bytes,
-                            >(
-                                __rccl_execution.stream(),
-                                &__rccl_onesweep,
-                                &mut *__rccl_lookback,
-                                &mut *__rccl_counters,
-                                &*__rccl_bins,
-                                &*__rccl_scratch_keys,
-                                &mut *__rccl_keys,
-                                __rccl_bin_offset,
-                                __rccl_pass,
-                                __rccl_current_bit,
-                                8u32,
-                                __rccl_default_key,
-                                __rccl_to_ordered,
-                                __rccl_from_ordered,
-                                __rccl_digit,
-                                __rccl_rank_digit,
-                            )
-                    };
-                    __rccl_pass_result
-                        .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
-                    __rccl_pass += 1usize;
-                }
-                ::core::result::Result::Ok(())
-            })()
-        }},
-    )
+    expand_device_radix_sort_keys_via_buffer(call, true)
 }
 
 fn expand_device_radix_sort_keys_buffer(
@@ -3328,10 +2938,11 @@ fn expand_device_radix_sort_keys_buffer_order(
     let key_type = call.key_type;
     let bit_type = lowering.bit_type;
     let sentinel = lowering.sentinel;
+    let default_key = lowering.default_key;
     let to_ordered = lowering.to_ordered;
     let from_ordered = lowering.from_ordered;
     let digit = lowering.digit;
-    let rank_digit = primitive_radix_rank_digit(primitive);
+    let rank_digit = lowering.rank_digit;
     let execution = call.execution;
     let buffers = call.buffers;
     let bit_range = call.bit_range;
@@ -3434,7 +3045,7 @@ fn expand_device_radix_sort_keys_buffer_order(
                     )
                     .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
 
-                let __rccl_default_key = || #sentinel;
+                let __rccl_default_key = #default_key;
                 let __rccl_to_ordered = #to_ordered;
                 let __rccl_from_ordered = #from_ordered;
                 let __rccl_digit = #digit;
@@ -3627,374 +3238,100 @@ fn expand_device_radix_sort_keys_buffer_order(
     )
 }
 
-fn expand_device_radix_sort_pairs(
-    call: call::DeviceRadixSortPairsCall,
-) -> syn::Result<proc_macro2::TokenStream> {
-    expand_device_radix_sort_pairs_order(call, false)
-}
-
-fn expand_device_radix_sort_pairs_descending(
-    call: call::DeviceRadixSortPairsCall,
-) -> syn::Result<proc_macro2::TokenStream> {
-    expand_device_radix_sort_pairs_order(call, true)
-}
-
-fn expand_device_radix_sort_pairs_order(
-    call: call::DeviceRadixSortPairsCall,
+fn expand_device_radix_sort_keys_via_buffer(
+    call: call::DeviceRadixSortKeysCall,
     descending: bool,
 ) -> syn::Result<proc_macro2::TokenStream> {
-    let target = tmp_cuda_target(&call.target)?;
-    if !(80..90).contains(&target.capability) {
-        return Err(syn::Error::new_spanned(
-            call.target,
-            "this lowering contains the exact pinned Policy800 one-sweep graph only; another architecture must add its own macro-selected CUB policy",
-        ));
-    }
     let primitive = primitive_radix(&call.key_type)?;
-    let lowering = primitive_radix_lowering(&call.key_type, primitive, descending)?;
-    let key_type = call.key_type;
-    let value_type = call.value_type;
-    let key_size = tmp_primitive_size(&key_type)?;
-    let value_size = tmp_primitive_size(&value_type)?;
-    let bit_type = lowering.bit_type;
-    let sentinel = lowering.sentinel;
-    let to_ordered = lowering.to_ordered;
-    let from_ordered = lowering.from_ordered;
-    let digit = lowering.digit;
-    let rank_digit = primitive_radix_rank_digit(primitive);
-    let execution = call.execution;
-    let keys = call.keys;
-    let values = call.values;
-    let scratch_keys = call.scratch_keys;
-    let scratch_values = call.scratch_values;
-    let bins = call.bins;
-    let lookback = call.lookback;
-    let counters = call.counters;
-    let passes = primitive.bits.div_ceil(8) as usize;
-    let end_bit = primitive.bits;
-    let histogram_items = 16usize;
-    let nominal_items = if key_size == 4 { 17 } else { 21 };
-    let (onesweep_threads, onesweep_items) =
-        reg_bound_policy(384, nominal_items, key_size.max(value_size));
+    let max_passes = primitive.bits.div_ceil(8) as usize;
+    let key_bits = primitive.bits;
+    let bit_size = (primitive.bits / 8) as usize;
+    let (onesweep_threads, onesweep_items) = reg_bound_policy(384, 21, bit_size);
     let tile_items = onesweep_threads * onesweep_items;
-    let histogram_shared_bytes = passes * 256usize * core::mem::size_of::<u32>();
-    let union_bytes = tile_items * key_size.max(value_size);
-    let shared_bytes = union_bytes + 256usize * core::mem::size_of::<u64>();
-    let portion_size = ((1usize << 28) - 1) / tile_items * tile_items;
+    let call::DeviceRadixSortKeysCall {
+        key_type,
+        target,
+        execution,
+        keys,
+        scratch_keys,
+        bins,
+        lookback,
+        counters,
+    } = call;
+    let operation = expand_device_radix_sort_keys_buffer_order(
+        call::DeviceRadixSortKeysBufferCall {
+            key_type,
+            target,
+            execution: syn::parse_quote!(__rccl_execution),
+            buffers: syn::parse_quote!(&mut __rccl_buffers),
+            bit_range: syn::parse_quote!(0u32..#key_bits),
+            bins: syn::parse_quote!(__rccl_bins),
+            lookback: syn::parse_quote!(__rccl_lookback),
+            counters: syn::parse_quote!(__rccl_counters),
+        },
+        descending,
+    )?;
     audit::generated_algorithm_expression(
         audit::Algorithm::RadixSort,
         quote! {{
             let __rccl_execution = #execution;
             let __rccl_keys = #keys;
-            let __rccl_values = #values;
             let __rccl_scratch_keys = #scratch_keys;
-            let __rccl_scratch_values = #scratch_values;
             let __rccl_bins = #bins;
             let __rccl_lookback = #lookback;
             let __rccl_counters = #counters;
             let __rccl_len = __rccl_keys.len();
             (|| -> ::core::result::Result<(), ::rccl_cub::DeviceAlgorithmError> {
-                for (__rccl_role, __rccl_actual) in [
-                    ("radix values", __rccl_values.len()),
-                    ("radix scratch keys", __rccl_scratch_keys.len()),
-                    ("radix scratch values", __rccl_scratch_values.len()),
+                let __rccl_scratch_len = __rccl_scratch_keys.len();
+                let mut __rccl_buffers = ::rccl_cub::DoubleBuffer::new(
+                    &mut *__rccl_keys,
+                    &mut *__rccl_scratch_keys,
+                )
+                .ok_or(::rccl_cub::DeviceAlgorithmError::LengthMismatch {
+                    role: "radix scratch keys",
+                    expected: __rccl_len,
+                    actual: __rccl_scratch_len,
+                })?;
+                let __rccl_blocks = __rccl_len.div_ceil(#tile_items);
+                for (__rccl_role, __rccl_expected, __rccl_actual) in [
+                    ("radix bins", #max_passes * 256usize, __rccl_bins.len()),
+                    (
+                        "radix lookback",
+                        __rccl_blocks * 256usize,
+                        __rccl_lookback.len(),
+                    ),
+                    (
+                        "radix pass counters",
+                        #max_passes,
+                        __rccl_counters.len(),
+                    ),
                 ] {
-                    if __rccl_actual != __rccl_len {
+                    if __rccl_actual != __rccl_expected {
                         return ::core::result::Result::Err(
                             ::rccl_cub::DeviceAlgorithmError::LengthMismatch {
                                 role: __rccl_role,
-                                expected: __rccl_len,
+                                expected: __rccl_expected,
                                 actual: __rccl_actual,
                             },
                         );
                     }
                 }
-                let __rccl_blocks = __rccl_len.div_ceil(#tile_items);
-                if __rccl_len > #portion_size {
-                    return ::core::result::Result::Err(
-                        ::rccl_cub::DeviceAlgorithmError::LengthMismatch {
-                            role: "Policy800 one-portion maximum",
-                            expected: #portion_size,
-                            actual: __rccl_len,
-                        },
-                    );
-                }
-                if __rccl_bins.len() != #passes * 256usize {
-                    return ::core::result::Result::Err(
-                        ::rccl_cub::DeviceAlgorithmError::LengthMismatch {
-                            role: "radix bins",
-                            expected: #passes * 256usize,
-                            actual: __rccl_bins.len(),
-                        },
-                    );
-                }
-                if __rccl_lookback.len() != __rccl_blocks * 256usize {
-                    return ::core::result::Result::Err(
-                        ::rccl_cub::DeviceAlgorithmError::LengthMismatch {
-                            role: "radix lookback",
-                            expected: __rccl_blocks * 256usize,
-                            actual: __rccl_lookback.len(),
-                        },
-                    );
-                }
-                if __rccl_counters.len() != #passes {
-                    return ::core::result::Result::Err(
-                        ::rccl_cub::DeviceAlgorithmError::LengthMismatch {
-                            role: "radix pass counters",
-                            expected: #passes,
-                            actual: __rccl_counters.len(),
-                        },
-                    );
-                }
-                if __rccl_len == 0 {
-                    return ::core::result::Result::Ok(());
-                }
-
-                let __rccl_init_launch =
-                    ::rccl_cub::__private::cuda_core::LaunchConfig1D::new(
-                        #passes as u32,
-                        256,
-                        0,
-                    );
-                let __rccl_init = __rccl_execution
-                    .module()
-                    .prepare_device_radix_sort_init(__rccl_init_launch)
-                    .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
-                __rccl_execution
-                    .module()
-                    .device_radix_sort_init(
-                        __rccl_execution.stream(),
-                        &__rccl_init,
-                        &mut *__rccl_counters,
-                        &mut *__rccl_bins,
-                    )
-                    .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
-
-                let __rccl_default_key = || #sentinel;
-                let __rccl_to_ordered = #to_ordered;
-                let __rccl_from_ordered = #from_ordered;
-                let __rccl_digit = #digit;
-                let __rccl_rank_digit = #rank_digit;
-                let __rccl_key_witness: #key_type = 0 as #key_type;
-                let __rccl_value_witness: #value_type = ::core::default::Default::default();
-                let __rccl_bit_witness: #bit_type = #sentinel;
-                let __rccl_histogram_probe_launch =
-                    ::rccl_cub::__private::cuda_core::LaunchConfig1D::new(
-                        1,
-                        128,
-                        #histogram_shared_bytes as u32,
-                    );
-                let __rccl_histogram_probe = __rccl_execution
-                    .module()
-                    .prepare_device_radix_sort_histogram_for::<
-                        #key_type,
-                        #bit_type,
-                        _,
-                        _,
-                        _,
-                        #histogram_items,
-                        #passes,
-                    >(
-                        &__rccl_key_witness,
-                        &__rccl_bit_witness,
-                        &__rccl_default_key,
-                        &__rccl_to_ordered,
-                        &__rccl_digit,
-                        __rccl_histogram_probe_launch,
-                    )
-                    .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
-                let __rccl_histogram_blocks_per_sm = __rccl_histogram_probe
-                    .function()
-                    .max_active_blocks_per_multiprocessor(128, #histogram_shared_bytes as u32)
-                    .map_err(::rccl_cub::DeviceAlgorithmError::Driver)?;
-                let __rccl_multiprocessors = __rccl_execution
-                    .stream()
-                    .context()
-                    .multiprocessor_count()
-                    .map_err(::rccl_cub::DeviceAlgorithmError::Driver)?;
-                let __rccl_histogram_launch =
-                    ::rccl_cub::__private::cuda_core::LaunchConfig1D::new(
-                        __rccl_histogram_blocks_per_sm * __rccl_multiprocessors,
-                        128,
-                        #histogram_shared_bytes as u32,
-                    );
-                let __rccl_histogram = __rccl_execution
-                    .module()
-                    .prepare_device_radix_sort_histogram_for::<
-                        #key_type,
-                        #bit_type,
-                        _,
-                        _,
-                        _,
-                        #histogram_items,
-                        #passes,
-                    >(
-                        &__rccl_key_witness,
-                        &__rccl_bit_witness,
-                        &__rccl_default_key,
-                        &__rccl_to_ordered,
-                        &__rccl_digit,
-                        __rccl_histogram_launch,
-                    )
-                    .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
-                __rccl_execution
-                    .module()
-                    .device_radix_sort_histogram::<
-                        #key_type,
-                        #bit_type,
-                        _,
-                        _,
-                        _,
-                        #histogram_items,
-                        #passes,
-                    >(
-                        __rccl_execution.stream(),
-                        &__rccl_histogram,
-                        &*__rccl_keys,
-                        0u32,
-                        #end_bit,
-                        __rccl_default_key,
-                        __rccl_to_ordered,
-                        __rccl_digit,
-                        &mut *__rccl_bins,
-                    )
-                    .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
-
-                let __rccl_scan_launch =
-                    ::rccl_cub::__private::cuda_core::LaunchConfig1D::new(
-                        #passes as u32,
-                        256,
-                        2336,
-                    );
-                let __rccl_scan = __rccl_execution
-                    .module()
-                    .prepare_device_radix_sort_exclusive_sum::<#passes>(__rccl_scan_launch)
-                    .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
-                __rccl_execution
-                    .module()
-                    .device_radix_sort_exclusive_sum::<#passes>(
-                        __rccl_execution.stream(),
-                        &__rccl_scan,
-                        &mut *__rccl_bins,
-                    )
-                    .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
-
-                let __rccl_onesweep_launch =
-                    ::rccl_cub::__private::cuda_core::LaunchConfig1D::new(
-                        __rccl_blocks as u32,
-                        #onesweep_threads as u32,
-                        #shared_bytes as u32,
-                    );
-                let __rccl_onesweep = __rccl_execution
-                    .module()
-                    .prepare_device_radix_sort_onesweep_pairs_for::<
-                        #key_type,
-                        #value_type,
-                        #bit_type,
-                        _,
-                        _,
-                        _,
-                        _,
-                        _,
-                        #onesweep_items,
-                        #union_bytes,
-                    >(
-                        &__rccl_key_witness,
-                        &__rccl_value_witness,
-                        &__rccl_bit_witness,
-                        &__rccl_default_key,
-                        &__rccl_to_ordered,
-                        &__rccl_from_ordered,
-                        &__rccl_digit,
-                        &__rccl_rank_digit,
-                        __rccl_onesweep_launch,
-                    )
-                    .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
-                let mut __rccl_pass = 0usize;
-                while __rccl_pass < #passes {
-                    ::rccl_cub::__private::ZeroRadixLookback::zero_radix_lookback(
-                        &mut *__rccl_lookback,
-                        __rccl_execution.stream(),
-                    )?;
-                    let __rccl_bin_offset = __rccl_pass * 256usize;
-                    let __rccl_current_bit = (__rccl_pass * 8usize) as u32;
-                    let __rccl_pass_result = if (__rccl_pass & 1usize) == 0 {
-                        __rccl_execution
-                            .module()
-                            .device_radix_sort_onesweep_pairs::<
-                                #key_type,
-                                #value_type,
-                                #bit_type,
-                                _,
-                                _,
-                                _,
-                                _,
-                                _,
-                                #onesweep_items,
-                                #union_bytes,
-                            >(
-                                __rccl_execution.stream(),
-                                &__rccl_onesweep,
-                                &mut *__rccl_lookback,
-                                &mut *__rccl_counters,
-                                &*__rccl_bins,
-                                &*__rccl_keys,
-                                &*__rccl_values,
-                                &mut *__rccl_scratch_keys,
-                                &mut *__rccl_scratch_values,
-                                __rccl_bin_offset,
-                                __rccl_pass,
-                                __rccl_current_bit,
-                                8u32,
-                                __rccl_default_key,
-                                __rccl_to_ordered,
-                                __rccl_from_ordered,
-                                __rccl_digit,
-                                __rccl_rank_digit,
-                            )
-                    } else {
-                        __rccl_execution
-                            .module()
-                            .device_radix_sort_onesweep_pairs::<
-                                #key_type,
-                                #value_type,
-                                #bit_type,
-                                _,
-                                _,
-                                _,
-                                _,
-                                _,
-                                #onesweep_items,
-                                #union_bytes,
-                            >(
-                                __rccl_execution.stream(),
-                                &__rccl_onesweep,
-                                &mut *__rccl_lookback,
-                                &mut *__rccl_counters,
-                                &*__rccl_bins,
-                                &*__rccl_scratch_keys,
-                                &*__rccl_scratch_values,
-                                &mut *__rccl_keys,
-                                &mut *__rccl_values,
-                                __rccl_bin_offset,
-                                __rccl_pass,
-                                __rccl_current_bit,
-                                8u32,
-                                __rccl_default_key,
-                                __rccl_to_ordered,
-                                __rccl_from_ordered,
-                                __rccl_digit,
-                                __rccl_rank_digit,
-                            )
-                    };
-                    __rccl_pass_result
-                        .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
-                    __rccl_pass += 1usize;
-                }
-                ::core::result::Result::Ok(())
+                #operation
             })()
         }},
     )
+}
+
+fn expand_device_radix_sort_pairs(
+    call: call::DeviceRadixSortPairsCall,
+) -> syn::Result<proc_macro2::TokenStream> {
+    expand_device_radix_sort_pairs_via_buffer(call, false)
+}
+
+fn expand_device_radix_sort_pairs_descending(
+    call: call::DeviceRadixSortPairsCall,
+) -> syn::Result<proc_macro2::TokenStream> {
+    expand_device_radix_sort_pairs_via_buffer(call, true)
 }
 
 fn expand_device_radix_sort_pairs_buffer(
@@ -4028,10 +3365,11 @@ fn expand_device_radix_sort_pairs_buffer_order(
     let value_size = tmp_primitive_size(&value_type)?;
     let bit_type = lowering.bit_type;
     let sentinel = lowering.sentinel;
+    let default_key = lowering.default_key;
     let to_ordered = lowering.to_ordered;
     let from_ordered = lowering.from_ordered;
     let digit = lowering.digit;
-    let rank_digit = primitive_radix_rank_digit(primitive);
+    let rank_digit = lowering.rank_digit;
     let execution = call.execution;
     let buffers = call.buffers;
     let bit_range = call.bit_range;
@@ -4135,7 +3473,7 @@ fn expand_device_radix_sort_pairs_buffer_order(
                     )
                     .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
 
-                let __rccl_default_key = || #sentinel;
+                let __rccl_default_key = #default_key;
                 let __rccl_to_ordered = #to_ordered;
                 let __rccl_from_ordered = #from_ordered;
                 let __rccl_digit = #digit;
@@ -4331,6 +3669,113 @@ fn expand_device_radix_sort_pairs_buffer_order(
                     __rccl_pass += 1usize;
                 }
                 ::core::result::Result::Ok(())
+            })()
+        }},
+    )
+}
+
+fn expand_device_radix_sort_pairs_via_buffer(
+    call: call::DeviceRadixSortPairsCall,
+    descending: bool,
+) -> syn::Result<proc_macro2::TokenStream> {
+    let primitive = primitive_radix(&call.key_type)?;
+    let max_passes = primitive.bits.div_ceil(8) as usize;
+    let key_bits = primitive.bits;
+    let key_size = tmp_primitive_size(&call.key_type)?;
+    let value_size = tmp_primitive_size(&call.value_type)?;
+    let nominal_items = if key_size == 4 { 17 } else { 21 };
+    let (onesweep_threads, onesweep_items) =
+        reg_bound_policy(384, nominal_items, key_size.max(value_size));
+    let tile_items = onesweep_threads * onesweep_items;
+    let call::DeviceRadixSortPairsCall {
+        key_type,
+        value_type,
+        target,
+        execution,
+        keys,
+        values,
+        scratch_keys,
+        scratch_values,
+        bins,
+        lookback,
+        counters,
+    } = call;
+    let operation = expand_device_radix_sort_pairs_buffer_order(
+        call::DeviceRadixSortPairsBufferCall {
+            key_type,
+            value_type,
+            target,
+            execution: syn::parse_quote!(__rccl_execution),
+            buffers: syn::parse_quote!(&mut __rccl_buffers),
+            bit_range: syn::parse_quote!(0u32..#key_bits),
+            bins: syn::parse_quote!(__rccl_bins),
+            lookback: syn::parse_quote!(__rccl_lookback),
+            counters: syn::parse_quote!(__rccl_counters),
+        },
+        descending,
+    )?;
+    audit::generated_algorithm_expression(
+        audit::Algorithm::RadixSort,
+        quote! {{
+            let __rccl_execution = #execution;
+            let __rccl_keys = #keys;
+            let __rccl_values = #values;
+            let __rccl_scratch_keys = #scratch_keys;
+            let __rccl_scratch_values = #scratch_values;
+            let __rccl_bins = #bins;
+            let __rccl_lookback = #lookback;
+            let __rccl_counters = #counters;
+            let __rccl_len = __rccl_keys.len();
+            (|| -> ::core::result::Result<(), ::rccl_cub::DeviceAlgorithmError> {
+                for (__rccl_role, __rccl_actual) in [
+                    ("radix values", __rccl_values.len()),
+                    ("radix scratch keys", __rccl_scratch_keys.len()),
+                    ("radix scratch values", __rccl_scratch_values.len()),
+                ] {
+                    if __rccl_actual != __rccl_len {
+                        return ::core::result::Result::Err(
+                            ::rccl_cub::DeviceAlgorithmError::LengthMismatch {
+                                role: __rccl_role,
+                                expected: __rccl_len,
+                                actual: __rccl_actual,
+                            },
+                        );
+                    }
+                }
+                let mut __rccl_buffers = ::rccl_cub::DoubleBuffer::paired(
+                    (&mut *__rccl_keys, &mut *__rccl_values),
+                    (&mut *__rccl_scratch_keys, &mut *__rccl_scratch_values),
+                )
+                .ok_or(::rccl_cub::DeviceAlgorithmError::LengthMismatch {
+                    role: "radix key/value buffers",
+                    expected: __rccl_len,
+                    actual: __rccl_len,
+                })?;
+                let __rccl_blocks = __rccl_len.div_ceil(#tile_items);
+                for (__rccl_role, __rccl_expected, __rccl_actual) in [
+                    ("radix bins", #max_passes * 256usize, __rccl_bins.len()),
+                    (
+                        "radix lookback",
+                        __rccl_blocks * 256usize,
+                        __rccl_lookback.len(),
+                    ),
+                    (
+                        "radix pass counters",
+                        #max_passes,
+                        __rccl_counters.len(),
+                    ),
+                ] {
+                    if __rccl_actual != __rccl_expected {
+                        return ::core::result::Result::Err(
+                            ::rccl_cub::DeviceAlgorithmError::LengthMismatch {
+                                role: __rccl_role,
+                                expected: __rccl_expected,
+                                actual: __rccl_actual,
+                            },
+                        );
+                    }
+                }
+                #operation
             })()
         }},
     )
@@ -4674,8 +4119,12 @@ mod tests {
         })
         .expect("the macro must specialize the default key")
         .to_string();
-        assert!(operation.contains("let __rccl_default_key = ||"));
+        assert!(
+            operation
+                .contains("let __rccl_default_key = :: rccl_cub :: __private :: radix_default_u32")
+        );
         assert!(operation.contains("& __rccl_default_key"));
+        assert!(!operation.contains("let __rccl_default_key = ||"));
         assert!(!operation.contains("sentinel"));
     }
 
@@ -4708,24 +4157,32 @@ mod tests {
             "prepare_device_radix_sort_onesweep_keys_for :: < i32 , u32 , _ , _ , _ , _ , _ , 21usize"
         ));
         assert!(operation.contains("let __rccl_rank_digit ="));
-        assert!(operation.contains("rotate_right (__rccl_bit)"));
-        assert!(operation.contains("LaunchConfig1D :: new (4usize as u32 , 256 , 0"));
+        assert!(operation.contains("radix_rank_digit_u32"));
+        assert!(!operation.contains("| __rccl_ordered"));
+        assert!(operation.contains("LaunchConfig1D :: new (__rccl_passes as u32 , 256 , 0"));
         assert!(operation.contains("128 , 4096usize as u32"));
         assert!(
             !operation.contains("device_radix_sort_histogram :: < i32 , u32 , _ , _ , 21usize")
         );
         assert_eq!(operation.matches("zero_radix_lookback").count(), 1);
-        assert!(operation.contains("while __rccl_pass < 4usize"));
+        assert!(operation.contains("while __rccl_pass < __rccl_passes"));
         assert!(operation.contains("let __rccl_bin_offset = __rccl_pass * 256usize"));
-        assert!(operation.contains("let __rccl_current_bit = (__rccl_pass * 8usize) as u32"));
+        assert!(
+            operation.contains(
+                "let __rccl_current_bit = __rccl_begin_bit + (__rccl_pass * 8usize) as u32"
+            )
+        );
         assert_eq!(
             operation
                 .matches("device_radix_sort_onesweep_keys ::")
                 .count(),
-            2,
-            "the runtime DoubleBuffer selector must expose exactly its two affine borrow branches"
+            1,
+            "one affine split borrow must replace duplicated selector branches"
         );
-        assert!(operation.contains("if (__rccl_pass & 1usize) == 0"));
+        assert!(operation.contains("DoubleBuffer :: new"));
+        assert!(operation.contains("current_and_alternate_mut"));
+        assert!(operation.contains("__rccl_buffers . swap"));
+        assert!(!operation.contains("if (__rccl_pass & 1usize) == 0"));
         assert!(!operation.contains("device_merge_sort"));
         assert!(!operation.contains("DeviceBuffer :: zeroed"));
         assert!(!operation.contains("compute_capability"));
@@ -4800,7 +4257,7 @@ mod tests {
             "prepare_device_radix_sort_onesweep_keys_for :: < u64 , u64 , _ , _ , _ , _ , _ , 10usize"
         ));
         assert!(operation.contains("let __rccl_blocks = __rccl_len . div_ceil (3840usize)"));
-        assert!(operation.contains("while __rccl_pass < 8usize"));
+        assert!(operation.contains("while __rccl_pass < __rccl_passes"));
         assert!(
             operation.contains("LaunchConfig1D :: new (__rccl_blocks as u32 , 384usize as u32")
         );
@@ -4839,14 +4296,17 @@ mod tests {
         ));
         assert!(operation.contains("let __rccl_blocks = __rccl_len . div_ceil (6528usize)"));
         assert!(operation.contains("28160usize as u32"));
-        assert!(operation.contains("if __rccl_ordered == 0x7fff_ffffu32 { 0x8000_0000u32 }"));
-        assert!(operation.contains("__rccl_zero_ordered . rotate_right (__rccl_bit)"));
+        assert!(operation.contains("radix_float_digit_u32"));
+        assert!(operation.contains("radix_float_rank_digit_u32"));
+        assert!(!operation.contains("| __rccl_ordered"));
         assert_eq!(
             operation
                 .matches("device_radix_sort_onesweep_pairs ::")
                 .count(),
-            2
+            1
         );
+        assert!(operation.contains("DoubleBuffer :: paired"));
+        assert!(operation.contains("current_and_alternate_mut"));
         assert!(!operation.contains("device_merge_sort"));
         assert!(!operation.contains("DeviceBuffer :: zeroed"));
         assert!(!operation.contains("unsafe"));

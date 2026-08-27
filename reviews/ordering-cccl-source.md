@@ -74,6 +74,12 @@ used to hide that missing TMP input.
 - Floating radix checks `to_bits()` for every output. Rust floating equality
   would consider `-0.0 == +0.0` and mask the required stable signed-zero
   behavior, so it is not used as the oracle.
+- Primitive transformation unit tests independently cover ascending and
+  descending round trips for all six supported representations, every valid
+  one-byte digit-window shape, and signed-zero digit equivalence. The proc
+  macro selects named function items rather than call-site closures, so
+  repeated public calls reuse one cuda-oxide specialization without changing
+  the digit semantics.
 - Copy forms verify both the full output and that the full input remains
   unchanged.
 - All calls propagate `Result`; no launch error is discarded. None of the
@@ -85,10 +91,11 @@ used to hide that missing TMP input.
 - `benchmarks/ordering-reference.cu` and the Rust benchmarks use complete
   device-resident validation. The strict 1.001 performance ratio is still
   failing, so result parity cannot be misreported as CCCL performance parity.
-  After the exact agent rewrites, eight of ten ordering paths pass that band.
-  Key-only radix remains at 1.008787x and Thrust sort at 1.019154x; the gate
-  still exits nonzero with `implementation gap is not masked`. The complete
-  ratios and emitted-code diagnosis are recorded in
+  The direct bit-window additions bring the gate to twelve paths. Its latest
+  median-of-medians run still fails, including key-only radix at 1.001751x,
+  bit-window keys at 1.005168x, and Thrust sort at 1.019154x; the gate still
+  exits nonzero with `implementation gap is not masked`. The complete ratios
+  and emitted-code diagnosis are recorded in
   `reviews/current-implemented-performance.md`.
 
 ## Injected faults

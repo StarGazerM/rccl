@@ -151,6 +151,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let sort_input_host = random_u32(count);
     let mut sort_expected = sort_input_host.clone();
     sort_expected.sort_unstable();
+    let mut window_expected = sort_input_host.clone();
+    window_expected.sort_by_key(|key| key & 0x00ff_ffff);
     let sort_input = DeviceBuffer::from_host(&stream, &sort_input_host)?;
     let mut sorted = DeviceBuffer::<u32>::zeroed(&stream, count)?;
     let mut sort_scratch = DeviceBuffer::<u32>::zeroed(&stream, count)?;
@@ -237,13 +239,59 @@ fn main() -> Result<(), Box<dyn Error>> {
         sort_expected
     );
 
+    let mut window_keys_0 = DeviceBuffer::from_host(&stream, &sort_input_host)?;
+    let mut window_keys_1 = DeviceBuffer::<u32>::zeroed(&stream, count)?;
+    let mut window_buffers = rccl_cub::DoubleBuffer::new(&mut window_keys_0, &mut window_keys_1)
+        .expect("equal benchmark key buffers must construct");
+    stream.synchronize()?;
+    let radix_window_timing = timed(&stream, iterations, || {
+        rccl_cub::device_radix_sort_keys_buffer!(::<u32, sm_89>(
+            &exec,
+            &mut window_buffers,
+            0u32..24u32,
+            &mut radix_bins,
+            &mut radix_lookback,
+            &mut radix_counters,
+        ))
+    })?;
+    assert_eq!(
+        window_buffers.current().to_host_vec(&stream)?,
+        window_expected
+    );
+
+    let mut window_pair_keys_0 = DeviceBuffer::from_host(&stream, &sort_input_host)?;
+    let mut window_pair_values_0 = DeviceBuffer::from_host(&stream, &sort_input_host)?;
+    let mut window_pair_keys_1 = DeviceBuffer::<u32>::zeroed(&stream, count)?;
+    let mut window_pair_values_1 = DeviceBuffer::<u32>::zeroed(&stream, count)?;
+    let mut window_pair_buffers = rccl_cub::DoubleBuffer::paired(
+        (&mut window_pair_keys_0, &mut window_pair_values_0),
+        (&mut window_pair_keys_1, &mut window_pair_values_1),
+    )
+    .expect("equal benchmark pair buffers must construct");
+    stream.synchronize()?;
+    let radix_window_pair_timing = timed(&stream, iterations, || {
+        rccl_cub::device_radix_sort_pairs_buffer!(::<u32, u32, sm_89>(
+            &exec,
+            &mut window_pair_buffers,
+            0u32..24u32,
+            &mut radix_pair_bins,
+            &mut radix_pair_lookback,
+            &mut radix_pair_counters,
+        ))
+    })?;
+    let (window_pair_keys, window_pair_values) = window_pair_buffers.current();
+    assert_eq!(window_pair_keys.to_host_vec(&stream)?, window_expected);
+    assert_eq!(window_pair_values.to_host_vec(&stream)?, window_expected);
+
     println!(
         "RCCL_CUB_ORDERING items={count} \
          merge_gpu_median_ms={:.6} merge_end_to_end_median_ms={:.6} \
          pair_merge_gpu_median_ms={:.6} pair_merge_end_to_end_median_ms={:.6} \
          sort_copy_gpu_median_ms={:.6} sort_copy_end_to_end_median_ms={:.6} \
          radix_gpu_median_ms={:.6} radix_end_to_end_median_ms={:.6} \
-         radix_pairs_gpu_median_ms={:.6} radix_pairs_end_to_end_median_ms={:.6}",
+         radix_pairs_gpu_median_ms={:.6} radix_pairs_end_to_end_median_ms={:.6} \
+         radix_window_gpu_median_ms={:.6} radix_window_end_to_end_median_ms={:.6} \
+         radix_window_pairs_gpu_median_ms={:.6} radix_window_pairs_end_to_end_median_ms={:.6}",
         merge_timing.gpu_ms,
         merge_timing.end_to_end_ms,
         pair_merge_timing.gpu_ms,
@@ -254,6 +302,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         radix_timing.end_to_end_ms,
         radix_pair_timing.gpu_ms,
         radix_pair_timing.end_to_end_ms,
+        radix_window_timing.gpu_ms,
+        radix_window_timing.end_to_end_ms,
+        radix_window_pair_timing.gpu_ms,
+        radix_window_pair_timing.end_to_end_ms,
     );
     Ok(())
 }

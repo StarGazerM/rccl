@@ -18,27 +18,41 @@ synchronization, and full result oracle.
 | Thrust binary in-place transform plus constant range | 0.013955 ms | 0.017046 ms | 0.818667 | at most 1.001 |
 
 The same strict gate now measures every implemented ordering path. The table
-records the best repeated-run median selected independently for RCCL and CCCL,
-not a favorable single sample.
+records the median of five independently measured per-process medians for
+RCCL and CCCL, not a favorable single sample. The bit-window rows exercise
+the public borrowed `DoubleBuffer` forms directly.
 
 | Implemented ordering intersection | RCCL / CCCL | Gate result |
 |---|---:|---:|
-| CUB DeviceMerge keys | 1.000185 | pass |
-| CUB DeviceMerge pairs | 0.996171 | pass |
-| CUB DeviceMergeSort keys | 0.996845 | pass |
-| CUB DeviceMergeSort pairs | 0.996752 | pass |
-| CUB DeviceRadixSort keys | 1.008787 | **fail** |
-| CUB DeviceRadixSort pairs | 0.994691 | pass |
-| Thrust merge | 1.000000 | pass |
-| Thrust merge-by-key | 0.998453 | pass |
+| CUB DeviceMerge keys | 1.000000 | pass |
+| CUB DeviceMerge pairs | 1.009718 | **fail** |
+| CUB DeviceMergeSort keys | 1.006900 | **fail** |
+| CUB DeviceMergeSort pairs | 0.998203 | pass |
+| CUB DeviceRadixSort keys | 1.001751 | **fail** |
+| CUB DeviceRadixSort pairs | 1.017864 | **fail** |
+| CUB DeviceRadixSort keys `DoubleBuffer` 0..24 | 1.005168 | **fail** |
+| CUB DeviceRadixSort pairs `DoubleBuffer` 0..24 | 1.001041 | **fail** |
+| Thrust merge | 1.000398 | pass |
+| Thrust merge-by-key | 1.000000 | pass |
 | Thrust sort | 1.019154 | **fail** |
-| Thrust sort-by-key | 0.997999 | pass |
+| Thrust sort-by-key | 0.999147 | pass |
 
-Eight of ten ordering paths are inside the 1.001 measurement-equivalence
-band. The gate remains red: the two key-only sort paths share the same radix
-kernel gap, and Thrust also preserves its required `par` synchronization.
-Neither the threshold nor that synchronization is weakened to make the current
-test set pass.
+Five of twelve ordering paths are inside the 1.001 measurement-equivalence
+band in this run. Some repeated-run ratios move across the boundary even when
+the normalized cuda-oxide kernel instructions are unchanged, but the gate
+does not classify that observation as a pass or widen its band. The key-only
+radix and Thrust-sort gaps remain repeatable, and Thrust preserves its required
+`par` synchronization. Neither the threshold nor that synchronization is
+weakened to make the current test set pass.
+
+The full-range and 0..24 operations now select the same named primitive Rust
+function items. Before that change, identical zero-capture closure expressions
+at different call sites had distinct Rust types and produced duplicate
+cuda-oxide kernel specializations. The mixed benchmark now has one histogram,
+one keys one-sweep, and one pairs one-sweep specialization for its common u32
+policy. Round-trip, descending, every valid digit-window shape, and floating
+signed-zero tests prevent that structural deduplication from masking changed
+semantics.
 
 The WarpReduce operation macro selects the same hardware integer-add
 collective as pinned CUB. Four independent reductions per loaded value keep

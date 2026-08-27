@@ -80,6 +80,8 @@ try
   std::uint32_t *input = nullptr, *output = nullptr, *thrust_keys = nullptr;
   std::uint32_t *thrust_pair_keys = nullptr, *thrust_pair_values = nullptr;
   std::uint32_t *input_values = nullptr, *output_values = nullptr;
+  std::uint32_t *window_keys_0 = nullptr, *window_keys_1 = nullptr;
+  std::uint32_t *window_values_0 = nullptr, *window_values_1 = nullptr;
   CUDA_CHECK(cudaMalloc(&input, count * sizeof(*input)));
   CUDA_CHECK(cudaMalloc(&output, count * sizeof(*output)));
   CUDA_CHECK(cudaMalloc(&thrust_keys, count * sizeof(*thrust_keys)));
@@ -87,6 +89,10 @@ try
   CUDA_CHECK(cudaMalloc(&thrust_pair_values, count * sizeof(*thrust_pair_values)));
   CUDA_CHECK(cudaMalloc(&input_values, count * sizeof(*input_values)));
   CUDA_CHECK(cudaMalloc(&output_values, count * sizeof(*output_values)));
+  CUDA_CHECK(cudaMalloc(&window_keys_0, count * sizeof(*window_keys_0)));
+  CUDA_CHECK(cudaMalloc(&window_keys_1, count * sizeof(*window_keys_1)));
+  CUDA_CHECK(cudaMalloc(&window_values_0, count * sizeof(*window_values_0)));
+  CUDA_CHECK(cudaMalloc(&window_values_1, count * sizeof(*window_values_1)));
   constexpr int threads = 256;
   const int blocks = static_cast<int>((count + threads - 1) / threads);
   fill_random<<<blocks, threads, 0, stream>>>(input, count);
@@ -102,7 +108,11 @@ try
     value ^= value << 17;
     expected[static_cast<std::size_t>(index)] = static_cast<std::uint32_t>(value);
   }
+  auto window_expected = expected;
   std::sort(expected.begin(), expected.end());
+  std::stable_sort(window_expected.begin(), window_expected.end(), [](auto left, auto right) {
+    return (left & 0x00ff'ffffu) < (right & 0x00ff'ffffu);
+  });
 
   std::size_t radix_temp_bytes = 0;
   CUDA_CHECK(cub::DeviceRadixSort::SortKeys(
@@ -119,6 +129,21 @@ try
     0,
     32,
     stream));
+  cub::DoubleBuffer<std::uint32_t> window_keys{window_keys_0, window_keys_1};
+  cub::DoubleBuffer<std::uint32_t> window_values{window_values_0, window_values_1};
+  std::size_t radix_window_temp_bytes = 0;
+  CUDA_CHECK(cub::DeviceRadixSort::SortKeys(
+    nullptr, radix_window_temp_bytes, window_keys, count, 0, 24, stream));
+  std::size_t radix_window_pairs_temp_bytes = 0;
+  CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
+    nullptr,
+    radix_window_pairs_temp_bytes,
+    window_keys,
+    window_values,
+    count,
+    0,
+    24,
+    stream));
   std::size_t merge_temp_bytes = 0;
   CUDA_CHECK(cub::DeviceMergeSort::SortKeysCopy(
     nullptr, merge_temp_bytes, input, output, count, cuda::std::less<>{}, stream));
@@ -133,8 +158,12 @@ try
     count,
     cuda::std::less<>{},
     stream));
-  const std::size_t temp_bytes =
-    std::max({radix_temp_bytes, radix_pairs_temp_bytes, merge_temp_bytes, merge_pairs_temp_bytes});
+  const std::size_t temp_bytes = std::max({radix_temp_bytes,
+                                           radix_pairs_temp_bytes,
+                                           radix_window_temp_bytes,
+                                           radix_window_pairs_temp_bytes,
+                                           merge_temp_bytes,
+                                           merge_pairs_temp_bytes});
   void* temp = nullptr;
   CUDA_CHECK(cudaMalloc(&temp, temp_bytes));
 
@@ -171,6 +200,47 @@ try
     radix_pair_values.data(), output_values, count * sizeof(*output_values), cudaMemcpyDeviceToHost));
   if (radix_pair_keys != expected || radix_pair_values != expected)
     throw std::runtime_error("CUB radix pair exact-output validation failed");
+
+  fill_random<<<blocks, threads, 0, stream>>>(window_keys_0, count);
+  CUDA_CHECK(cudaGetLastError());
+  window_keys = cub::DoubleBuffer<std::uint32_t>{window_keys_0, window_keys_1};
+  const auto radix_window = measure(stream, start, end, iterations, [&] {
+    return cub::DeviceRadixSort::SortKeys(
+      temp, radix_window_temp_bytes, window_keys, count, 0, 24, stream);
+  });
+  std::vector<std::uint32_t> radix_window_output(static_cast<std::size_t>(count));
+  CUDA_CHECK(cudaMemcpy(radix_window_output.data(),
+                        window_keys.Current(),
+                        count * sizeof(*window_keys_0),
+                        cudaMemcpyDeviceToHost));
+  if (radix_window_output != window_expected)
+    throw std::runtime_error("CUB radix DoubleBuffer bit-window validation failed");
+
+  fill_random<<<blocks, threads, 0, stream>>>(window_keys_0, count);
+  CUDA_CHECK(cudaGetLastError());
+  CUDA_CHECK(cudaMemcpyAsync(window_values_0,
+                             window_keys_0,
+                             count * sizeof(*window_keys_0),
+                             cudaMemcpyDeviceToDevice,
+                             stream));
+  window_keys   = cub::DoubleBuffer<std::uint32_t>{window_keys_0, window_keys_1};
+  window_values = cub::DoubleBuffer<std::uint32_t>{window_values_0, window_values_1};
+  const auto radix_window_pairs = measure(stream, start, end, iterations, [&] {
+    return cub::DeviceRadixSort::SortPairs(
+      temp, radix_window_pairs_temp_bytes, window_keys, window_values, count, 0, 24, stream);
+  });
+  std::vector<std::uint32_t> radix_window_pair_keys(static_cast<std::size_t>(count));
+  std::vector<std::uint32_t> radix_window_pair_values(static_cast<std::size_t>(count));
+  CUDA_CHECK(cudaMemcpy(radix_window_pair_keys.data(),
+                        window_keys.Current(),
+                        count * sizeof(*window_keys_0),
+                        cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaMemcpy(radix_window_pair_values.data(),
+                        window_values.Current(),
+                        count * sizeof(*window_values_0),
+                        cudaMemcpyDeviceToHost));
+  if (radix_window_pair_keys != window_expected || radix_window_pair_values != window_expected)
+    throw std::runtime_error("CUB radix pair DoubleBuffer bit-window validation failed");
   const auto merge = measure(stream, start, end, iterations, [&] {
     return cub::DeviceMergeSort::SortKeysCopy(
       temp, merge_temp_bytes, input, output, count, cuda::std::less<>{}, stream);
@@ -269,12 +339,15 @@ try
 
   std::printf(
     "CCCL_ORDERING items=%lld cub_radix_gpu_median_ms=%.6f cub_radix_pairs_gpu_median_ms=%.6f "
+    "cub_radix_window_gpu_median_ms=%.6f cub_radix_window_pairs_gpu_median_ms=%.6f "
     "cub_merge_sort_copy_gpu_median_ms=%.6f cub_merge_sort_pairs_copy_gpu_median_ms=%.6f "
     "thrust_sort_gpu_median_ms=%.6f thrust_sort_by_key_gpu_median_ms=%.6f "
     "radix_temp_bytes=%zu radix_pairs_temp_bytes=%zu merge_temp_bytes=%zu merge_pairs_temp_bytes=%zu\n",
     static_cast<long long>(count),
     radix[radix.size() / 2],
     radix_pairs[radix_pairs.size() / 2],
+    radix_window[radix_window.size() / 2],
+    radix_window_pairs[radix_window_pairs.size() / 2],
     merge[merge.size() / 2],
     merge_pairs[merge_pairs.size() / 2],
     thrust_samples[thrust_samples.size() / 2],
@@ -286,6 +359,10 @@ try
 
   CUDA_CHECK(cudaFree(errors));
   CUDA_CHECK(cudaFree(temp));
+  CUDA_CHECK(cudaFree(window_values_1));
+  CUDA_CHECK(cudaFree(window_values_0));
+  CUDA_CHECK(cudaFree(window_keys_1));
+  CUDA_CHECK(cudaFree(window_keys_0));
   CUDA_CHECK(cudaFree(thrust_pair_values));
   CUDA_CHECK(cudaFree(thrust_pair_keys));
   CUDA_CHECK(cudaFree(thrust_keys));

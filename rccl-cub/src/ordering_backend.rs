@@ -2344,6 +2344,257 @@ pub fn radix_init_bins_and_counters_agent(
     }
 }
 
+// These hidden function items are the Rust spelling of CUB's primitive
+// `Traits` operations.  The proc macro selects the exact item for the key type
+// and direction.  Keeping each operation as one named item is significant:
+// identical operation-macro calls then have identical callable types, so
+// cuda-oxide emits one kernel specialization instead of one per call site.
+// None of the functions performs runtime policy or type dispatch.
+
+#[doc(hidden)]
+#[inline(always)]
+pub fn radix_default_u32() -> u32 {
+    u32::MAX
+}
+
+#[doc(hidden)]
+#[inline(always)]
+pub fn radix_default_u64() -> u64 {
+    u64::MAX
+}
+
+#[doc(hidden)]
+#[inline(always)]
+pub fn radix_u32_to_ordered_ascending(key: u32) -> u32 {
+    key
+}
+
+#[doc(hidden)]
+#[inline(always)]
+pub fn radix_u32_from_ordered_ascending(ordered: u32) -> u32 {
+    ordered
+}
+
+#[doc(hidden)]
+#[inline(always)]
+pub fn radix_u32_to_ordered_descending(key: u32) -> u32 {
+    !key
+}
+
+#[doc(hidden)]
+#[inline(always)]
+pub fn radix_u32_from_ordered_descending(ordered: u32) -> u32 {
+    !ordered
+}
+
+#[doc(hidden)]
+#[inline(always)]
+pub fn radix_i32_to_ordered_ascending(key: i32) -> u32 {
+    (key as u32) ^ 0x8000_0000
+}
+
+#[doc(hidden)]
+#[inline(always)]
+pub fn radix_i32_from_ordered_ascending(ordered: u32) -> i32 {
+    (ordered ^ 0x8000_0000) as i32
+}
+
+#[doc(hidden)]
+#[inline(always)]
+pub fn radix_i32_to_ordered_descending(key: i32) -> u32 {
+    !((key as u32) ^ 0x8000_0000)
+}
+
+#[doc(hidden)]
+#[inline(always)]
+pub fn radix_i32_from_ordered_descending(ordered: u32) -> i32 {
+    ((!ordered) ^ 0x8000_0000) as i32
+}
+
+#[doc(hidden)]
+#[inline(always)]
+pub fn radix_f32_to_ordered_ascending(key: f32) -> u32 {
+    let raw = key.to_bits();
+    if raw & 0x8000_0000 != 0 {
+        !raw
+    } else {
+        raw ^ 0x8000_0000
+    }
+}
+
+#[doc(hidden)]
+#[inline(always)]
+pub fn radix_f32_from_ordered_ascending(ordered: u32) -> f32 {
+    let raw = if ordered & 0x8000_0000 != 0 {
+        ordered ^ 0x8000_0000
+    } else {
+        !ordered
+    };
+    f32::from_bits(raw)
+}
+
+#[doc(hidden)]
+#[inline(always)]
+pub fn radix_f32_to_ordered_descending(key: f32) -> u32 {
+    !radix_f32_to_ordered_ascending(key)
+}
+
+#[doc(hidden)]
+#[inline(always)]
+pub fn radix_f32_from_ordered_descending(ordered: u32) -> f32 {
+    radix_f32_from_ordered_ascending(!ordered)
+}
+
+#[doc(hidden)]
+#[inline(always)]
+pub fn radix_u64_to_ordered_ascending(key: u64) -> u64 {
+    key
+}
+
+#[doc(hidden)]
+#[inline(always)]
+pub fn radix_u64_from_ordered_ascending(ordered: u64) -> u64 {
+    ordered
+}
+
+#[doc(hidden)]
+#[inline(always)]
+pub fn radix_u64_to_ordered_descending(key: u64) -> u64 {
+    !key
+}
+
+#[doc(hidden)]
+#[inline(always)]
+pub fn radix_u64_from_ordered_descending(ordered: u64) -> u64 {
+    !ordered
+}
+
+#[doc(hidden)]
+#[inline(always)]
+pub fn radix_i64_to_ordered_ascending(key: i64) -> u64 {
+    (key as u64) ^ 0x8000_0000_0000_0000
+}
+
+#[doc(hidden)]
+#[inline(always)]
+pub fn radix_i64_from_ordered_ascending(ordered: u64) -> i64 {
+    (ordered ^ 0x8000_0000_0000_0000) as i64
+}
+
+#[doc(hidden)]
+#[inline(always)]
+pub fn radix_i64_to_ordered_descending(key: i64) -> u64 {
+    !((key as u64) ^ 0x8000_0000_0000_0000)
+}
+
+#[doc(hidden)]
+#[inline(always)]
+pub fn radix_i64_from_ordered_descending(ordered: u64) -> i64 {
+    ((!ordered) ^ 0x8000_0000_0000_0000) as i64
+}
+
+#[doc(hidden)]
+#[inline(always)]
+pub fn radix_f64_to_ordered_ascending(key: f64) -> u64 {
+    let raw = key.to_bits();
+    if raw & 0x8000_0000_0000_0000 != 0 {
+        !raw
+    } else {
+        raw ^ 0x8000_0000_0000_0000
+    }
+}
+
+#[doc(hidden)]
+#[inline(always)]
+pub fn radix_f64_from_ordered_ascending(ordered: u64) -> f64 {
+    let raw = if ordered & 0x8000_0000_0000_0000 != 0 {
+        ordered ^ 0x8000_0000_0000_0000
+    } else {
+        !ordered
+    };
+    f64::from_bits(raw)
+}
+
+#[doc(hidden)]
+#[inline(always)]
+pub fn radix_f64_to_ordered_descending(key: f64) -> u64 {
+    !radix_f64_to_ordered_ascending(key)
+}
+
+#[doc(hidden)]
+#[inline(always)]
+pub fn radix_f64_from_ordered_descending(ordered: u64) -> f64 {
+    radix_f64_from_ordered_ascending(!ordered)
+}
+
+#[doc(hidden)]
+#[inline(always)]
+pub fn radix_digit_u32(ordered: u32, bit: u32, bits: u32) -> u32 {
+    (ordered >> bit) & ((1u32 << bits) - 1)
+}
+
+#[doc(hidden)]
+#[inline(always)]
+pub fn radix_rank_digit_u32(ordered: u32, bit: u32, bits: u32) -> u32 {
+    ordered.rotate_right(bit) & ((1u32 << bits) - 1)
+}
+
+#[doc(hidden)]
+#[inline(always)]
+pub fn radix_float_digit_u32(ordered: u32, bit: u32, bits: u32) -> u32 {
+    let zero_ordered = if ordered == 0x7fff_ffff {
+        0x8000_0000
+    } else {
+        ordered
+    };
+    radix_digit_u32(zero_ordered, bit, bits)
+}
+
+#[doc(hidden)]
+#[inline(always)]
+pub fn radix_float_rank_digit_u32(ordered: u32, bit: u32, bits: u32) -> u32 {
+    let zero_ordered = if ordered == 0x7fff_ffff {
+        0x8000_0000
+    } else {
+        ordered
+    };
+    radix_rank_digit_u32(zero_ordered, bit, bits)
+}
+
+#[doc(hidden)]
+#[inline(always)]
+pub fn radix_digit_u64(ordered: u64, bit: u32, bits: u32) -> u32 {
+    ((ordered >> bit) & ((1u64 << bits) - 1)) as u32
+}
+
+#[doc(hidden)]
+#[inline(always)]
+pub fn radix_rank_digit_u64(ordered: u64, bit: u32, bits: u32) -> u32 {
+    (ordered.rotate_right(bit) & ((1u64 << bits) - 1)) as u32
+}
+
+#[doc(hidden)]
+#[inline(always)]
+pub fn radix_float_digit_u64(ordered: u64, bit: u32, bits: u32) -> u32 {
+    let zero_ordered = if ordered == 0x7fff_ffff_ffff_ffff {
+        0x8000_0000_0000_0000
+    } else {
+        ordered
+    };
+    radix_digit_u64(zero_ordered, bit, bits)
+}
+
+#[doc(hidden)]
+#[inline(always)]
+pub fn radix_float_rank_digit_u64(ordered: u64, bit: u32, bits: u32) -> u32 {
+    let zero_ordered = if ordered == 0x7fff_ffff_ffff_ffff {
+        0x8000_0000_0000_0000
+    } else {
+        ordered
+    };
+    radix_rank_digit_u64(zero_ordered, bit, bits)
+}
+
 /// Exact pinned SM80+ histogram agent used before one-sweep radix passes.
 ///
 /// `to_ordered` and `digit` are proc-macro-emitted primitive operations. This
@@ -3258,8 +3509,171 @@ pub fn radix_onesweep_pairs_agent<
 mod tests {
     use super::{
         block_exchange_index, block_exchange_storage_items, load_to_shared_buffer_bytes,
-        local_merge_path_begin,
+        local_merge_path_begin, radix_digit_u32, radix_digit_u64, radix_f32_from_ordered_ascending,
+        radix_f32_from_ordered_descending, radix_f32_to_ordered_ascending,
+        radix_f32_to_ordered_descending, radix_f64_from_ordered_ascending,
+        radix_f64_from_ordered_descending, radix_f64_to_ordered_ascending,
+        radix_f64_to_ordered_descending, radix_float_digit_u32, radix_float_digit_u64,
+        radix_float_rank_digit_u32, radix_float_rank_digit_u64, radix_i32_from_ordered_ascending,
+        radix_i32_from_ordered_descending, radix_i32_to_ordered_ascending,
+        radix_i32_to_ordered_descending, radix_i64_from_ordered_ascending,
+        radix_i64_from_ordered_descending, radix_i64_to_ordered_ascending,
+        radix_i64_to_ordered_descending, radix_rank_digit_u32, radix_rank_digit_u64,
+        radix_u32_from_ordered_ascending, radix_u32_from_ordered_descending,
+        radix_u32_to_ordered_ascending, radix_u32_to_ordered_descending,
+        radix_u64_from_ordered_ascending, radix_u64_from_ordered_descending,
+        radix_u64_to_ordered_ascending, radix_u64_to_ordered_descending,
     };
+
+    #[test]
+    fn primitive_radix_function_items_round_trip_every_supported_representation() {
+        for key in [0u32, 1, u32::MAX, 0x8000_0000, 0x1234_5678] {
+            assert_eq!(
+                radix_u32_from_ordered_ascending(radix_u32_to_ordered_ascending(key)),
+                key
+            );
+            assert_eq!(
+                radix_u32_from_ordered_descending(radix_u32_to_ordered_descending(key)),
+                key
+            );
+        }
+        for key in [i32::MIN, -1, 0, 1, i32::MAX] {
+            assert_eq!(
+                radix_i32_from_ordered_ascending(radix_i32_to_ordered_ascending(key)),
+                key
+            );
+            assert_eq!(
+                radix_i32_from_ordered_descending(radix_i32_to_ordered_descending(key)),
+                key
+            );
+        }
+        for raw in [
+            0u32,
+            0x8000_0000,
+            1.0f32.to_bits(),
+            (-1.0f32).to_bits(),
+            f32::INFINITY.to_bits(),
+            f32::NAN.to_bits(),
+        ] {
+            let key = f32::from_bits(raw);
+            assert_eq!(
+                radix_f32_from_ordered_ascending(radix_f32_to_ordered_ascending(key)).to_bits(),
+                raw
+            );
+            assert_eq!(
+                radix_f32_from_ordered_descending(radix_f32_to_ordered_descending(key)).to_bits(),
+                raw
+            );
+        }
+        for key in [
+            0u64,
+            1,
+            u64::MAX,
+            0x8000_0000_0000_0000,
+            0x1234_5678_9abc_def0,
+        ] {
+            assert_eq!(
+                radix_u64_from_ordered_ascending(radix_u64_to_ordered_ascending(key)),
+                key
+            );
+            assert_eq!(
+                radix_u64_from_ordered_descending(radix_u64_to_ordered_descending(key)),
+                key
+            );
+        }
+        for key in [i64::MIN, -1, 0, 1, i64::MAX] {
+            assert_eq!(
+                radix_i64_from_ordered_ascending(radix_i64_to_ordered_ascending(key)),
+                key
+            );
+            assert_eq!(
+                radix_i64_from_ordered_descending(radix_i64_to_ordered_descending(key)),
+                key
+            );
+        }
+        for raw in [
+            0u64,
+            0x8000_0000_0000_0000,
+            1.0f64.to_bits(),
+            (-1.0f64).to_bits(),
+            f64::INFINITY.to_bits(),
+            f64::NAN.to_bits(),
+        ] {
+            let key = f64::from_bits(raw);
+            assert_eq!(
+                radix_f64_from_ordered_ascending(radix_f64_to_ordered_ascending(key)).to_bits(),
+                raw
+            );
+            assert_eq!(
+                radix_f64_from_ordered_descending(radix_f64_to_ordered_descending(key)).to_bits(),
+                raw
+            );
+        }
+    }
+
+    #[test]
+    fn radix_rank_digit_is_equivalent_for_every_valid_window_shape() {
+        let ordered32 = 0xd3a5_7c19u32;
+        for bit in 0..32u32 {
+            for bits in 1..=(32 - bit).min(8) {
+                assert_eq!(
+                    radix_rank_digit_u32(ordered32, bit, bits),
+                    radix_digit_u32(ordered32, bit, bits)
+                );
+            }
+        }
+        let ordered64 = 0xd3a5_7c19_2468_bdefu64;
+        for bit in 0..64u32 {
+            for bits in 1..=(64 - bit).min(8) {
+                assert_eq!(
+                    radix_rank_digit_u64(ordered64, bit, bits),
+                    radix_digit_u64(ordered64, bit, bits)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn floating_radix_digits_make_signed_zero_equivalent_in_both_directions() {
+        for to_ordered in [
+            radix_f32_to_ordered_ascending as fn(f32) -> u32,
+            radix_f32_to_ordered_descending,
+        ] {
+            let positive = to_ordered(0.0);
+            let negative = to_ordered(-0.0);
+            for bit in 0..32u32 {
+                for bits in 1..=(32 - bit).min(8) {
+                    assert_eq!(
+                        radix_float_digit_u32(positive, bit, bits),
+                        radix_float_digit_u32(negative, bit, bits)
+                    );
+                    assert_eq!(
+                        radix_float_rank_digit_u32(positive, bit, bits),
+                        radix_float_rank_digit_u32(negative, bit, bits)
+                    );
+                }
+            }
+        }
+        for to_ordered in [
+            radix_f64_to_ordered_ascending as fn(f64) -> u64,
+            radix_f64_to_ordered_descending,
+        ] {
+            let positive = to_ordered(0.0);
+            let negative = to_ordered(-0.0);
+            for bit in 0..64u32 {
+                for bits in 1..=(64 - bit).min(8) {
+                    assert_eq!(
+                        radix_float_digit_u64(positive, bit, bits),
+                        radix_float_digit_u64(negative, bit, bits)
+                    );
+                    assert_eq!(
+                        radix_float_rank_digit_u64(positive, bit, bits),
+                        radix_float_rank_digit_u64(negative, bit, bits)
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn signed_local_merge_path_clamps_to_zero_like_cub() {
