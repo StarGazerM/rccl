@@ -14,8 +14,10 @@ ordinary Rust call tokens
 
 The DSL is shallow and user-call-facing. There is no separate language file,
 parser input file, or runtime compiler manifest. Rust expressions, closures,
-paths, borrows, generic arguments, and inferred types stay Rust syntax; the
-operation macro changes only the meaning and lowering of the call.
+paths, borrows, and generic arguments stay Rust syntax; the operation macro
+changes only the meaning and lowering of the call. Any type fact that changes
+a CCCL TMP selection is an explicit macro generic, because a stable proc macro
+cannot query rustc's later type inference.
 
 ## Public call shape
 
@@ -24,14 +26,18 @@ An operation that needs compile-time CUB/Thrust selection is a macro, like
 compile-time work:
 
 ```rust,ignore
-sort_by!(&exec, &mut keys, |left: &i64, right: &i64| right.cmp(left))?;
+sort_by!(::<i64>(
+    &exec,
+    &mut keys,
+    |left: &i64, right: &i64| right.cmp(left),
+))?;
 
-stable_sort_by_key!(
+stable_sort_by_key!(::<i64, u32>(
     &exec,
     &mut keys,
     &mut values,
     |left: &i64, right: &i64| left.cmp(right),
-)?;
+))?;
 
 device_reduce!(
     &exec,
@@ -41,11 +47,15 @@ device_reduce!(
     0_i64,
 )?;
 
-let aggregate = warp_reduce!(
-    32,
+let aggregate = warp_reduce!(::<i32, 32>(
     thread_value,
     |left, right| left + right,
-);
+));
+
+let aggregate = warp_reduce_items!(::<i32, 32, 4>(
+    thread_items,
+    |left, right| left + right,
+));
 
 transform!(
     &exec,
@@ -55,11 +65,13 @@ transform!(
 )?;
 ```
 
-`warp_reduce!` and the shown finite-constant `transform!` intersection are
-implemented and exported; the sort and reduce snippets still specify intended
-syntax and remain absent until their cuda-oxide lowering and launch path
-exist. There is no compiling stub, compatibility wrapper, runtime error, or
-CPU fallback for an unavailable operation.
+`warp_reduce!`, the shown finite-constant `transform!` intersection, and the
+primitive numeric sort/merge slice are implemented and exported. Natural
+integer/`f32`/`f64` sort lowers through CUB radix sort; custom ordering lowers
+through CUB merge sort. Floating radix transformation, including stable
+signed-zero equivalence, is selected from the explicit key type during macro
+expansion. The ordering parity gate remains failing until the kernel schedules
+and throughput match pinned CCCL. There is no CPU fallback.
 
 `sort_by!` has one mutable range. `stable_sort_by_key!` has separate key and
 value ranges and preserves the relative order of equal keys. The `_by_key`
@@ -67,10 +79,14 @@ suffix therefore denotes a different semantic input shape, not a comparator
 kind. `compare` is an ordinary Rust closure expression; RCCL has no
 `Comparator`, `Less`, or `Greater` object hierarchy.
 
-The macro parser stores operands as `syn::Expr`. It cannot and does not inspect
-the inferred type of those expressions. It emits generic Rust whose bounds
-express the required read/write/random-access capabilities, then rustc checks
-the concrete types and monomorphizes the generated code.
+The macro parser stores runtime operands as `syn::Expr`; TMP types and constants
+are explicit `syn::Type`/literal syntax. It cannot inspect the inferred type or
+array extent of an operand expression. Any such fact needed by lowering is
+therefore a template input, not ordinary later type information:
+`sort!(::<u32>(...))`, `warp_reduce!(::<i32, 32>(...))`, and
+`warp_reduce_items!(::<i32, 32, 4>(...))`. Untyped forms are rejected. Rustc
+checks that the explicit TMP facts agree with the concrete expressions; it
+does not select the RCCL algorithm or policy.
 
 ## What is and is not the DSL
 
@@ -80,12 +96,12 @@ The user-facing macro invocation is the DSL. The files
 language:
 
 ```text
-CubCall       = operation-specific Rust Expr fields
+CubCall       = operation-specific Rust Type* x Expr* fields
 CubPrimitive  = Name x Status x Scope x Dependency* x Schedule? x Kernel* x Contract
 Contract      = Capability* x CallableShape x StorageClass
 Schedule      = Name x (Target -> literal tuning row)
 
-ThrustCall    = operation-specific Rust Expr fields
+ThrustCall    = operation-specific Rust Type* x Expr* fields
 Algorithm     = Name x Status x Form x CubDependency* x SelectionRule*
 SelectionRule = CompileTimePredicate -> CubPrimitive
 ```
@@ -137,21 +153,22 @@ Runtime crates own only values that exist while a program runs:
 - launch dimensions derived from runtime lengths; and
 - completion and error values.
 
-`Execution` is only a borrowed stream plus allocator. It contains no module
-set, schedule, architecture, type map, specialization cache, or compiler
-policy.
+`Execution` is only borrowed runtime values: stream, allocator where required,
+and one statically typed program-local cuda-oxide module. It contains no module
+set, schedule, architecture, type map, specialization cache, or compiler policy.
 
 ## Expansion contract
 
-For call syntax `C`, rustc-inferred type facts `T`, and compiler target `G`,
+For call syntax `C`, macro-visible TMP type facts `T`, and compiler target `G`,
 the generated generic program realizes the partial function
 
 ```text
 lower(C, T, G) = (concrete CUB operation, literal schedule, oxide kernel set)
 ```
 
-The proc macro sees `C` and emits the source that lets rustc determine `T` and
-`G`. RCCL never discovers them at runtime.
+The proc macro sees `C` and `T` directly. It emits source for `G` that rustc and
+cuda-oxide type-check and monomorphize. RCCL never discovers a strategy through
+`TypeId`, `Any`, a runtime registry, or a fallback branch.
 
 For a device-wide operation, the CUB macro layer emits:
 
@@ -163,8 +180,8 @@ For a device-wide operation, the CUB macro layer emits:
 For a cooperative device operation used inside a caller-authored kernel, such
 as `warp_reduce!`, it instead emits a safe expression selecting the concrete
 tile implementation. The caller's kernel remains ordinary cuda-oxide Rust;
-the macro owns the closed tile width and operation choice, while rustc owns
-the inferred scalar and closure types.
+the macro owns scalar representation, tile width, per-thread item count,
+closure typing, and operation selection. Rustc checks the resulting expression.
 
 The Thrust layer parses the public algorithm shape and lowers directly to its
 CUB operation. It does not recreate C++ iterator-pair or execution-policy

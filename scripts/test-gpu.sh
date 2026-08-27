@@ -48,9 +48,11 @@ if rg -n 'emit_support' rccl-cub rccl-thrust --glob '*.rs' --glob 'Cargo.toml'; 
   printf '%s\n' 'ordinary support code must not be emitted by a proc macro' >&2
   exit 1
 fi
-if ! rg -q '^pub use rccl_cub_macros::\{warp_reduce, warp_reduce_items\};$' rccl-cub/src/lib.rs \
-  || ! rg -q '__device_transform_kernels, __device_transform_repeat_in_place' rccl-cub/src/lib.rs; then
-  printf '%s\n' 'rccl-cub must own the public WarpReduce and hidden device-transform operations' >&2
+if ! rg -q 'warp_reduce,' rccl-cub/src/lib.rs \
+  || ! rg -q 'warp_reduce_items,' rccl-cub/src/lib.rs \
+  || ! rg -q '__device_kernels, __device_transform_repeat_in_place' rccl-cub/src/lib.rs \
+  || ! rg -q 'device_radix_sort_keys' rccl-cub/src/lib.rs; then
+  printf '%s\n' 'rccl-cub must own the public collectives/ordering and hidden device-kernel operations' >&2
   exit 1
 fi
 
@@ -67,28 +69,40 @@ if rg -n "$forbidden_codegen_loader" \
   printf '%s\n' 'proc-macro expansion contains a runtime loader or manual launch ABI' >&2
   exit 1
 fi
-if ! cmp -s rccl-cub-macros/src/audit.rs rccl-thrust-macros/src/audit.rs; then
-  printf '%s\n' 'CUB and Thrust generated-Rust safety audits have drifted apart' >&2
-  exit 1
-fi
-for audit_rule in \
-  visit_attribute \
-  visit_expr_cast \
-  visit_expr_method_call \
-  visit_expr_raw_addr \
-  visit_expr_unsafe \
-  visit_item_foreign_mod \
-  visit_item_impl \
-  visit_item_static \
-  visit_item_trait \
-  visit_item_union \
-  visit_macro \
-  visit_path \
-  visit_signature \
-  visit_type_fn_ptr \
-  visit_type_ptr; do
-  if ! rg -q "fn $audit_rule" rccl-cub-macros/src/audit.rs; then
-    printf '%s\n' "generated-Rust safety audit is missing $audit_rule" >&2
+for audit in rccl-cub-macros/src/audit.rs rccl-thrust-macros/src/audit.rs; do
+  for audit_rule in \
+    visit_attribute \
+    visit_expr_cast \
+    visit_expr_method_call \
+    visit_expr_raw_addr \
+    visit_expr_unsafe \
+    visit_item_foreign_mod \
+    visit_item_impl \
+    visit_item_static \
+    visit_item_trait \
+    visit_item_union \
+    visit_macro \
+    visit_path \
+    visit_signature \
+    visit_type_fn_ptr \
+    visit_type_ptr; do
+    if ! rg -q "fn $audit_rule" "$audit"; then
+      printf '%s\n' "$audit is missing generated-Rust safety rule $audit_rule" >&2
+      exit 1
+    fi
+  done
+done
+for cub_edge in \
+  device_merge_keys \
+  device_merge_pairs \
+  device_merge_sort_keys \
+  device_stable_merge_sort_keys \
+  device_merge_sort_pairs \
+  device_stable_merge_sort_pairs \
+  device_radix_sort_keys \
+  device_radix_sort_pairs; do
+  if ! rg -q "\"$cub_edge\"" rccl-thrust-macros/src/audit.rs; then
+    printf '%s\n' "Thrust generated-Rust audit is missing exact CUB edge $cub_edge" >&2
     exit 1
   fi
 done
@@ -113,30 +127,35 @@ if ! rg -q 'DeviceReduceSumCall' rccl-cub-macros/src/call.rs \
   || ! rg -q '#\[derive\(Debug, syn_derive::Parse\)\]' rccl-thrust-macros/src/call.rs \
   || ! rg -q 'Punctuated<Expr, Token!\[,\]>' rccl-cub-macros/src/call.rs \
   || ! rg -q 'Punctuated<Expr, Token!\[,\]>' rccl-thrust-macros/src/call.rs \
+  || ! rg -q 'Punctuated<Type' rccl-cub-macros/src/call.rs \
+  || ! rg -q 'Punctuated<Type' rccl-thrust-macros/src/call.rs \
   || ! rg -q 'pub\(crate\).*: Expr' rccl-cub-macros/src/call.rs \
   || ! rg -q 'pub\(crate\).*: Expr' rccl-thrust-macros/src/call.rs; then
-  printf '%s\n' 'operation DSLs must be shallow syn 3 call ASTs retaining Rust expressions' >&2
+  printf '%s\n' 'operation DSLs must retain Rust expressions and macro-visible TMP types in shallow syn 3 ASTs' >&2
   exit 1
 fi
 if rg -n 'emit_support' rccl-cub-macros/src rccl-thrust-macros/src --glob '*.rs'; then
   printf '%s\n' 'deleted support-generation syntax returned' >&2
   exit 1
 fi
-if [[ "$(rg -c '^#\[proc_macro\]$' rccl-cub-macros/src/lib.rs)" != 4 ]] \
-  || ! rg -q '^pub fn warp_reduce\(' rccl-cub-macros/src/lib.rs \
+if ! rg -q '^pub fn warp_reduce\(' rccl-cub-macros/src/lib.rs \
   || ! rg -q '^pub fn warp_reduce_items\(' rccl-cub-macros/src/lib.rs \
-  || ! rg -q '^pub fn __device_transform_kernels\(' rccl-cub-macros/src/lib.rs \
+  || ! rg -q '^pub fn cub_kernels\(' rccl-cub-macros/src/lib.rs \
+  || ! rg -q '^pub fn __device_kernels\(' rccl-cub-macros/src/lib.rs \
   || ! rg -q '^pub fn __device_transform_repeat_in_place\(' rccl-cub-macros/src/lib.rs \
-  || [[ "$(rg -c '^#\[proc_macro\]$' rccl-thrust-macros/src/lib.rs)" != 2 ]] \
+  || ! rg -q 'device_merge_keys' rccl-cub-macros/src/lib.rs \
+  || ! rg -q 'device_radix_sort_keys' rccl-cub-macros/src/lib.rs \
   || ! rg -q '^pub fn thrust_kernels\(' rccl-thrust-macros/src/lib.rs \
-  || ! rg -q '^pub fn transform\(' rccl-thrust-macros/src/lib.rs; then
+  || ! rg -q '^pub fn transform\(' rccl-thrust-macros/src/lib.rs \
+  || ! rg -qF 'algorithm_macro!(sort' rccl-thrust-macros/src/lib.rs \
+  || ! rg -qF 'algorithm_macro!(merge' rccl-thrust-macros/src/lib.rs; then
   printf '%s\n' 'exported proc macros must match the implemented CUB and Thrust slices' >&2
   exit 1
 fi
 if rg -n 'cuda_module|#\[kernel' rccl-thrust-macros/src/lib.rs \
-  || ! rg -q '__device_transform_kernels' rccl-thrust-macros/src/lib.rs \
+  || ! rg -q '__device_kernels' rccl-thrust-macros/src/lib.rs \
   || ! rg -q '__device_transform_repeat_in_place' rccl-thrust-macros/src/lib.rs; then
-  printf '%s\n' 'Thrust must lower transform through CUB macros rather than own a CUDA kernel' >&2
+  printf '%s\n' 'Thrust must lower every GPU algorithm through CUB macros rather than own a CUDA kernel' >&2
   exit 1
 fi
 if ! rg -q 'pub\(crate\) const PRIMITIVES: &\[Primitive\]' rccl-cub-macros/src/catalog.rs \
@@ -163,12 +182,17 @@ mapfile -t rust_examples < <(
     -type f -name '*.rs' 2>/dev/null | sort
 )
 expected_rust_examples=(
+  rccl-cub/examples/device_ordering_benchmark.rs
+  rccl-cub/examples/device_ordering_probe.rs
   rccl-cub/examples/warp_reduce.rs
   rccl-cub/examples/warp_reduce_benchmark.rs
   rccl-cub/examples/warp_reduce_catch2.rs
   rccl-cub/examples/warp_reduce_catch2_f32.rs
   rccl-thrust/examples/constant_iterator.rs
   rccl-thrust/examples/constant_iterator_benchmark.rs
+  rccl-thrust/examples/merge.rs
+  rccl-thrust/examples/ordering_benchmark.rs
+  rccl-thrust/examples/sort.rs
 )
 if ! diff -u \
   <(printf '%s\n' "${expected_rust_examples[@]}") \
@@ -187,6 +211,7 @@ RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
 scripts/test-warp-reduce.sh
 scripts/test-thrust-constant-iterator.sh
 scripts/test-current-performance-parity.sh
+scripts/test-ordering-performance-parity.sh
 
 printf '%s\n' 'RCCL proc-macro compiler and runtime-boundary gate: PASS'
 printf '%s\n' 'Pinned implemented CUB and Thrust examples plus result/performance parity executed.'

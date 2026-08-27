@@ -9,7 +9,88 @@ use core::alloc::{Layout, LayoutError};
 use cuda_core::DeviceCopy;
 use rccl_memory::{DeviceAllocator, DeviceBlock};
 
-pub use rccl_cub_macros::{warp_reduce, warp_reduce_items};
+pub use rccl_cub_macros::{
+    cub_kernels, device_merge_keys, device_merge_pairs, device_merge_sort_keys,
+    device_merge_sort_keys_copy, device_merge_sort_pairs, device_merge_sort_pairs_copy,
+    device_radix_sort_keys, device_radix_sort_keys_descending, device_radix_sort_pairs,
+    device_radix_sort_pairs_descending, device_stable_merge_sort_keys,
+    device_stable_merge_sort_keys_copy, device_stable_merge_sort_pairs, warp_reduce,
+    warp_reduce_items,
+};
+
+/// Borrowed launch context for direct CUB device-wide operations.
+///
+/// It contains runtime values only. Kernel families and schedules are emitted
+/// by `cub_kernels!`; this value does not own a registry, cache, policy, target,
+/// or compiler handle.
+pub mod cuda {
+    use cuda_core::CudaStream;
+
+    #[derive(Clone, Copy)]
+    pub struct Execution<'stream, 'module, M> {
+        stream: &'stream CudaStream,
+        module: &'module M,
+    }
+
+    impl<M> Execution<'_, '_, M> {
+        pub fn stream(&self) -> &CudaStream {
+            self.stream
+        }
+
+        #[doc(hidden)]
+        pub fn module(&self) -> &M {
+            self.module
+        }
+    }
+
+    pub fn par<'stream, 'module, M>(
+        stream: &'stream CudaStream,
+        module: &'module M,
+    ) -> Execution<'stream, 'module, M> {
+        Execution { stream, module }
+    }
+}
+
+/// Failure reported by a generated device-wide ordering operation.
+#[derive(Debug)]
+pub enum DeviceAlgorithmError {
+    LengthMismatch {
+        role: &'static str,
+        expected: usize,
+        actual: usize,
+    },
+    SizeOverflow,
+    Driver(cuda_core::DriverError),
+    Launch(cuda_core::LaunchContractError),
+}
+
+impl core::fmt::Display for DeviceAlgorithmError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::LengthMismatch {
+                role,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "{role} length {actual} does not match required length {expected}"
+            ),
+            Self::SizeOverflow => formatter.write_str("combined device range length overflowed"),
+            Self::Driver(error) => error.fmt(formatter),
+            Self::Launch(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for DeviceAlgorithmError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Driver(error) => Some(error),
+            Self::Launch(error) => Some(error),
+            Self::LengthMismatch { .. } | Self::SizeOverflow => None,
+        }
+    }
+}
 
 /// Implementation details used by RCCL's operation macros.
 ///
@@ -21,264 +102,7 @@ pub mod __private {
     pub use cuda_device;
     pub use cuda_host;
     #[doc(hidden)]
-    pub use rccl_cub_macros::{__device_transform_kernels, __device_transform_repeat_in_place};
-
-    use cuda_device::cooperative_groups::{
-        ThreadGroup, WarpCollective, WarpTile, this_thread_block,
-    };
-    use cuda_device::warp;
-
-    /// A scalar that can be exchanged between lanes without exposing a raw
-    /// pointer or a C++-style operator policy.
-    pub trait WarpReduceValue: Copy {
-        fn shuffle_down<const N: u32>(self, tile: &WarpTile<N>, delta: u32) -> Self;
-
-        fn sum_full<const N: u32>(self) -> Self;
-    }
-
-    #[inline(always)]
-    fn redux_mask<const N: u32>() -> u32 {
-        if N == 32 {
-            u32::MAX
-        } else {
-            let first_lane = warp::lane_id() & !(N - 1);
-            ((1u32 << N) - 1) << first_lane
-        }
-    }
-
-    macro_rules! impl_redux_sum_unsigned {
-        ($type:ty) => {
-            #[inline(always)]
-            fn sum_full<const N: u32>(self) -> Self {
-                if N == 1 {
-                    self
-                } else {
-                    warp::redux_sync_add(redux_mask::<N>(), self as u32) as Self
-                }
-            }
-        };
-    }
-
-    macro_rules! impl_redux_sum_signed {
-        ($type:ty) => {
-            #[inline(always)]
-            fn sum_full<const N: u32>(self) -> Self {
-                if N == 1 {
-                    self
-                } else {
-                    warp::redux_sync_add(redux_mask::<N>(), self as i32 as u32) as i32 as Self
-                }
-            }
-        };
-    }
-
-    impl WarpReduceValue for u8 {
-        #[inline(always)]
-        fn shuffle_down<const N: u32>(self, tile: &WarpTile<N>, delta: u32) -> Self {
-            tile.shfl_down(self as u32, delta) as Self
-        }
-
-        impl_redux_sum_unsigned!(u8);
-    }
-
-    impl WarpReduceValue for u16 {
-        #[inline(always)]
-        fn shuffle_down<const N: u32>(self, tile: &WarpTile<N>, delta: u32) -> Self {
-            tile.shfl_down(self as u32, delta) as Self
-        }
-
-        impl_redux_sum_unsigned!(u16);
-    }
-
-    impl WarpReduceValue for u32 {
-        #[inline(always)]
-        fn shuffle_down<const N: u32>(self, tile: &WarpTile<N>, delta: u32) -> Self {
-            tile.shfl_down(self, delta)
-        }
-
-        impl_redux_sum_unsigned!(u32);
-    }
-
-    impl WarpReduceValue for i8 {
-        #[inline(always)]
-        fn shuffle_down<const N: u32>(self, tile: &WarpTile<N>, delta: u32) -> Self {
-            tile.shfl_down(self as u32, delta) as Self
-        }
-
-        impl_redux_sum_signed!(i8);
-    }
-
-    impl WarpReduceValue for i16 {
-        #[inline(always)]
-        fn shuffle_down<const N: u32>(self, tile: &WarpTile<N>, delta: u32) -> Self {
-            tile.shfl_down(self as u32, delta) as Self
-        }
-
-        impl_redux_sum_signed!(i16);
-    }
-
-    impl WarpReduceValue for i32 {
-        #[inline(always)]
-        fn shuffle_down<const N: u32>(self, tile: &WarpTile<N>, delta: u32) -> Self {
-            tile.shfl_down(self as u32, delta) as Self
-        }
-
-        impl_redux_sum_signed!(i32);
-    }
-
-    #[inline(always)]
-    fn shuffle_u64<const N: u32>(bits: u64, tile: &WarpTile<N>, delta: u32) -> u64 {
-        let low = tile.shfl_down(bits as u32, delta) as u64;
-        let high = tile.shfl_down((bits >> 32) as u32, delta) as u64;
-        low | (high << 32)
-    }
-
-    impl WarpReduceValue for u64 {
-        #[inline(always)]
-        fn shuffle_down<const N: u32>(self, tile: &WarpTile<N>, delta: u32) -> Self {
-            shuffle_u64(self, tile, delta)
-        }
-
-        #[inline(always)]
-        fn sum_full<const N: u32>(self) -> Self {
-            warp_reduce_full::<N, _, _>(self, |left, right| left.wrapping_add(right))
-        }
-    }
-
-    impl WarpReduceValue for i64 {
-        #[inline(always)]
-        fn shuffle_down<const N: u32>(self, tile: &WarpTile<N>, delta: u32) -> Self {
-            shuffle_u64(self as u64, tile, delta) as Self
-        }
-
-        #[inline(always)]
-        fn sum_full<const N: u32>(self) -> Self {
-            warp_reduce_full::<N, _, _>(self, |left, right| left.wrapping_add(right))
-        }
-    }
-
-    impl WarpReduceValue for f32 {
-        #[inline(always)]
-        fn shuffle_down<const N: u32>(self, tile: &WarpTile<N>, delta: u32) -> Self {
-            tile.shfl_down_f32(self, delta)
-        }
-
-        #[inline(always)]
-        fn sum_full<const N: u32>(self) -> Self {
-            warp_reduce_full::<N, _, _>(self, |left, right| left + right)
-        }
-    }
-
-    impl WarpReduceValue for f64 {
-        #[inline(always)]
-        fn shuffle_down<const N: u32>(self, tile: &WarpTile<N>, delta: u32) -> Self {
-            f64::from_bits(shuffle_u64(self.to_bits(), tile, delta))
-        }
-
-        #[inline(always)]
-        fn sum_full<const N: u32>(self) -> Self {
-            warp_reduce_full::<N, _, _>(self, |left, right| left + right)
-        }
-    }
-
-    /// Reduce one value per lane in a complete power-of-two logical warp.
-    ///
-    /// This is deliberately separate from the runtime-valid-count overload.
-    /// The complete-warp form has no lane predicates in its shuffle tree,
-    /// matching CUB's full `WarpReduce::Reduce`/`Sum` path.
-    #[inline(always)]
-    pub fn warp_reduce_full<const N: u32, T, F>(value: T, op: F) -> T
-    where
-        T: WarpReduceValue,
-        F: Fn(T, T) -> T + Copy,
-    {
-        let tile = this_thread_block().tiled_partition::<N>();
-        let mut aggregate = value;
-        let mut offset = 1;
-        while offset < N {
-            aggregate = op(aggregate, aggregate.shuffle_down(&tile, offset));
-            offset <<= 1;
-        }
-        aggregate
-    }
-
-    /// Full-warp addition selected from an addition closure by the operation
-    /// macro. Integer values up to 32 bits use CUDA's single-instruction
-    /// `redux.sync.add`, exactly as current CUB does on sm_80+.
-    #[inline(always)]
-    pub fn warp_reduce_sum_full<const N: u32, T>(value: T) -> T
-    where
-        T: WarpReduceValue,
-    {
-        value.sum_full::<N>()
-    }
-
-    /// Reduce one value per lane in a partially populated logical warp.
-    ///
-    /// Only lane zero is promised to hold the aggregate, matching CUB. The
-    /// down-shuffle tree retains left-to-right operand order, so associative
-    /// non-commutative closures are supported as well.
-    #[inline(always)]
-    pub fn warp_reduce<const N: u32, T, F>(value: T, valid_items: u32, op: F) -> T
-    where
-        T: WarpReduceValue,
-        F: Fn(T, T) -> T + Copy,
-    {
-        let tile = this_thread_block().tiled_partition::<N>();
-        let rank = tile.thread_rank();
-        let mut aggregate = value;
-        let mut offset = 1;
-        while offset < N {
-            let other = aggregate.shuffle_down(&tile, offset);
-            if rank < valid_items && rank + offset < valid_items {
-                aggregate = op(aggregate, other);
-            }
-            offset <<= 1;
-        }
-        aggregate
-    }
-
-    /// Fold a fixed-size per-thread Rust array before the warp-wide phase.
-    #[inline(always)]
-    pub fn warp_reduce_items<const N: u32, T, F, const ITEMS: usize>(values: [T; ITEMS], op: F) -> T
-    where
-        T: WarpReduceValue,
-        F: Fn(T, T) -> T + Copy,
-    {
-        const {
-            assert!(ITEMS > 0, "warp_reduce_items! requires a non-empty array");
-        }
-        let mut thread_aggregate = values[0];
-        let mut item = 1;
-        while item < ITEMS {
-            thread_aggregate = op(thread_aggregate, values[item]);
-            item += 1;
-        }
-        warp_reduce_full::<N, _, _>(thread_aggregate, op)
-    }
-
-    /// Fixed-array addition followed by the same builtin full-warp sum path
-    /// used by CUB after its per-thread fold.
-    #[inline(always)]
-    pub fn warp_reduce_items_sum<const N: u32, T, F, const ITEMS: usize>(
-        values: [T; ITEMS],
-        op: F,
-    ) -> T
-    where
-        T: WarpReduceValue,
-        F: Fn(T, T) -> T + Copy,
-    {
-        const {
-            assert!(ITEMS > 0, "warp_reduce_items! requires a non-empty array");
-        }
-        let mut thread_aggregate = values[0];
-        let mut item = 1;
-        while item < ITEMS {
-            thread_aggregate = op(thread_aggregate, values[item]);
-            item += 1;
-        }
-        warp_reduce_sum_full::<N, _>(thread_aggregate)
-    }
+    pub use rccl_cub_macros::{__device_kernels, __device_transform_repeat_in_place};
 }
 
 /// A key/value product used when field names are semantically useful.

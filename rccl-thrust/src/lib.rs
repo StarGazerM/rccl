@@ -6,11 +6,15 @@
 
 pub use cuda_core::DeviceCopy;
 pub use rccl_cub::{
-    ContiguousRange, DeviceRange, DoubleBuffer, KeyValue, RandomAccessRange, ReadRange,
-    TempStorage, TempStorageError, TempStorageLayout, WriteRange,
+    ContiguousRange, DeviceAlgorithmError, DeviceRange, DoubleBuffer, KeyValue, RandomAccessRange,
+    ReadRange, TempStorage, TempStorageError, TempStorageLayout, WriteRange,
 };
 pub use rccl_memory as memory;
-pub use rccl_thrust_macros::{thrust_kernels, transform};
+pub use rccl_thrust_macros::{
+    merge, merge_by, merge_by_key, merge_by_key_with, sort, sort_by, sort_by_key, sort_by_key_with,
+    stable_sort, stable_sort_by, stable_sort_by_key, stable_sort_by_key_with, thrust_kernels,
+    transform,
+};
 
 /// Errors from the implemented in-place repeated-value transform slice.
 #[derive(Debug)]

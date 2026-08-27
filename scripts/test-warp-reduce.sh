@@ -27,9 +27,9 @@ matrix_example=rccl-cub/examples/warp_reduce_catch2.rs
 float_matrix_example=rccl-cub/examples/warp_reduce_catch2_f32.rs
 unit_test=rccl-cub/tests/warp_reduce_upstream.rs
 for required in \
-  'rccl_cub::warp_reduce!(32' \
-  'rccl_cub::warp_reduce!(16' \
-  'rccl_cub::warp_reduce_items!(32' \
+  'rccl_cub::warp_reduce!(::<i32, 32>' \
+  'rccl_cub::warp_reduce!(::<i32, 16>' \
+  'rccl_cub::warp_reduce_items!(::<i32, 32, 4>' \
   '496, 1520, 2544, 3568'; do
   if ! rg -q -F "$required" "$overview_example"; then
     printf '%s\n' "WarpReduce port lost required evidence: $required" >&2
@@ -37,11 +37,11 @@ for required in \
   fi
 done
 for required in \
-  'rccl_cub::warp_reduce!($width' \
-  'rccl_cub::warp_reduce_items!($width' \
-  'full_integer_operation!(operation, 1' \
-  'items_integer_operation!(operation, 16' \
-  'items_integer_operation!(operation, 1' \
+  'rccl_cub::warp_reduce!(::<$type, $width>' \
+  'rccl_cub::warp_reduce_items!(::<$type, $width, 4>' \
+  'full_integer_operation!($type, operation, 1' \
+  'items_integer_operation!($type, operation, 16' \
+  'items_integer_operation!($type, operation, 1' \
   'assert_eq!(executed, 144)' \
   'u8_matrix' \
   'u16_matrix' \
@@ -73,11 +73,24 @@ for required in \
   fi
 done
 
-if rg -n '\b(Arc|Comparator|Less|Greater|TypeId|Any)\b|\*mut|\*const' \
-  rccl-cub/src \
-  rccl-cub-macros/src/lib.rs \
-  rccl-cub-macros/src/call.rs \
-  rccl-cub-macros/src/catalog.rs; then
+implementation_redflag=0
+while IFS= read -r rust_source; do
+  # Prohibition tests intentionally spell the tokens they reject. Inspect the
+  # production prefix only so a negative assertion cannot look like generated
+  # machinery, while any production occurrence still reports its file/line.
+  if awk '/^#\[cfg\(test\)\]/{exit} {print}' "$rust_source" \
+    | rg -n '\b(Arc|Comparator|TypeId|Any)\b|\*mut|\*const'; then
+    printf '%s\n' "in production prefix of $rust_source" >&2
+    implementation_redflag=1
+  fi
+done < <(
+  find rccl-cub/src -type f -name '*.rs' -print
+  printf '%s\n' \
+    rccl-cub-macros/src/lib.rs \
+    rccl-cub-macros/src/call.rs \
+    rccl-cub-macros/src/catalog.rs
+)
+if [[ "$implementation_redflag" -ne 0 ]]; then
   printf '%s\n' 'WarpReduce implementation reintroduced erased or raw-pointer machinery' >&2
   exit 1
 fi

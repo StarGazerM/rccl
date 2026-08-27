@@ -27,7 +27,8 @@ mod kernels {
     )]
     pub fn overview(input: &[i32], mut output: DisjointSlice<i32>) {
         let index = thread::index_1d();
-        let aggregate = rccl_cub::warp_reduce!(32, input[index.get()], |left, right| left + right);
+        let aggregate =
+            rccl_cub::warp_reduce!(::<i32, 32>(input[index.get()], |left, right| left + right));
         if let Some(slot) = output.get_mut(index) {
             *slot = aggregate;
         }
@@ -44,9 +45,11 @@ mod kernels {
     )]
     pub fn partial_sum(input: &[i32], valid_items: u32, mut output: DisjointSlice<i32>) {
         let index = thread::index_1d();
-        let aggregate =
-            rccl_cub::warp_reduce!(32, input[index.get()], valid_items, |left, right| left
-                + right);
+        let aggregate = rccl_cub::warp_reduce!(::<i32, 32>(
+            input[index.get()],
+            valid_items,
+            |left, right| left + right,
+        ));
         if let Some(slot) = output.get_mut(index) {
             *slot = aggregate;
         }
@@ -62,9 +65,10 @@ mod kernels {
     )]
     pub fn logical_16_max(input: &[i32], mut output: DisjointSlice<i32>) {
         let index = thread::index_1d();
-        let aggregate = rccl_cub::warp_reduce!(16, input[index.get()], |left, right| {
-            if left > right { left } else { right }
-        });
+        let aggregate = rccl_cub::warp_reduce!(::<i32, 16>(
+            input[index.get()],
+            |left, right| { if left > right { left } else { right } },
+        ));
         if let Some(slot) = output.get_mut(index) {
             *slot = aggregate;
         }
@@ -88,7 +92,8 @@ mod kernels {
             input[first + 2],
             input[first + 3],
         ];
-        let aggregate = rccl_cub::warp_reduce_items!(32, items, |left, right| left + right);
+        let aggregate =
+            rccl_cub::warp_reduce_items!(::<i32, 32, 4>(items, |left, right| left + right));
         if let Some(slot) = output.get_mut(index) {
             *slot = aggregate;
         }
@@ -105,7 +110,8 @@ mod kernels {
     )]
     pub fn i64_sum(input: &[i64], mut output: DisjointSlice<i64>) {
         let index = thread::index_1d();
-        let aggregate = rccl_cub::warp_reduce!(32, input[index.get()], |left, right| left + right);
+        let aggregate =
+            rccl_cub::warp_reduce!(::<i64, 32>(input[index.get()], |left, right| left + right));
         if let Some(slot) = output.get_mut(index) {
             *slot = aggregate;
         }
@@ -122,8 +128,10 @@ mod kernels {
     )]
     pub fn u8_sum(input: &[u8], mut output: DisjointSlice<u8>) {
         let index = thread::index_1d();
-        let aggregate = rccl_cub::warp_reduce!(32, input[index.get()], |left, right| left
-            .wrapping_add(right));
+        let aggregate = rccl_cub::warp_reduce!(::<u8, 32>(
+            input[index.get()],
+            |left, right| left.wrapping_add(right),
+        ));
         if let Some(slot) = output.get_mut(index) {
             *slot = aggregate;
         }

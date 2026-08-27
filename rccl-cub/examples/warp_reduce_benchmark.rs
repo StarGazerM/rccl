@@ -30,10 +30,11 @@ mod kernels {
         let index = thread::index_1d();
         if let Some(slot) = values.get_mut(index) {
             let value = *slot;
-            let first = rccl_cub::warp_reduce!(32, value, |left, right| left + right);
-            let second = rccl_cub::warp_reduce!(32, value ^ 0x55, |left, right| left + right);
-            let third = rccl_cub::warp_reduce!(32, value * 3, |left, right| left + right);
-            let fourth = rccl_cub::warp_reduce!(32, value - 7, |left, right| left + right);
+            let first = rccl_cub::warp_reduce!(::<i32, 32>(value, |left, right| left + right));
+            let second =
+                rccl_cub::warp_reduce!(::<i32, 32>(value ^ 0x55, |left, right| left + right));
+            let third = rccl_cub::warp_reduce!(::<i32, 32>(value * 3, |left, right| left + right));
+            let fourth = rccl_cub::warp_reduce!(::<i32, 32>(value - 7, |left, right| left + right));
             if warp::lane_id() == 0 {
                 *slot = first + second + third + fourth;
             }

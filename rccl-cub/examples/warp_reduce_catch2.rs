@@ -19,85 +19,85 @@ const ITEMS_PER_THREAD: usize = 4;
 // Runtime selectors choose among already-compiled Catch2 rows. Literal widths
 // and ordinary Rust closure expressions remain inputs to RCCL's proc macros.
 macro_rules! full_integer_operation {
-    ($operation:expr, $width:literal, $value:expr) => {
+    ($type:ty, $operation:expr, $width:literal, $value:expr) => {
         match $operation {
-            0 => rccl_cub::warp_reduce!($width, $value, |left, right| left.wrapping_add(right)),
-            1 => rccl_cub::warp_reduce!($width, $value, |left, right| if left > right {
+            0 => rccl_cub::warp_reduce!(::<$type, $width>($value, |left, right| left.wrapping_add(right))),
+            1 => rccl_cub::warp_reduce!(::<$type, $width>($value, |left, right| if left > right {
                 left
             } else {
                 right
-            }),
-            2 => rccl_cub::warp_reduce!($width, $value, |left, right| if left < right {
+            })),
+            2 => rccl_cub::warp_reduce!(::<$type, $width>($value, |left, right| if left < right {
                 left
             } else {
                 right
-            }),
+            })),
             _ => return,
         }
     };
 }
 
 macro_rules! partial_integer_operation {
-    ($operation:expr, $width:literal, $value:expr, $valid:expr) => {
+    ($type:ty, $operation:expr, $width:literal, $value:expr, $valid:expr) => {
         match $operation {
-            0 => rccl_cub::warp_reduce!($width, $value, $valid, |left, right| left
-                .wrapping_add(right)),
-            1 => rccl_cub::warp_reduce!($width, $value, $valid, |left, right| if left > right {
+            0 => rccl_cub::warp_reduce!(::<$type, $width>($value, $valid, |left, right| left
+                .wrapping_add(right))),
+            1 => rccl_cub::warp_reduce!(::<$type, $width>($value, $valid, |left, right| if left > right {
                 left
             } else {
                 right
-            }),
-            2 => rccl_cub::warp_reduce!($width, $value, $valid, |left, right| if left < right {
+            })),
+            2 => rccl_cub::warp_reduce!(::<$type, $width>($value, $valid, |left, right| if left < right {
                 left
             } else {
                 right
-            }),
+            })),
             _ => return,
         }
     };
 }
 
 macro_rules! items_integer_operation {
-    ($operation:expr, $width:literal, $items:expr) => {
+    ($type:ty, $operation:expr, $width:literal, $items:expr) => {
         match $operation {
             0 => {
-                rccl_cub::warp_reduce_items!($width, $items, |left, right| left.wrapping_add(right))
+                rccl_cub::warp_reduce_items!(::<$type, $width, 4>($items, |left, right| left.wrapping_add(right)))
             }
-            1 => rccl_cub::warp_reduce_items!($width, $items, |left, right| if left > right {
+            1 => rccl_cub::warp_reduce_items!(::<$type, $width, 4>($items, |left, right| if left > right {
                 left
             } else {
                 right
-            }),
-            2 => rccl_cub::warp_reduce_items!($width, $items, |left, right| if left < right {
+            })),
+            2 => rccl_cub::warp_reduce_items!(::<$type, $width, 4>($items, |left, right| if left < right {
                 left
             } else {
                 right
-            }),
+            })),
             _ => return,
         }
     };
 }
 
 macro_rules! integer_reduce_case {
-    ($case:expr, $value:expr, $valid:expr, $items:expr) => {{
+    ($type:ty, $case:expr, $value:expr, $valid:expr, $items:expr) => {{
         let operation = $case % 3;
         match $case / 3 {
-            0 => full_integer_operation!(operation, 32, $value),
-            1 => full_integer_operation!(operation, 16, $value),
-            2 => full_integer_operation!(operation, 1, $value),
-            3 => partial_integer_operation!(operation, 32, $value, $valid),
-            4 => partial_integer_operation!(operation, 16, $value, $valid),
-            5 => partial_integer_operation!(operation, 1, $value, $valid),
-            6 => items_integer_operation!(operation, 32, $items),
-            7 => items_integer_operation!(operation, 16, $items),
-            8 => items_integer_operation!(operation, 1, $items),
+            0 => full_integer_operation!($type, operation, 32, $value),
+            1 => full_integer_operation!($type, operation, 16, $value),
+            2 => full_integer_operation!($type, operation, 1, $value),
+            3 => partial_integer_operation!($type, operation, 32, $value, $valid),
+            4 => partial_integer_operation!($type, operation, 16, $value, $valid),
+            5 => partial_integer_operation!($type, operation, 1, $value, $valid),
+            6 => items_integer_operation!($type, operation, 32, $items),
+            7 => items_integer_operation!($type, operation, 16, $items),
+            8 => items_integer_operation!($type, operation, 1, $items),
             _ => return,
         }
     }};
 }
 
 macro_rules! integer_matrix_body {
-    ($input:ident, $case:ident, $valid_items:ident, $output:ident, $index:ident) => {
+    ($type:ty, $input:ident, $case:ident, $valid_items:ident, $output:ident, $index:ident) => {
         let first = $index.get() * ITEMS_PER_THREAD;
         let value = $input[$index.get()];
         let items = [
@@ -106,7 +106,7 @@ macro_rules! integer_matrix_body {
             $input[first + 2],
             $input[first + 3],
         ];
-        let aggregate = integer_reduce_case!($case, value, $valid_items, items);
+        let aggregate = integer_reduce_case!($type, $case, value, $valid_items, items);
         if let Some(slot) = $output.get_mut($index) {
             *slot = aggregate;
         }
@@ -126,7 +126,7 @@ mod kernels {
     )]
     pub fn u8_matrix(input: &[u8], case: u32, valid_items: u32, mut output: DisjointSlice<u8>) {
         let index = thread::index_1d();
-        integer_matrix_body!(input, case, valid_items, output, index);
+        integer_matrix_body!(u8, input, case, valid_items, output, index);
     }
 
     #[kernel]
@@ -138,7 +138,7 @@ mod kernels {
     )]
     pub fn u16_matrix(input: &[u16], case: u32, valid_items: u32, mut output: DisjointSlice<u16>) {
         let index = thread::index_1d();
-        integer_matrix_body!(input, case, valid_items, output, index);
+        integer_matrix_body!(u16, input, case, valid_items, output, index);
     }
 
     #[kernel]
@@ -150,7 +150,7 @@ mod kernels {
     )]
     pub fn i32_matrix(input: &[i32], case: u32, valid_items: u32, mut output: DisjointSlice<i32>) {
         let index = thread::index_1d();
-        integer_matrix_body!(input, case, valid_items, output, index);
+        integer_matrix_body!(i32, input, case, valid_items, output, index);
     }
 
     #[kernel]
@@ -162,7 +162,7 @@ mod kernels {
     )]
     pub fn i64_matrix(input: &[i64], case: u32, valid_items: u32, mut output: DisjointSlice<i64>) {
         let index = thread::index_1d();
-        integer_matrix_body!(input, case, valid_items, output, index);
+        integer_matrix_body!(i64, input, case, valid_items, output, index);
     }
 }
 

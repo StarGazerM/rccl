@@ -8,13 +8,22 @@ use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Target {
+    Sm50,
+    Sm52,
+    Sm60,
     Sm80,
-    Sm89,
     Sm90,
     Sm100,
 }
 
-pub(crate) const TARGETS: &[Target] = &[Target::Sm80, Target::Sm89, Target::Sm90, Target::Sm100];
+pub(crate) const TARGETS: &[Target] = &[
+    Target::Sm50,
+    Target::Sm52,
+    Target::Sm60,
+    Target::Sm80,
+    Target::Sm90,
+    Target::Sm100,
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Status {
@@ -614,7 +623,7 @@ pub(crate) const PRIMITIVES: &[Primitive] = &[
     ),
     primitive!(
         "device_merge",
-        BackendBlocked,
+        NativeRustPartial,
         Device,
         ["block_load", "block_store"],
         Some("merge"),
@@ -623,7 +632,7 @@ pub(crate) const PRIMITIVES: &[Primitive] = &[
     ),
     primitive!(
         "device_merge_sort",
-        BackendBlocked,
+        NativeRustPartial,
         Device,
         ["device_merge"],
         Some("comparison_sort"),
@@ -632,10 +641,10 @@ pub(crate) const PRIMITIVES: &[Primitive] = &[
     ),
     primitive!(
         "device_radix_sort",
-        BackendBlocked,
+        NativeRustPartial,
         Device,
         ["block_radix_sort", "device_scan"],
-        Some("radix_sort"),
+        None,
         ["histogram", "prefix", "scatter"],
         DEVICE_ORDERED
     ),
@@ -644,7 +653,7 @@ pub(crate) const PRIMITIVES: &[Primitive] = &[
         Planned,
         Device,
         ["device_radix_sort"],
-        Some("radix_sort"),
+        None,
         ["segmented_histogram", "segmented_scatter"],
         DEVICE_ORDERED
     ),
@@ -908,11 +917,10 @@ pub(crate) const EXERCISED_OPERATIONS: &[ExercisedOperation] = &[
 pub(crate) struct ScheduleRow {
     pub(crate) target: Target,
     pub(crate) block_threads: u16,
-    pub(crate) items_per_thread: u8,
-    pub(crate) min_blocks_per_sm: Option<u8>,
-    pub(crate) fallback_threads: Option<u16>,
-    pub(crate) radix_bits: Option<u8>,
-    pub(crate) unroll: u8,
+    /// CCCL's nominal number of 4-byte items. The actual TMP result is
+    /// `nominal_4B_items_to_items(n, sizeof(key) + sizeof(value))` for merge
+    /// and `Nominal4BItemsToItems<Key>(n)` for merge sort.
+    pub(crate) nominal_4b_items: u8,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -921,126 +929,78 @@ pub(crate) struct Schedule {
     pub(crate) rows: &'static [ScheduleRow],
 }
 
-const RADIX_SORT_ROWS: &[ScheduleRow] = &[
+// These are the exact architecture thresholds in pinned
+// `tuning_merge.cuh`. They are nominal rows, not the result for one invented
+// key type. The selector's default below SM60 is the SM52 policy; unlike
+// MergeSort, DeviceMerge has no separate SM50 tuning row.
+const MERGE_ROWS: &[ScheduleRow] = &[
     ScheduleRow {
-        target: Target::Sm80,
-        block_threads: 256,
-        items_per_thread: 12,
-        min_blocks_per_sm: Some(2),
-        fallback_threads: None,
-        radix_bits: Some(8),
-        unroll: 4,
+        target: Target::Sm50,
+        block_threads: 512,
+        nominal_4b_items: 13,
     },
     ScheduleRow {
-        target: Target::Sm89,
-        block_threads: 256,
-        items_per_thread: 16,
-        min_blocks_per_sm: Some(2),
-        fallback_threads: None,
-        radix_bits: Some(8),
-        unroll: 4,
+        target: Target::Sm52,
+        block_threads: 512,
+        nominal_4b_items: 13,
+    },
+    ScheduleRow {
+        target: Target::Sm60,
+        block_threads: 512,
+        nominal_4b_items: 15,
+    },
+    ScheduleRow {
+        target: Target::Sm80,
+        block_threads: 512,
+        nominal_4b_items: 15,
     },
     ScheduleRow {
         target: Target::Sm90,
-        block_threads: 384,
-        items_per_thread: 16,
-        min_blocks_per_sm: Some(2),
-        fallback_threads: None,
-        radix_bits: Some(8),
-        unroll: 4,
+        block_threads: 512,
+        nominal_4b_items: 15,
     },
     ScheduleRow {
         target: Target::Sm100,
         block_threads: 512,
-        items_per_thread: 16,
-        min_blocks_per_sm: Some(1),
-        fallback_threads: None,
-        radix_bits: Some(8),
-        unroll: 4,
+        nominal_4b_items: 15,
     },
 ];
-const MERGE_ROWS: &[ScheduleRow] = &[
-    ScheduleRow {
-        target: Target::Sm80,
-        block_threads: 256,
-        items_per_thread: 15,
-        min_blocks_per_sm: None,
-        fallback_threads: Some(128),
-        radix_bits: None,
-        unroll: 15,
-    },
-    ScheduleRow {
-        target: Target::Sm89,
-        block_threads: 256,
-        items_per_thread: 15,
-        min_blocks_per_sm: None,
-        fallback_threads: Some(128),
-        radix_bits: None,
-        unroll: 15,
-    },
-    ScheduleRow {
-        target: Target::Sm90,
-        block_threads: 256,
-        items_per_thread: 15,
-        min_blocks_per_sm: None,
-        fallback_threads: Some(128),
-        radix_bits: None,
-        unroll: 15,
-    },
-    ScheduleRow {
-        target: Target::Sm100,
-        block_threads: 256,
-        items_per_thread: 15,
-        min_blocks_per_sm: None,
-        fallback_threads: Some(128),
-        radix_bits: None,
-        unroll: 15,
-    },
-];
+// Exact rows from pinned `tuning_merge_sort.cuh`. SM60 is the active policy
+// for every newer architecture in this revision.
 const COMPARISON_SORT_ROWS: &[ScheduleRow] = &[
     ScheduleRow {
-        target: Target::Sm80,
+        target: Target::Sm50,
         block_threads: 256,
-        items_per_thread: 1,
-        min_blocks_per_sm: Some(1),
-        fallback_threads: None,
-        radix_bits: None,
-        unroll: 1,
+        nominal_4b_items: 11,
     },
     ScheduleRow {
-        target: Target::Sm89,
+        target: Target::Sm52,
+        block_threads: 512,
+        nominal_4b_items: 15,
+    },
+    ScheduleRow {
+        target: Target::Sm60,
         block_threads: 256,
-        items_per_thread: 1,
-        min_blocks_per_sm: Some(1),
-        fallback_threads: None,
-        radix_bits: None,
-        unroll: 1,
+        nominal_4b_items: 17,
+    },
+    ScheduleRow {
+        target: Target::Sm80,
+        block_threads: 256,
+        nominal_4b_items: 17,
     },
     ScheduleRow {
         target: Target::Sm90,
         block_threads: 256,
-        items_per_thread: 1,
-        min_blocks_per_sm: Some(1),
-        fallback_threads: None,
-        radix_bits: None,
-        unroll: 1,
+        nominal_4b_items: 17,
     },
     ScheduleRow {
         target: Target::Sm100,
         block_threads: 256,
-        items_per_thread: 1,
-        min_blocks_per_sm: Some(1),
-        fallback_threads: None,
-        radix_bits: None,
-        unroll: 1,
+        nominal_4b_items: 17,
     },
 ];
 
 pub(crate) const SCHEDULES: &[Schedule] = &[
-    Schedule {
-        name: "radix_sort",
-        rows: RADIX_SORT_ROWS,
-    },
     Schedule {
         name: "merge",
         rows: MERGE_ROWS,
@@ -1050,6 +1010,12 @@ pub(crate) const SCHEDULES: &[Schedule] = &[
         rows: COMPARISON_SORT_ROWS,
     },
 ];
+
+// DeviceRadixSort is intentionally absent from this rectangular table. Its
+// pinned policy is a type-dependent decision tree (SM50/60/61/62/70/80/90/100,
+// key-size lookup tables, OneSweep eligibility, histogram and scan policies),
+// so flattening it to one row per target fabricated the old values. The radix
+// macro must encode that tree before the primitive can name an exact schedule.
 
 pub(crate) fn validate() -> Result<(), String> {
     unique("primitive", PRIMITIVES.iter().map(|item| item.name))?;
@@ -1069,8 +1035,10 @@ pub(crate) fn validate() -> Result<(), String> {
         let row_targets = unique(
             "schedule target",
             schedule.rows.iter().map(|row| match row.target {
+                Target::Sm50 => "sm50",
+                Target::Sm52 => "sm52",
+                Target::Sm60 => "sm60",
                 Target::Sm80 => "sm80",
-                Target::Sm89 => "sm89",
                 Target::Sm90 => "sm90",
                 Target::Sm100 => "sm100",
             }),
@@ -1079,13 +1047,12 @@ pub(crate) fn validate() -> Result<(), String> {
             return Err(format!("schedule `{}` repeats a target", schedule.name));
         }
         for row in schedule.rows {
-            if row.block_threads == 0 || row.items_per_thread == 0 || row.unroll == 0 {
+            if row.block_threads == 0 || row.nominal_4b_items == 0 {
                 return Err(format!(
                     "schedule `{}` contains a zero tuning value",
                     schedule.name
                 ));
             }
-            let _optional_tuning = (row.min_blocks_per_sm, row.fallback_threads, row.radix_bits);
         }
     }
 

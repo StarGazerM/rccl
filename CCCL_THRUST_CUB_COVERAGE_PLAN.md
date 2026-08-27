@@ -86,8 +86,9 @@ Other rules:
   cuda-oxide's checked mutable/disjoint slice forms where possible;
 - represent fancy iterators as zero-copy indexed range expressions, not as
   host `Iterator<Item = &T>` values;
-- map template type computation to proc-macro-emitted generics, traits,
-  associated types, const generics, and `Fn` callables;
+- make every type that changes template selection a macro-visible `syn::Type`,
+  then map template computation to proc-macro-emitted generics, associated
+  types, const generics, and `Fn` callables;
 - map repeated kernel families and whole-program specialization collection to
   declarative/procedural macros and the cuda-oxide compiler collector, never
   runtime reflection or type erasure;
@@ -111,9 +112,11 @@ Expansion must:
    and functions;
 2. pass resolved schedule values as literal const-generic operands and direct
    cuda-oxide compiler attributes;
-3. let Rust monomorphize key, value, callable, and range types without a
-   `TypeId`, `Any`, erased comparator, strategy object, or proof trait leaking
-   across the generated API;
+3. require every deduced C++ template fact in macro syntax whenever lowering
+   needs it (including key/value/scalar types, logical widths, and fixed array
+   extents), then let Rust check the emitted result without a `TypeId`, `Any`,
+   erased comparator, strategy object, or proof trait leaking across the
+   generated API;
 4. emit concrete cuda-oxide Rust kernels and typed launch code directly; and
 5. leave no manifest, schedule, specialization map, or compiler capability
    value in a runtime struct.
@@ -129,10 +132,11 @@ path of its own.
 The earlier direct-literal rule remains: do not reintroduce
 `DispatchEngine`, `SortConstInvocation`, `MergeConstInvocation`, or another
 generic-const witness layer merely to make macro-expanded code type-check.
-The old runtime loader and handwritten sort/merge kernel layer have been
-deleted. Algorithms remain unexported until a safe proc-macro expansion
-exists; they do not receive a runtime error, panic, CPU fallback, or fake
-implementation.
+The old runtime loader and handwritten registry/erased sort/merge layer have
+been deleted. An algorithm is exported only with a safe proc-macro expansion;
+it does not receive a runtime error, panic, CPU fallback, or fake
+implementation. Current ordering semantics are exported, but their explicit
+performance gate remains red until the upstream kernels are reproduced.
 
 ## Support-library mapping
 
@@ -197,13 +201,14 @@ already provide.
   `rccl-thrust-macros` validates all 34 algorithms and 19 iterator/adaptor
   headers. Support families are ordinary-library coverage rows, not compiler
   catalog entries.
-- `rccl-cub` exposes handwritten safe support values plus the partial
-  `warp_reduce!` and `warp_reduce_items!` slice. The old pointer-heavy
-  `WarpMergeSort`, radix, comparison, and merge implementations were removed
-  rather than hidden behind a runtime loader.
+- `rccl-cub` exposes handwritten safe support values, WarpReduce, DeviceMerge,
+  DeviceMergeSort, and primitive integer/`f32`/`f64` DeviceRadixSort. The old pointer-heavy registry
+  implementations were removed rather than hidden behind a runtime loader;
+  the current ordering kernels remain performance-incomplete.
 - `rccl-thrust` exposes handwritten `cuda::Execution`, borrowing a stream,
-  allocator, and program-local typed module, plus binary in-place `transform!`
-  over `RepeatN`. Sort and merge are backend-blocked and unexported.
+  allocator, and program-local typed module, plus binary in-place `transform!`,
+  sort/stable/by-key, and merge/by-key. Every ordering algorithm lowers through
+  its actual CUB dependency.
 - Other descriptor-only fancy-range algebra and the checked device
   temporary-storage value protocol remain support/planning vocabulary; they
   are not counted as executable algorithm coverage.
@@ -281,8 +286,8 @@ not confuse them with an owning vector container.
 | Scans/differences | `scan`, `transform_scan`, `adjacent_difference` including scan-by-key | missing | thread/warp/block/device scan |
 | Compaction | `remove`, `unique`, `partition` including copy, stable, by-key, and point/query forms | missing | scan + select/partition agents |
 | Replacement | `replace` and copy/predicate variants | missing | elementwise traversal |
-| Merge and sets | `merge`, `set_operations` including key/value forms | merge backend-blocked; sets missing | general iterators + generated device merge |
-| Sorting | `sort` including stable/key/value/query forms | backend-blocked | generated radix/merge sort, offsets, decomposers, iterators |
+| Merge and sets | `merge`, `set_operations` including key/value forms | merge keys/pairs implemented for contiguous buffers; sets and general iterators missing; performance gate failing | general iterators + exact DeviceMerge kernel |
+| Sorting | `sort` including stable/key/value/query forms | primitive integer/`f32`/`f64` contiguous keys/pairs implemented with macro-visible TMP smart selection and signed-zero handling; half/bfloat/decomposer/bit-range/general iterator forms missing; performance gate failing | exact radix/merge-sort agents, offsets, decomposers, iterators |
 
 This table covers exactly these 34 headers:
 
@@ -382,7 +387,7 @@ uniform_real_distribution.h       xor_combine_engine.h
 | Device queries/reduction | `device_find`, `device_reduce`, `device_scan`, `device_segmented_reduce`, `device_segmented_scan`, `device_adjacent_difference` | missing |
 | Device compaction | `device_select`, `device_partition`, `device_run_length_encode` | missing |
 | Device histogram | `device_histogram` | missing |
-| Device ordered | `device_merge`, `device_merge_sort`, `device_radix_sort`, `device_segmented_radix_sort`, `device_segmented_sort` | catalogued; merge/radix families backend-blocked, segmented families missing |
+| Device ordered | `device_merge`, `device_merge_sort`, `device_radix_sort`, `device_segmented_radix_sort`, `device_segmented_sort` | contiguous merge/merge-sort and primitive integer/`f32`/`f64` radix result semantics are partial and performance-incomplete; segmented families missing |
 | Device top-k | `device_topk`, `device_batched_topk` | missing |
 | CUB iterators | `arg_index_input_iterator`, `cache_modified_input_iterator`, `cache_modified_output_iterator`, `tex_obj_input_iterator` | missing; cache/texture semantics need cuda-oxide backend checks |
 

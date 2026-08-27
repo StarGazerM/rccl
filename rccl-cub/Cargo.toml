@@ -38,3 +38,15 @@ name = "warp_reduce_benchmark"
 path = "examples/warp_reduce_benchmark.rs"
 test = false
 required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "device_ordering_probe"
+path = "examples/device_ordering_probe.rs"
+test = false
+required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "device_ordering_benchmark"
+path = "examples/device_ordering_benchmark.rs"
+test = false
+required-features = ["cuda-oxide-example"]

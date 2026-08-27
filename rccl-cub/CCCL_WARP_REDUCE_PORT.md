@@ -16,19 +16,21 @@ six floating executions. The ordinary Cargo unit target is
 macros:
 
 ```rust,ignore
-let aggregate = rccl_cub::warp_reduce!(
-    32,
+let aggregate = rccl_cub::warp_reduce!(::<i32, 32>(
     thread_value,
     |left, right| left + right,
-);
+));
 ```
 
-The first operand is the closed compile-time logical-warp width. The remaining
-operands are ordinary Rust expressions; rustc infers their types and
-monomorphizes the closure. There is no public operator type, algorithm policy,
-temporary-storage type, runtime registry, or device lambda substitute.
-Literal widths forwarded through an ordinary declarative Rust macro are
-accepted as compile-time syntax; runtime width expressions remain rejected.
+The macro-visible arguments are the C++ template facts: scalar type and
+logical-warp width. `warp_reduce_items!(::<T, WIDTH, ITEMS>(...))` also makes
+the C++ array extent explicit, because a proc macro cannot perform the type
+deduction that C++ performs for `T (&)[ITEMS]`. The proc macro annotates the
+ordinary Rust closure with `T`, selects the scalar-specific shuffle/redux
+form, and emits the whole safe expression. There is no public operator type,
+algorithm policy, temporary-storage type, runtime selection trait, registry,
+or device-lambda substitute. Literal widths forwarded through an ordinary
+declarative Rust macro are accepted; runtime width expressions are rejected.
 
 ## Correspondence
 

@@ -50,16 +50,33 @@ fn is_trusted_cub_lowering(path: &Path) -> bool {
         .iter()
         .map(|segment| segment.ident.to_string())
         .collect::<Vec<_>>();
-    matches!(
-        segments.as_slice(),
-        [crate_name, private, operation]
-            if crate_name == "rccl_cub"
+    match segments.as_slice() {
+        [crate_name, private, operation] => {
+            crate_name == "rccl_cub"
                 && private == "__private"
                 && matches!(
                     operation.as_str(),
-                    "__device_transform_kernels" | "__device_transform_repeat_in_place"
+                    "__device_kernels" | "__device_transform_repeat_in_place"
                 )
-    )
+        }
+        [crate_name, operation] => {
+            crate_name == "rccl_cub"
+                && matches!(
+                    operation.as_str(),
+                    "device_merge_keys"
+                        | "device_merge_pairs"
+                        | "device_merge_sort_keys"
+                        | "device_stable_merge_sort_keys"
+                        | "device_merge_sort_pairs"
+                        | "device_stable_merge_sort_pairs"
+                        | "device_radix_sort_keys"
+                        | "device_radix_sort_keys_descending"
+                        | "device_radix_sort_pairs"
+                        | "device_radix_sort_pairs_descending"
+                )
+        }
+        _ => false,
+    }
 }
 
 impl<'ast> Visit<'ast> for SafetyAudit {
@@ -256,7 +273,8 @@ mod tests {
     #[test]
     fn trusted_cub_lowering_macro_passes() {
         generated_rust(quote! {
-            ::rccl_cub::__private::__device_transform_kernels!(__test_kernels);
+            ::rccl_cub::__private::__device_kernels!(__test_kernels);
+            ::rccl_cub::device_merge_sort_keys!(exec, keys, compare);
         })
         .expect("the audited Thrust-to-CUB macro edge must pass");
     }

@@ -1,15 +1,39 @@
 //! `syn` ASTs for shallow CUB operation macros.
 //!
 //! The operand shapes come from the pinned CCCL examples and API tests. They
-//! retain ordinary Rust expressions; the proc macro does not attempt to see
-//! rustc-inferred types.
+//! retain ordinary Rust expressions. Types that affect TMP lowering are
+//! explicit syntax because a proc macro runs before rustc type inference.
 #![allow(dead_code)]
 
 use syn::{
-    BinOp, Expr, ExprClosure, ExprLit, Lit, LitInt, Pat, Result, Token,
+    BinOp, Expr, ExprClosure, LitInt, Pat, Result, Token, Type, parenthesized,
     parse::{Parse, ParseStream},
     punctuated::Punctuated,
 };
+
+#[derive(Debug)]
+struct TypedExpressionList {
+    types: Punctuated<Type, Token![,]>,
+    expressions: Punctuated<Expr, Token![,]>,
+}
+
+impl Parse for TypedExpressionList {
+    fn parse(input: ParseStream<'_>) -> Result<Self> {
+        input.parse::<Token![::]>().map_err(|_| {
+            input.error("this CUB operation needs macro-visible TMP arguments; use `::<Type>(...)`")
+        })?;
+        input.parse::<Token![<]>()?;
+        let types = Punctuated::<Type, Token![,]>::parse_separated_nonempty(input)?;
+        input.parse::<Token![>]>()?;
+        let content;
+        parenthesized!(content in input);
+        let expressions = Punctuated::<Expr, Token![,]>::parse_terminated(&content)?;
+        if !input.is_empty() {
+            return Err(input.error("unexpected tokens after the CUB operation operands"));
+        }
+        Ok(Self { types, expressions })
+    }
+}
 
 pub(crate) fn is_addition_closure(expression: &Expr) -> bool {
     let Expr::Closure(closure) = ungroup(expression) else {
@@ -72,6 +96,7 @@ struct ExpressionList {
 
 #[derive(Debug)]
 pub(crate) struct WarpReduceCall {
+    pub(crate) value_type: Type,
     pub(crate) logical_warp_threads: LitInt,
     pub(crate) input: Expr,
     pub(crate) valid_items: Option<Expr>,
@@ -80,15 +105,19 @@ pub(crate) struct WarpReduceCall {
 
 impl Parse for WarpReduceCall {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
-        let ExpressionList { expressions } = input.parse()?;
-        if !matches!(expressions.len(), 3 | 4) {
+        let (value_type, logical_warp_threads, _) = parse_warp_tmp(input, false)?;
+        let content;
+        parenthesized!(content in input);
+        let expressions = Punctuated::<Expr, Token![,]>::parse_terminated(&content)?;
+        if !input.is_empty() {
+            return Err(input.error("unexpected tokens after warp_reduce! operands"));
+        }
+        if !matches!(expressions.len(), 2 | 3) {
             return Err(input.error(
-                "warp_reduce! expects (logical_warp_threads, value, op) or (logical_warp_threads, value, valid_items, op)",
+                "warp_reduce! expects ::<Type, WIDTH>(value, op) or ::<Type, WIDTH>(value, valid_items, op)",
             ));
         }
         let mut expressions = expressions.into_iter();
-        let width_expression = expressions.next().expect("validated operand count");
-        let logical_warp_threads = parse_logical_warp_threads(width_expression)?;
         let input = expressions.next().expect("validated operand count");
         let remaining = expressions.collect::<Vec<_>>();
         let (valid_items, op) = match remaining.as_slice() {
@@ -97,6 +126,7 @@ impl Parse for WarpReduceCall {
             _ => unreachable!("validated operand count"),
         };
         Ok(Self {
+            value_type,
             logical_warp_threads,
             input,
             valid_items,
@@ -107,44 +137,63 @@ impl Parse for WarpReduceCall {
 
 #[derive(Debug)]
 pub(crate) struct WarpReduceItemsCall {
+    pub(crate) value_type: Type,
     pub(crate) logical_warp_threads: LitInt,
+    pub(crate) items_per_thread: LitInt,
     pub(crate) items: Expr,
     pub(crate) op: Expr,
 }
 
 impl Parse for WarpReduceItemsCall {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
-        let ExpressionList { expressions } = input.parse()?;
-        if expressions.len() != 3 {
-            return Err(input.error("warp_reduce_items! expects (logical_warp_threads, items, op)"));
+        let (value_type, logical_warp_threads, items_per_thread) = parse_warp_tmp(input, true)?;
+        let content;
+        parenthesized!(content in input);
+        let expressions = Punctuated::<Expr, Token![,]>::parse_terminated(&content)?;
+        if !input.is_empty() {
+            return Err(input.error("unexpected tokens after warp_reduce_items! operands"));
+        }
+        if expressions.len() != 2 {
+            return Err(input.error("warp_reduce_items! expects ::<Type, WIDTH, ITEMS>(items, op)"));
         }
         let mut expressions = expressions.into_iter();
-        let width_expression = expressions.next().expect("validated operand count");
-        let logical_warp_threads = parse_logical_warp_threads(width_expression)?;
         Ok(Self {
+            value_type,
             logical_warp_threads,
+            items_per_thread: items_per_thread.expect("required by parse_warp_tmp"),
             items: expressions.next().expect("validated operand count"),
             op: expressions.next().expect("validated operand count"),
         })
     }
 }
 
-fn parse_logical_warp_threads(expression: Expr) -> Result<LitInt> {
-    match expression {
-        Expr::Lit(ExprLit {
-            lit: Lit::Int(width),
-            ..
-        }) => {
-            validate_logical_warp_threads(&width)?;
-            Ok(width)
+fn parse_warp_tmp(
+    input: ParseStream<'_>,
+    needs_items: bool,
+) -> Result<(Type, LitInt, Option<LitInt>)> {
+    input.parse::<Token![::]>().map_err(|_| {
+        input.error("WarpReduce needs macro-visible TMP arguments; use `::<Type, WIDTH>(...)`")
+    })?;
+    input.parse::<Token![<]>()?;
+    let value_type = input.parse::<Type>()?;
+    input.parse::<Token![,]>()?;
+    let logical_warp_threads = input.parse::<LitInt>()?;
+    validate_logical_warp_threads(&logical_warp_threads)?;
+    let items_per_thread = if needs_items {
+        input.parse::<Token![,]>()?;
+        let items = input.parse::<LitInt>()?;
+        if items.base10_parse::<usize>()? == 0 {
+            return Err(syn::Error::new_spanned(
+                items,
+                "warp_reduce_items! requires ITEMS greater than zero",
+            ));
         }
-        Expr::Group(group) => parse_logical_warp_threads(*group.expr),
-        Expr::Paren(paren) => parse_logical_warp_threads(*paren.expr),
-        other => Err(syn::Error::new_spanned(
-            other,
-            "logical warp width must be an integer literal owned by the operation macro",
-        )),
-    }
+        Some(items)
+    } else {
+        None
+    };
+    input.parse::<Token![>]>()?;
+    Ok((value_type, logical_warp_threads, items_per_thread))
 }
 
 fn validate_logical_warp_threads(width: &LitInt) -> Result<()> {
@@ -180,6 +229,48 @@ macro_rules! operation_call {
                 }
                 let mut expressions = expressions.into_iter();
                 Ok(Self {
+                    $($field: expressions.next().expect("validated operand count"),)+
+                })
+            }
+        }
+    };
+}
+
+macro_rules! typed_operation_call {
+    ($name:ident, $operation:literal, [$($type_field:ident),+], $($field:ident),+ $(,)?) => {
+        #[derive(Debug)]
+        pub(crate) struct $name {
+            $(pub(crate) $type_field: Type,)+
+            $(pub(crate) $field: Expr,)+
+        }
+
+        impl Parse for $name {
+            fn parse(input: ParseStream<'_>) -> Result<Self> {
+                let TypedExpressionList { types, expressions } = input.parse()?;
+                let expected_types = [$(stringify!($type_field)),+].len();
+                if types.len() != expected_types {
+                    return Err(input.error(format!(
+                        "{} expects {} TMP type argument(s) ({}) but received {}",
+                        $operation,
+                        expected_types,
+                        [$(stringify!($type_field)),+].join(", "),
+                        types.len(),
+                    )));
+                }
+                let expected_expressions = [$(stringify!($field)),+].len();
+                if expressions.len() != expected_expressions {
+                    return Err(input.error(format!(
+                        "{} expects {} operands ({}) but received {}",
+                        $operation,
+                        expected_expressions,
+                        [$(stringify!($field)),+].join(", "),
+                        expressions.len(),
+                    )));
+                }
+                let mut types = types.into_iter();
+                let mut expressions = expressions.into_iter();
+                Ok(Self {
+                    $($type_field: types.next().expect("validated TMP type count"),)+
                     $($field: expressions.next().expect("validated operand count"),)+
                 })
             }
@@ -286,6 +377,95 @@ operation_call!(
     op,
 );
 
+// Rust-native forms of pinned CUB DeviceMerge. Extents come from the borrowed
+// buffers, so the C++ count operands are deliberately absent. The ordering is
+// an ordinary Rust closure and the output borrow carries write exclusivity.
+typed_operation_call!(
+    DeviceMergeKeysCall,
+    "device_merge_keys!",
+    [key_type],
+    execution,
+    first,
+    second,
+    output,
+    order,
+);
+
+typed_operation_call!(
+    DeviceMergePairsCall,
+    "device_merge_pairs!",
+    [key_type, value_type],
+    execution,
+    first_keys,
+    first_values,
+    second_keys,
+    second_values,
+    output_keys,
+    output_values,
+    order,
+);
+
+// DeviceMergeSort's in-place key and key/value forms. Copy and stable forms
+// have distinct parsers below even where they share a stable implementation:
+// their ownership and observable input-preservation contracts differ.
+typed_operation_call!(
+    DeviceMergeSortKeysCall,
+    "device_merge_sort_keys!",
+    [key_type],
+    execution,
+    keys,
+    order,
+);
+
+typed_operation_call!(
+    DeviceMergeSortKeysCopyCall,
+    "device_merge_sort_keys_copy!",
+    [key_type],
+    execution,
+    input,
+    output,
+    order,
+);
+
+typed_operation_call!(
+    DeviceMergeSortPairsCall,
+    "device_merge_sort_pairs!",
+    [key_type, value_type],
+    execution,
+    keys,
+    values,
+    order,
+);
+
+typed_operation_call!(
+    DeviceMergeSortPairsCopyCall,
+    "device_merge_sort_pairs_copy!",
+    [key_type, value_type],
+    execution,
+    input_keys,
+    input_values,
+    output_keys,
+    output_values,
+    order,
+);
+
+typed_operation_call!(
+    DeviceRadixSortKeysCall,
+    "device_radix_sort_keys!",
+    [key_type],
+    execution,
+    keys,
+);
+
+typed_operation_call!(
+    DeviceRadixSortPairsCall,
+    "device_radix_sort_pairs!",
+    [key_type, value_type],
+    execution,
+    keys,
+    values,
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,44 +477,57 @@ mod tests {
 
     #[test]
     fn warp_reduce_preserves_rust_values_closures_and_partial_extent() {
-        let full: WarpReduceCall = syn::parse_quote! { 32, value, |left, right| left + right };
+        let full: WarpReduceCall =
+            syn::parse_quote! { ::<i32, 32>(value, |left, right| left + right) };
+        assert_eq!(full.value_type.to_token_stream().to_string(), "i32");
         assert_eq!(full.logical_warp_threads.base10_parse::<u32>().unwrap(), 32);
         assert!(full.valid_items.is_none());
         assert!(matches!(full.op, Expr::Closure(_)));
 
-        let partial: WarpReduceCall =
-            syn::parse_quote! { 16, value, valid_items, |left, right| left.max(right) };
+        let partial: WarpReduceCall = syn::parse_quote! {
+            ::<u64, 16>(value, valid_items, |left, right| left.max(right))
+        };
         assert_eq!(tokens(partial.valid_items.as_ref().unwrap()), "valid_items");
         assert!(matches!(partial.op, Expr::Closure(_)));
 
-        let items: WarpReduceItemsCall =
-            syn::parse_quote! { 8, thread_items, |left, right| left + right };
+        let items: WarpReduceItemsCall = syn::parse_quote! {
+            ::<i16, 8, 4>(thread_items, |left, right| left + right)
+        };
+        assert_eq!(items.items_per_thread.base10_parse::<usize>().unwrap(), 4);
         assert_eq!(tokens(&items.items), "thread_items");
     }
 
     #[test]
     fn warp_reduce_rejects_runtime_and_unsupported_tile_widths() {
-        let runtime =
-            syn::parse_str::<WarpReduceCall>("logical_width, value, |left, right| left + right")
-                .expect_err("tile width belongs to the macro's compile-time input");
-        assert!(runtime.to_string().contains("integer literal"));
+        let runtime = syn::parse_str::<WarpReduceCall>(
+            "::<i32, logical_width>(value, |left, right| left + right)",
+        )
+        .expect_err("tile width belongs to the macro's compile-time input");
+        assert!(!runtime.to_string().is_empty());
 
-        let non_power = syn::parse_str::<WarpReduceCall>("9, value, |left, right| left + right")
-            .expect_err("the safe backend must not mask unsupported shared-memory tiles");
+        let non_power =
+            syn::parse_str::<WarpReduceCall>("::<i32, 9>(value, |left, right| left + right)")
+                .expect_err("the safe backend must not mask unsupported shared-memory tiles");
         assert!(non_power.to_string().contains("1, 2, 4, 8, 16, and 32"));
+
+        let empty_items = syn::parse_str::<WarpReduceItemsCall>(
+            "::<i32, 32, 0>(items, |left, right| left + right)",
+        )
+        .expect_err("a zero-item TMP must fail during macro parsing");
+        assert!(empty_items.to_string().contains("greater than zero"));
     }
 
     #[test]
     fn warp_reduce_accepts_a_literal_forwarded_by_a_rust_macro() {
         let width = proc_macro2::Group::new(proc_macro2::Delimiter::None, quote::quote!(16));
         let call = syn::parse2::<WarpReduceCall>(
-            quote::quote!(#width, value, |left, right| left + right),
+            quote::quote!(::<i32, #width>(value, |left, right| left + right)),
         )
         .expect("an invisible macro-expansion group around a literal is still compile-time syntax");
         assert_eq!(call.logical_warp_threads.base10_parse::<u32>().unwrap(), 16);
 
         let parenthesized: WarpReduceItemsCall =
-            syn::parse_quote! { (8), items, |left, right| left + right };
+            syn::parse_quote! { ::<i32, 8, 4>(items, |left, right| left + right) };
         assert_eq!(
             parenthesized
                 .logical_warp_threads
@@ -445,5 +638,22 @@ mod tests {
         )
         .expect_err("the invented named-field/temp:auto API must stay deleted");
         assert!(!obsolete.to_string().is_empty());
+    }
+
+    #[test]
+    fn ordering_tmp_types_are_macro_visible_and_untyped_calls_fail_closed() {
+        let keys: DeviceMergeSortKeysCall = syn::parse_quote! {
+            ::<u32>(&exec, &mut keys, |left: &u32, right: &u32| left.cmp(right))
+        };
+        assert_eq!(keys.key_type.to_token_stream().to_string(), "u32");
+
+        let pairs: DeviceRadixSortPairsCall =
+            syn::parse_quote! { ::<u64, i32>(&exec, &mut keys, &mut values) };
+        assert_eq!(pairs.key_type.to_token_stream().to_string(), "u64");
+        assert_eq!(pairs.value_type.to_token_stream().to_string(), "i32");
+
+        let error = syn::parse_str::<DeviceRadixSortKeysCall>("&exec, &mut keys")
+            .expect_err("runtime-inferred key types must not select a CUB policy");
+        assert!(error.to_string().contains("macro-visible TMP"));
     }
 }

@@ -12,16 +12,16 @@ const THREADS: usize = 128;
 macro_rules! f32_min_max_operation {
     ($operation:expr, $width:literal, $value:expr) => {
         match $operation {
-            0 => rccl_cub::warp_reduce!($width, $value, |left, right| if left > right {
+            0 => rccl_cub::warp_reduce!(::<f32, $width>($value, |left, right| if left > right {
                 left
             } else {
                 right
-            }),
-            1 => rccl_cub::warp_reduce!($width, $value, |left, right| if left < right {
+            })),
+            1 => rccl_cub::warp_reduce!(::<f32, $width>($value, |left, right| if left < right {
                 left
             } else {
                 right
-            }),
+            })),
             _ => return,
         }
     };

@@ -11,7 +11,6 @@ pub(crate) enum Status {
     Planned,
     NativeRust,
     ImplementedPartial,
-    BackendBlocked,
 }
 
 use Status::*;
@@ -203,7 +202,7 @@ pub(crate) const ALGORITHMS: &[Algorithm] = &[
     algorithm!("generate", Planned, Output, ["device_for"], [Otherwise => "device_for"]),
     algorithm!("inner_product", Planned, Reduction, ["device_reduce"], [Otherwise => "device_reduce"]),
     algorithm!("logical", Planned, Query, ["device_reduce"], [Otherwise => "device_reduce"]),
-    algorithm!("merge", BackendBlocked, InputOutput, ["device_merge"], [Otherwise => "device_merge"]),
+    algorithm!("merge", ImplementedPartial, InputOutput, ["device_merge"], [Otherwise => "device_merge"]),
     algorithm!("mismatch", Planned, Query, ["device_find"], [Otherwise => "device_find"]),
     algorithm!("partition", Planned, InPlace, ["device_partition"], [Otherwise => "device_partition"]),
     algorithm!("reduce", Planned, Reduction, ["device_reduce"], [Otherwise => "device_reduce"]),
@@ -215,7 +214,7 @@ pub(crate) const ALGORITHMS: &[Algorithm] = &[
     algorithm!("sequence", Planned, Output, ["device_for"], [Otherwise => "device_for"]),
     algorithm!("set_operations", Planned, InputOutput, ["device_merge"], [Otherwise => "device_merge"]),
     algorithm!("shuffle", Planned, InPlace, ["device_for"], [Otherwise => "device_for"]),
-    algorithm!("sort", BackendBlocked, InPlace, ["device_radix_sort", "device_merge_sort"], [NaturalRadixKey => "device_radix_sort", Otherwise => "device_merge_sort"]),
+    algorithm!("sort", ImplementedPartial, InPlace, ["device_radix_sort", "device_merge_sort"], [NaturalRadixKey => "device_radix_sort", Otherwise => "device_merge_sort"]),
     algorithm!("swap", Planned, InputOutput, ["device_transform"], [Otherwise => "device_transform"]),
     algorithm!("tabulate", Planned, Output, ["device_for"], [Otherwise => "device_for"]),
     algorithm!("transform", ImplementedPartial, InputOutput, ["device_transform"], [Otherwise => "device_transform"]),

@@ -27,3 +27,21 @@ name = "constant_iterator_benchmark"
 path = "examples/constant_iterator_benchmark.rs"
 test = false
 required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "sort"
+path = "examples/sort.rs"
+test = false
+required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "merge"
+path = "examples/merge.rs"
+test = false
+required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "ordering_benchmark"
+path = "examples/ordering_benchmark.rs"
+test = false
+required-features = ["cuda-oxide-example"]

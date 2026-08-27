@@ -2,8 +2,9 @@
 
 Baseline: NVIDIA CCCL `571f2fc3bc53cd710e306ad43d58995c1fe4219f`.
 
-This audit describes the current rewrite. Removed sort, merge, radix, and warp
-implementations are not retained evidence.
+This audit describes the current rewrite. Deleted registry/JIT/erased-comparator
+implementations are not retained as evidence for the current macro-generated
+sort, merge, radix, or warp code.
 
 ## Fixed architecture
 
@@ -11,13 +12,13 @@ implementations are not retained evidence.
 |---|---|---|
 | A01 | fixed | `rccl-cub-macros` is the only author of CUB primitive dependencies, target schedules, kernel families, and specialization facts. Ordinary CUB support vocabulary is handwritten in `rccl-cub`. |
 | A02 | fixed | `rccl-thrust-macros` is the only author of Thrust-to-CUB selection rules. Ordinary range-adaptor and execution values are handwritten in `rccl-thrust`. |
-| A03 | fixed | Both user-facing operation DSLs are shallow call-site macros parsed as operation-specific `syn` 3.0.4 ASTs; the complete inventories are private typed Rust catalogs, not separate language files. |
+| A03 | fixed | Both user-facing operation DSLs are shallow call-site macros parsed as operation-specific `syn` 3.0.4 ASTs. Runtime operands remain `syn::Expr`; every type that changes TMP selection is a macro-visible `syn::Type`. The complete inventories are private typed Rust catalogs, not separate language files. |
 | A04 | fixed | `rccl-cub` and `rccl-thrust` contain ordinary Rust runtime values but no target schedule, kernel family, specialization table, or compiler registry. |
 | A05 | fixed | `Execution` borrows a stream, allocator, and one statically typed cuda-oxide module value. It owns no module set, policy, type map, target, schedule, registry, or cache. |
 | A06 | fixed | `AotKernelSet`, `TargetSchedule`, build-script schedule generation, `TypeId`/`Any` registries, module caches, and handwritten dispatch traits are deleted. |
 | A07 | fixed | RCCL owns no compiler invocation/configuration, manual symbol lookup, or raw ABI argument-vector path; it emits Rust and cuda-oxide owns compilation. |
 | A08 | fixed | There are no compatibility `Comparator`, `Less`, `Greater`, `DeviceSpan`, legacy execution, or stable-sort aliases. |
-| A09 | fixed | Old RCCL examples were removed because they could report API coverage without a generated algorithm. The exact pinned upstream input is independently tracked as 19 programs, 378 embedded example regions, 49 API-test files, and 105 exercised public methods. |
+| A09 | fixed | An example is registered only with a generated GPU operation, a pinned upstream correspondence, and result validation. The exact pinned input is independently tracked as 19 programs, 378 embedded example regions, 49 API-test files, and 105 exercised public methods. |
 | A10 | fixed | The compiler gate does not run a GPU program before a safe proc-macro-generated launch path exists. |
 | A11 | fixed | Every one of the 59 typed CUB catalog entries contains exactly one operation contract declaring its range capabilities, callable shape, and storage class. |
 | A12 | fixed | Closed TMP/CRTP backend policy is lowered by the DSL; generated Rust has no policy/backend/strategy/proof type hierarchy. |
@@ -58,13 +59,13 @@ identical structural auditors so this boundary cannot silently widen.
 | complete Thrust algorithm catalog | implemented compiler input | `rccl-thrust-macros/src/catalog.rs` contains all 34 algorithm headers and typed CUB selections |
 | complete Thrust iterator catalog | implemented compiler input | the same typed catalog contains all 19 iterator/adaptor headers |
 | pinned CUB example/API-test input | implemented audit input | `CCCL_CUB_EXAMPLE_TEST_CONTRACT.md` and its checker track all 19 programs, 378 embedded regions, 49 API-test files, and 105 exercised methods |
-| shallow operation syntax | implemented parser boundary | `call.rs` in both macro crates retains positional Rust `Expr` nodes; DeviceReduce has distinct nominal shapes for its nine exercised methods and parser tests reject wrong arity and the deleted named-field syntax |
+| shallow operation syntax | implemented parser boundary | `call.rs` in both macro crates retains positional Rust `Expr` nodes and macro-visible ordering `Type` nodes; parser tests reject missing TMP types, wrong arity, and deleted named-field syntax |
 | Rust support mappings | partial | handwritten `rccl-cub` code defines `KeyValue`, generic `DoubleBuffer`, checked `TempStorageLayout`/`TempStorage`, and range capabilities; `RepeatN` is operational only in the implemented transform intersection, while other handwritten descriptors remain non-operational planning vocabulary |
 | `cuda::Execution` | implemented runtime value | borrows the stream, allocator, and program-local typed cuda-oxide module; contains no runtime compiler or dispatch metadata |
-| CUB collectives/device algorithms | partial | `warp_reduce!` and `warp_reduce_items!` cover the documented overview and the 150-row supported pinned Catch2 matrix; all other rows remain missing or backend-blocked |
-| Thrust algorithms | partial | binary in-place `transform!` with one finite constant range executes the exact pinned `constant_iterator.cu` result; all other transform forms and algorithms remain unexported |
+| CUB collectives/device algorithms | partial | `warp_reduce!` and `warp_reduce_items!` cover the documented overview and 150 supported pinned Catch2 rows; DeviceMerge, DeviceMergeSort, and primitive integer/`f32`/`f64` DeviceRadixSort have safe GPU result coverage, including bitwise signed-zero checks, but the ordering performance gate intentionally fails until their CCCL schedules are reproduced |
+| Thrust algorithms | partial | binary in-place `transform!`, primitive numeric sort/stable-sort/by-key forms, merge, and merge-by-key are GPU exported; every ordering form lowers through its actual CUB dependency, while unsupported half/bfloat/decomposer radix cases fail closed |
 | support tests | implemented | ordinary unit tests cover extent/bounds composition, capability propagation, invalid layouts, and prove adaptor construction never executes user closures on the host; test-only descriptors prevent host slices from masquerading as device memory |
-| public algorithm examples/runtime parity | partial | pinned WarpReduce and constant-iterator transform executables, host oracles, source hashes, equal-work CCCL references, and masking reviews are in the default GPU gate |
+| public algorithm examples/runtime parity | partial | pinned WarpReduce, constant-iterator transform, merge, merge-by-key, sort, stable-sort, and by-key executables validate exact upstream-derived results; equal-work ordering references are in the default gate and currently fail with explicit measured ratios rather than masking missing performance |
 
 `backend-blocked` never means a runtime `CompilerUnavailable` error. It means
 the function is not exported and cannot be mistaken for a runnable operation.

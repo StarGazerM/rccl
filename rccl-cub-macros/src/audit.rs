@@ -57,7 +57,7 @@ fn is_trusted_cub_lowering(path: &Path) -> bool {
                 && private == "__private"
                 && matches!(
                     operation.as_str(),
-                    "__device_transform_kernels" | "__device_transform_repeat_in_place"
+                    "__device_kernels" | "__device_transform_repeat_in_place"
                 )
     )
 }
@@ -256,7 +256,7 @@ mod tests {
     #[test]
     fn trusted_cub_lowering_macro_passes() {
         generated_rust(quote! {
-            ::rccl_cub::__private::__device_transform_kernels!(__test_kernels);
+            ::rccl_cub::__private::__device_kernels!(__test_kernels);
         })
         .expect("the audited Thrust-to-CUB macro edge must pass");
     }
