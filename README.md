@@ -45,7 +45,9 @@ silently choose merge sort.
 The old handwritten registry/JIT/erased-comparator sort and merge layer has
 been removed. The current DeviceMerge, DeviceMergeSort, and primitive
 integer/`f32`/`f64` DeviceRadixSort operations are safe proc-macro-generated
-cuda-oxide Rust.
+cuda-oxide Rust. The Policy800 radix implementation selects CUB's exact
+single-tile extent before the multi-block one-sweep graph and keeps its stable
+blocked-rank-to-striped-store topology.
 Thrust sort/merge forms are exported only through those CUB operations. Their
 upstream-derived result tests pass, while the equal-work ordering performance
 gate intentionally fails until the CUB schedules and throughput match CCCL.

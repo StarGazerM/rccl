@@ -511,24 +511,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     ))?;
     assert_eq!(no_op_buffers.current().to_host_vec(&stream)?, no_op_input);
 
-    let undersized = rccl_cub::device_radix_sort_keys_buffer!(::<u32, sm_89>(
-        &exec,
-        &mut no_op_buffers,
-        0u32..8u32,
-        &mut no_bins,
-        &mut no_lookback,
-        &mut no_counters,
-    ));
-    assert!(matches!(
-        undersized,
-        Err(rccl_cub::DeviceAlgorithmError::WorkspaceTooSmall {
-            role: "radix bins",
-            required: 256,
-            actual: 0
-        })
-    ));
-    assert_eq!(no_op_buffers.current().to_host_vec(&stream)?, no_op_input);
-
     let invalid = rccl_cub::device_radix_sort_keys_buffer!(::<u32, sm_89>(
         &exec,
         &mut no_op_buffers,
@@ -546,6 +528,51 @@ fn main() -> Result<(), Box<dyn Error>> {
         })
     ));
     assert_eq!(no_op_buffers.current().to_host_vec(&stream)?, no_op_input);
+
+    // The same zero workspace must now succeed for a nonempty small problem;
+    // otherwise the dispatcher is still masking a missing single-tile route.
+    rccl_cub::device_radix_sort_keys_buffer!(::<u32, sm_89>(
+        &exec,
+        &mut no_op_buffers,
+        0u32..8u32,
+        &mut no_bins,
+        &mut no_lookback,
+        &mut no_counters,
+    ))?;
+    let mut no_op_expected = no_op_input;
+    no_op_expected.sort_by_key(|value| value & 0xff);
+    assert_eq!(
+        no_op_buffers.current().to_host_vec(&stream)?,
+        no_op_expected
+    );
+
+    // One item beyond Policy800's exact 256 * 19 threshold must reject the
+    // same workspace before any one-sweep launch.
+    let boundary_input = (0..4_865u32).rev().collect::<Vec<_>>();
+    let mut boundary_first = DeviceBuffer::from_host(&stream, &boundary_input)?;
+    let mut boundary_second = DeviceBuffer::<u32>::zeroed(&stream, boundary_input.len())?;
+    let mut boundary_buffers =
+        rccl_cub::DoubleBuffer::new(&mut boundary_first, &mut boundary_second).unwrap();
+    let undersized = rccl_cub::device_radix_sort_keys_buffer!(::<u32, sm_89>(
+        &exec,
+        &mut boundary_buffers,
+        0u32..8u32,
+        &mut no_bins,
+        &mut no_lookback,
+        &mut no_counters,
+    ));
+    assert!(matches!(
+        undersized,
+        Err(rccl_cub::DeviceAlgorithmError::WorkspaceTooSmall {
+            role: "radix bins",
+            required: 256,
+            actual: 0
+        })
+    ));
+    assert_eq!(
+        boundary_buffers.current().to_host_vec(&stream)?,
+        boundary_input
+    );
 
     println!("pinned CUB DeviceRadixSort keys cases: PASS");
     Ok(())

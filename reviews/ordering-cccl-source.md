@@ -14,6 +14,12 @@ Sources read for the currently exported intersection:
 - `cub/examples/device/example_device_radix_sort.cu`;
 - `cub/cub/device/device_radix_sort.cuh`,
   `cub/cub/device/dispatch/dispatch_radix_sort.cuh`, and
+  `cub/cub/device/dispatch/kernels/kernel_radix_sort.cuh`;
+- `cub/cub/device/dispatch/tuning/tuning_radix_sort.cuh`;
+- `cub/cub/agent/agent_radix_sort_onesweep.cuh`,
+  `cub/cub/block/block_radix_sort.cuh`,
+  `cub/cub/block/block_radix_rank.cuh`,
+  `cub/cub/block/block_exchange.cuh`, and
   `cub/cub/util_type.cuh`;
 - `thrust/examples/sort.cu`;
 - `thrust/testing/sort.cu`, `stable_sort.cu`, `sort_by_key.cu`, and
@@ -68,12 +74,26 @@ used to hide that missing TMP input.
   and supplies zero-sized workspace. It must preserve the original selected
   range without launching. Reversed ranges and undersized workspace return
   their specific errors and leave selection and contents unchanged.
+- The exact Policy800 single-tile boundaries are tested on both sides: 4,864
+  `u32` keys and key/value pairs succeed with zero one-sweep workspace, while
+  4,865 keys fail with the specific bins-storage error before launch. This
+  prevents an unconditional single-tile route or an unconditional workspace
+  requirement from passing the current fixtures.
+- Single-tile probes require exactly one selector transition and compare every
+  key and stable payload against independent CPU references. Direct owning
+  buffer calls materialize that transition with safe `mem::swap`, without a
+  device copy or a public C++-style numeric selector.
 - Pair sorting uses one `DoubleBuffer<(keys, values)>`, not two mutable numeric
   selectors. The constructor rejects any of the four range extents differing,
   and one safe split borrow supplies disjoint current/alternate tuples.
 - Floating radix checks `to_bits()` for every output. Rust floating equality
   would consider `-0.0 == +0.0` and mask the required stable signed-zero
   behavior, so it is not used as the oracle.
+- Single-tile invalid lanes use the ordered integer sentinel (zero or all
+  ones), not a synthetic floating value. The latter allowed the GPU to
+  canonicalize an all-ones NaN and displaced a valid NaN payload; the complete
+  bitwise NaN matrices now exercise the single-tile route and detect that
+  failure.
 - Primitive transformation unit tests independently cover ascending and
   descending round trips for all six supported representations, every valid
   one-byte digit-window shape, and signed-zero digit equivalence. The proc
@@ -106,6 +126,8 @@ Both faults were temporary and removed after observing the intended failure.
 |---|---|---|
 | Give the second merge input precedence when keys compare equal | exact pinned `MergePairs` payload assertion | GPU executable exited 101: output bytes `[65, 97, 98, 66, 67, 68, 99]`, expected `[97, 65, 98, 66, 67, 68, 99]` (`Aa...` instead of `aA...`) |
 | Disable floating negative-zero normalization in both digit encoders | descending bitwise floating assertion | GPU executable exited 101: zero bit patterns were `[0, 2147483648]`, expected stable `[2147483648, 0]` |
+| Reset packed radix counters using the later raking layout | single-tile compute-sanitizer memcheck | invalid shared-memory write; corrected by keeping CUB's counter-major reset before the barrier and raking reinterpretation after it |
+| Materialize the invalid-lane float sentinel as `f32`/`f64` | complete bitwise NaN matrix | positive quiet NaN canonicalization changed the sentinel payload and displaced a valid NaN; retaining the ordered integer representation fixes the semantic boundary |
 
 The first performance review also found that the Rust benchmark generated one
 stateful xorshift stream while the C++ reference generated each value from its
@@ -115,18 +137,19 @@ against an independently CPU-sorted vector. The C++ reference separately
 copies and compares the complete CUB radix, CUB merge-sort, and Thrust outputs;
 sortedness alone is no longer accepted.
 
-The restored implementation must pass the focused GPU executable again before
-the aggregate gate is evaluated.
+The focused key and pair single-tile probes pass both compute-sanitizer
+memcheck and racecheck. The aggregate result gate runs those focused probes in
+addition to the complete primitive matrices.
 
 ## Remaining upstream product
 
 This review is partial. The implemented SM89 primitive agent topology is now
 source-mapped. Primitive 32/64-bit SM80-policy borrowed-double-buffer bit
 windows now execute the pinned runtime pass graph, including partial final
-digits and selector updates. Exact key-only radix emitted performance,
+digits and selector updates. Exact single-tile and one-sweep performance,
 pointer-input/output bit windows, range-specific temp-storage queries,
 multi-portion inputs, resource-owned allocation, 8/16-bit keys, half/bfloat,
-decomposers/custom records, the full NaN matrix, 32/64-bit offset selection,
+decomposers/custom records, 32/64-bit offset selection,
 general iterator/adaptor products, segmented sorting, and all other
 architecture rows remain. Thrust permutation/zip/fancy-iterator ordering and
 device-callable sequential forms also remain. None is represented by a passing

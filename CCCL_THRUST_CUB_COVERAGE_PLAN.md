@@ -203,11 +203,12 @@ already provide.
   catalog entries.
 - `rccl-cub` exposes handwritten safe support values, WarpReduce, DeviceMerge,
   DeviceMergeSort, and primitive integer/`f32`/`f64` DeviceRadixSort. Its
-  32/64-bit Policy800 radix path includes runtime bit windows and borrowed
-  key/pair DoubleBuffers; pair buffers have one structural selector rather
-  than synchronized C++ selector integers. The old pointer-heavy registry
-  implementations were removed rather than hidden behind a runtime loader;
-  the current ordering kernels remain performance-incomplete.
+  32/64-bit Policy800 radix path includes the exact single-tile threshold,
+  runtime bit windows, and borrowed key/pair DoubleBuffers; pair buffers have
+  one structural selector rather than synchronized C++ selector integers.
+  The old pointer-heavy registry implementations were removed rather than
+  hidden behind a runtime loader; the current ordering kernels remain
+  performance-incomplete.
 - `rccl-thrust` exposes handwritten `cuda::Execution`, borrowing a stream,
   allocator, and program-local typed module, plus binary in-place `transform!`,
   sort/stable/by-key, and merge/by-key. Every ordering algorithm lowers through

@@ -18,6 +18,8 @@ cub_examples=(
   device_merge_sort_pairs_probe
   device_radix_sort_keys_probe
   device_radix_sort_pairs_probe
+  device_radix_sort_single_tile_probe
+  device_radix_sort_single_tile_pairs_probe
 )
 thrust_examples=(
   merge
@@ -50,7 +52,12 @@ if [[ ! -x "$compute_sanitizer" ]]; then
   printf '%s\n' "CUDA compute-sanitizer is unavailable at $compute_sanitizer" >&2
   exit 1
 fi
-for example in device_radix_sort_keys_probe device_radix_sort_pairs_probe; do
+for example in \
+  device_radix_sort_keys_probe \
+  device_radix_sort_pairs_probe \
+  device_radix_sort_single_tile_probe \
+  device_radix_sort_single_tile_pairs_probe
+do
   "$compute_sanitizer" --tool memcheck --error-exitcode 99 \
     "./target/release/examples/$example"
   "$compute_sanitizer" --tool racecheck --error-exitcode 99 \

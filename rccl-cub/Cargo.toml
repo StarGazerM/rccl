@@ -82,6 +82,18 @@ test = false
 required-features = ["cuda-oxide-example"]
 
 [[example]]
+name = "device_radix_sort_single_tile_probe"
+path = "examples/device_radix_sort_single_tile_probe.rs"
+test = false
+required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "device_radix_sort_single_tile_pairs_probe"
+path = "examples/device_radix_sort_single_tile_pairs_probe.rs"
+test = false
+required-features = ["cuda-oxide-example"]
+
+[[example]]
 name = "device_ordering_benchmark"
 path = "examples/device_ordering_benchmark.rs"
 test = false

@@ -173,12 +173,13 @@ pub mod __private {
         radix_i32_to_ordered_ascending, radix_i32_to_ordered_descending,
         radix_i64_from_ordered_ascending, radix_i64_from_ordered_descending,
         radix_i64_to_ordered_ascending, radix_i64_to_ordered_descending,
-        radix_init_bins_and_counters_agent, radix_onesweep_keys_agent, radix_onesweep_pairs_agent,
-        radix_rank_digit_u32, radix_rank_digit_u64, radix_u32_from_ordered_ascending,
-        radix_u32_from_ordered_descending, radix_u32_to_ordered_ascending,
-        radix_u32_to_ordered_descending, radix_u64_from_ordered_ascending,
-        radix_u64_from_ordered_descending, radix_u64_to_ordered_ascending,
-        radix_u64_to_ordered_descending,
+        radix_init_bins_and_counters_agent, radix_min_ordered_u32, radix_min_ordered_u64,
+        radix_onesweep_keys_agent, radix_onesweep_pairs_agent, radix_rank_digit_u32,
+        radix_rank_digit_u64, radix_single_tile_keys_agent, radix_single_tile_pairs_agent,
+        radix_u32_from_ordered_ascending, radix_u32_from_ordered_descending,
+        radix_u32_to_ordered_ascending, radix_u32_to_ordered_descending,
+        radix_u64_from_ordered_ascending, radix_u64_from_ordered_descending,
+        radix_u64_to_ordered_ascending, radix_u64_to_ordered_descending,
     };
     pub use cuda_core;
     pub use cuda_device;
@@ -394,6 +395,13 @@ impl<R> DoubleBuffer<R> {
         } else {
             &self.second
         }
+    }
+
+    /// Report which owned Rust range currently contains the result.
+    ///
+    /// This is ordinary runtime ping-pong state, not type or policy metadata.
+    pub fn current_is_first(&self) -> bool {
+        self.current_is_first
     }
 
     pub fn current_mut(&mut self) -> &mut R {

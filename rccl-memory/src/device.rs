@@ -792,6 +792,67 @@ pub struct WarpStripedBlockWrite<'a, T, const THREADS: usize, const ITEMS: usize
     valid_items: usize,
 }
 
+/// Exclusive output for CUB's block-striped arrangement.
+///
+/// For thread `t`, item `i` maps to `i * THREADS + t`. This is a bijection
+/// over one block tile, and distinct CUDA blocks own disjoint tile bases. The
+/// wrapper keeps that collective ownership proof in the memory layer instead
+/// of making an algorithm recover an output pointer.
+pub struct BlockStripedBlockWrite<'a, T, const THREADS: usize, const ITEMS: usize> {
+    output: DisjointSlice<'a, T, LinearTiles<ITEMS>>,
+    tile_base: usize,
+    thread_index: u32,
+    valid_items: usize,
+}
+
+#[inline(always)]
+const fn block_striped_local<const THREADS: usize, const ITEMS: usize>(
+    thread_index: u32,
+    item: usize,
+) -> Option<usize> {
+    if THREADS == 0 || ITEMS == 0 || thread_index as usize >= THREADS || item >= ITEMS {
+        return None;
+    }
+    Some(item * THREADS + thread_index as usize)
+}
+
+impl<'a, T, const THREADS: usize, const ITEMS: usize>
+    BlockStripedBlockWrite<'a, T, THREADS, ITEMS>
+{
+    #[inline(always)]
+    pub fn new(
+        output: DisjointSlice<'a, T, LinearTiles<ITEMS>>,
+        launch: OneDimensionalLaunch<'_>,
+        valid_items: usize,
+    ) -> Self {
+        let (tile_base, thread_index) =
+            block_tile::<THREADS, ITEMS>(launch, output.len(), valid_items);
+        Self {
+            output,
+            tile_base,
+            thread_index,
+            valid_items,
+        }
+    }
+
+    #[inline(always)]
+    pub fn write_if_valid(&mut self, item: usize, value: T) {
+        if item >= ITEMS {
+            return;
+        }
+        let Some(local) = block_striped_local::<THREADS, ITEMS>(self.thread_index, item) else {
+            return;
+        };
+        if local >= self.valid_items {
+            return;
+        }
+        let global = self.tile_base + local;
+        // SAFETY: `(item, thread_index)` is a bijection over the block tile;
+        // `block_tile` proved both the valid prefix and parent allocation.
+        unsafe { *self.output.get_unchecked_mut(global) = value };
+    }
+}
+
 impl<'a, T, const THREADS: usize, const ITEMS: usize> WarpStripedBlockWrite<'a, T, THREADS, ITEMS> {
     #[inline(always)]
     pub fn new(
@@ -984,7 +1045,7 @@ pub fn warp_striped_pair_into_write<
 
 #[cfg(test)]
 mod tests {
-    use super::{MergePathSearch, warp_striped_local};
+    use super::{MergePathSearch, block_striped_local, warp_striped_local};
 
     fn merge_path(first: &[i32], second: &[i32], diagonal: usize) -> usize {
         let mut search = MergePathSearch::new(first, second, diagonal);
@@ -1035,6 +1096,26 @@ mod tests {
         assert_eq!(warp_striped_local::<256, 0>(0, 0), None);
         assert_eq!(warp_striped_local::<256, 17>(256, 0), None);
         assert_eq!(warp_striped_local::<256, 17>(0, 17), None);
+    }
+
+    #[test]
+    fn block_striped_mapping_is_a_tile_bijection_and_fails_closed() {
+        const THREADS: usize = 256;
+        const ITEMS: usize = 19;
+        let mut seen = vec![false; THREADS * ITEMS];
+        for thread in 0..THREADS as u32 {
+            for item in 0..ITEMS {
+                let index = block_striped_local::<THREADS, ITEMS>(thread, item)
+                    .expect("valid coordinate must map into the block tile");
+                assert!(!seen[index], "duplicate block-striped index {index}");
+                seen[index] = true;
+            }
+        }
+        assert!(seen.into_iter().all(|value| value));
+        assert_eq!(block_striped_local::<0, 19>(0, 0), None);
+        assert_eq!(block_striped_local::<256, 0>(0, 0), None);
+        assert_eq!(block_striped_local::<256, 19>(256, 0), None);
+        assert_eq!(block_striped_local::<256, 19>(0, 19), None);
     }
 
     #[test]
