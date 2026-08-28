@@ -434,7 +434,7 @@ pub fn initialized_value<T: Copy>(slot: &MaybeUninit<T>) -> T {
 ///
 /// cuda-oxide's `DisjointSlice` intentionally cannot describe a destination
 /// index produced by a data-dependent permutation. This wrapper keeps that
-/// escape hatch in the memory audit layer while retaining the exclusive
+/// escape hatch at the memory boundary while retaining the exclusive
 /// allocation borrow and bounds extent as ordinary Rust state.
 pub struct DeviceRegion<'a, T> {
     storage: DisjointSlice<'a, T>,

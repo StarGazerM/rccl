@@ -95,7 +95,7 @@ parity is exact: both benchmarks validate every output element after timing.
 ## Repaired Thrust temporary-storage boundary (`THRUST-TEMP-01`)
 
 Status: closed. The synchronous cuda-oxide launcher now accepts safe
-`KernelSliceArg` implementations, so the Thrust proc macros allocate one
+`KernelSliceArg` implementations, so the Thrust declarative macros allocate one
 uninitialized byte transaction and split it into private typed regions with
 the same 128/256-byte rounding as pinned Thrust and CUB. Only CUB protocol
 state that requires zeroing is cleared. The generated algorithm code contains

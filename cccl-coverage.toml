@@ -3,12 +3,12 @@ baseline = "571f2fc3bc53cd710e306ad43d58995c1fe4219f"
 status_values = ["missing", "partial", "implemented", "native-rust", "backend-blocked"]
 
 [[surface]]
-id = "proc-macro-compiler-boundary"
+id = "compile-time-macro-boundary"
 kind = "compiler-infrastructure"
-owner = "rccl-cub-macros/rccl-thrust-macros"
+owner = "rccl-cub-macros/rccl-cub/rccl-thrust"
 status = "implemented"
-entries = ["cub.complete-public-catalog", "cub.semantic-operation-contracts", "thrust.complete-public-catalog", "generated-rust-safety-audit"]
-evidence = ["RCCL_COMPILER_DSL.md", "rccl-cub-macros/src/catalog.rs", "rccl-cub-macros/src/call.rs", "rccl-thrust-macros/src/catalog.rs", "rccl-thrust-macros/src/call.rs", "scripts/test-gpu.sh"]
+entries = ["cub.complete-public-catalog", "cub.semantic-operation-contracts", "thrust.coverage-ledger", "declarative-vs-procedural-boundary"]
+evidence = ["RCCL_COMPILER_DSL.md", "rccl-cub-macros/src/catalog.rs", "rccl-cub-macros/src/call.rs", "rccl-cub/src/macros", "rccl-thrust/src/macros", "scripts/test-gpu.sh"]
 
 [[surface]]
 id = "rust-support-values"
@@ -41,7 +41,7 @@ kind = "semantic-support"
 owner = "rccl-cub/rccl-thrust"
 status = "partial"
 entries = ["device.input", "device.output", "device.zip", "device.transform", "device.permutation"]
-evidence = ["rccl-cub-macros/src/expand.rs", "rccl-thrust-macros/src/expand.rs", "STRICT_CCCL_API_AUDIT.md"]
+evidence = ["rccl-cub/src/range.rs", "rccl-thrust/src/range.rs", "RCCL_COMPILER_DSL.md"]
 
 [[surface]]
 id = "thrust-algorithms-missing"
@@ -90,7 +90,7 @@ kind = "thrust-public-header"
 owner = "rccl-thrust"
 status = "backend-blocked"
 entries = ["thrust/thrust/sort.h"]
-evidence = ["rccl-thrust-macros/src/catalog.rs", "rccl-thrust-macros/src/call.rs", "RCCL_COMPILER_DSL.md"]
+evidence = ["rccl-thrust/src/macros/ordering.rs", "RCCL_COMPILER_DSL.md", "reviews/ordering-cccl-source.md"]
 
 [[surface]]
 id = "thrust-merge"
@@ -98,7 +98,7 @@ kind = "thrust-public-header"
 owner = "rccl-thrust"
 status = "backend-blocked"
 entries = ["thrust/thrust/merge.h"]
-evidence = ["rccl-thrust-macros/src/catalog.rs", "rccl-thrust-macros/src/call.rs", "RCCL_COMPILER_DSL.md"]
+evidence = ["rccl-thrust/src/macros/merge.rs", "RCCL_COMPILER_DSL.md", "reviews/ordering-cccl-source.md"]
 
 [[surface]]
 id = "thrust-support-native"
@@ -141,7 +141,7 @@ entries = [
   "thrust/thrust/universal_ptr.h",
   "thrust/thrust/universal_vector.h",
 ]
-evidence = ["rccl-memory/src/lib.rs", "rccl-memory/RMM_PARITY.md", "STRICT_CCCL_API_AUDIT.md"]
+evidence = ["rccl-memory/src/lib.rs", "rccl-memory/RMM_PARITY.md", "CCCL_THRUST_CUB_COVERAGE_PLAN.md"]
 
 [[surface]]
 id = "thrust-support-callables"
@@ -149,7 +149,7 @@ kind = "thrust-public-header"
 owner = "rccl-cub/rccl-thrust"
 status = "partial"
 entries = ["thrust/thrust/execution_policy.h", "thrust/thrust/functional.h"]
-evidence = ["rccl-thrust-macros/src/catalog.rs", "rccl-thrust-macros/src/expand.rs"]
+evidence = ["rccl-thrust/src/cuda.rs", "rccl-thrust/src/macros"]
 
 [[surface]]
 id = "thrust-support-missing-values"
@@ -185,7 +185,7 @@ entries = [
   "thrust/thrust/iterator/transform_output_iterator.h",
   "thrust/thrust/iterator/zip_iterator.h",
 ]
-evidence = ["rccl-thrust-macros/src/catalog.rs", "rccl-thrust-macros/src/expand.rs", "STRICT_CCCL_API_AUDIT.md"]
+evidence = ["rccl-thrust/src/range.rs", "CCCL_THRUST_CUB_COVERAGE_PLAN.md"]
 
 [[surface]]
 id = "thrust-memory-resources"

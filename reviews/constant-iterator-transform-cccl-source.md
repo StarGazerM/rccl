@@ -16,7 +16,7 @@ kernel, and cuda-oxide typed prepared launcher. The generated Rust
 contains no `unsafe`, raw pointer, `Arc`, runtime type registry, erased
 callable, compiler invocation, or output-format choice.
 
-## Masking audit
+## Masking review
 
 - The exact pinned example runs on the GPU and asserts all four values after a
   device-to-host copy; compilation or a successful launch alone cannot pass.
@@ -34,9 +34,8 @@ callable, compiler invocation, or output-format choice.
   examples.
 - RCCL emits Rust only. The gate invokes cuda-oxide's standard workflow and
   does not configure its compiler, target, device-code format, or loader.
-- The gate rejects a CUDA kernel in `rccl-thrust-macros`; the Thrust expansion
-  must contain the audited Thrust-to-CUB macro edge, whose CUB expansion is
-  independently subjected to the same generated-Rust safety audit.
+- The gate rejects a CUDA kernel in `rccl-thrust/src/macros`; the declarative
+  Thrust wrapper must lower through the hidden CUB transform edge.
 
 ## Injected faults
 

@@ -88,7 +88,7 @@ The extra `Program` construction is a cuda-oxide program-lifetime boundary,
 not an algorithm operand. It occurs once before example or benchmark work;
 neither the benchmarked operation nor its comparator receives a module.
 
-## Result masking audit
+## Result masking review
 
 - `rccl-cub/examples/device_ordering_probe.rs` uses cuda-oxide GPU launches
   and checks complete outputs. It contains the exact `MergeKeys` and
@@ -213,9 +213,9 @@ select the entry; neither a runtime type registry nor a maximum-sized fallback
 exists. Histogram and exclusive-sum storage are likewise static at 4,096 or
 8,192 bytes and 2,336 bytes. The operation macros end `DoubleBuffer` borrows
 with lexical scopes; a forced `drop` on a non-`Drop` carrier is
-source-rejected. Generated CUDA entry points may carry only the exact
-`clippy::too_many_arguments` ABI annotation, and the macro safety audit rejects
-broader lint suppression such as `clippy::all`.
+source-rejected. Generated CUDA entry points carry only the exact
+`clippy::too_many_arguments` ABI annotation; source checks reject broader lint
+suppression such as `clippy::all`.
 
 Two further code-shape experiments were measured and removed: constructing
 the register key array with `core::array::from_fn`, and narrowing the uniform

@@ -1,271 +1,204 @@
-# RCCL shallow compile-time DSL
+# RCCL shallow compile-time boundary
 
-RCCL's project-owned compile-time boundary is procedural-macro expansion:
+RCCL uses the smallest Rust compile-time mechanism that can express each
+semantic decision:
 
 ```text
-ordinary Rust call tokens
-    -> rccl-thrust-macros `syn` call AST
-    -> typed Thrust semantic selection
-    -> rccl-cub-macros `syn` call AST
-    -> typed CUB schedule/kernel selection
-    -> concrete cuda-oxide Rust
-    -> rustc type checking and monomorphization
+ordinary function / trait / generic
+    when rustc monomorphization already expresses the distinction
+
+macro_rules!
+    when lowering is fixed syntax substitution and operand preservation
+
+proc macro
+    only when expansion must inspect macro-visible tokens and choose a
+    concrete CUB target policy, instruction, static storage extent, or
+    kernel family
 ```
 
-The DSL is shallow and user-call-facing. There is no separate language file,
-parser input file, or runtime compiler manifest. Rust expressions, closures,
-paths, borrows, and generic arguments stay Rust syntax; the operation macro
-changes only the meaning and lowering of the call. Any type fact that changes
-a CCCL TMP selection is an explicit macro generic, because a stable proc macro
-cannot query rustc's later type inference.
+No compile-time decision is moved to runtime. Runtime crates contain no target
+schedule, type map, `TypeId`, `Any`, registry, strategy object, module
+family, or fallback dispatcher.
 
-## Public call shape
+## User-facing syntax
 
-An operation that needs compile-time CUB/Thrust selection is a macro, like
-`println!` is a macro when a normal function call cannot express its required
-compile-time work:
+The DSL is the shallow Rust invocation itself, not a separate `.dsl` file:
 
 ```rust,ignore
-sort_by!(::<i64>(
+rccl_thrust::sort!(::<u32>(&exec, &mut keys))?;
+
+rccl_thrust::sort_by!(::<i64>(
     &exec,
     &mut keys,
     |left: &i64, right: &i64| right.cmp(left),
 ))?;
 
-stable_sort_by_key!(::<i64, u32>(
+rccl_thrust::stable_sort_by_key_with!(::<i64, u32>(
     &exec,
     &mut keys,
     &mut values,
     |left: &i64, right: &i64| left.cmp(right),
 ))?;
 
-device_reduce!(
-    &exec,
-    &values,
-    &mut result,
-    |left, right| left + right,
-    0_i64,
-)?;
-
-let aggregate = warp_reduce!(::<i32, 32>(
+let aggregate = rccl_cub::warp_reduce!(::<i32, 32>(
     thread_value,
     |left, right| left + right,
 ));
-
-let aggregate = warp_reduce_items!(::<i32, 32, 4>(
-    thread_items,
-    |left, right| left + right,
-));
-
-transform!(
-    &exec,
-    &mut values,
-    repeated,
-    |left, right| left + right,
-)?;
 ```
 
-Thrust call shapes expose only semantic operands. Radix scratch, merge-sort
-ping-pong buffers, bins, lookback state, counters, and partition arrays are not
-public Thrust arguments. Their layout formulas are selected by the proc macro;
-their runtime extents come from the borrowed ranges; and the generated Rust
-acquires the concrete temporary buffers through `Execution`. Direct CUB keeps
-its separate caller-storage contract.
+Rust expressions, closures, paths, and borrows remain Rust syntax. The macros
+do not introduce a C++ iterator-pair facade or comparator object hierarchy.
+The `_by_key` suffix changes the input shape (keys plus associated values);
+`_by` or `_with` supplies an ordinary Rust ordering closure.
 
-`warp_reduce!`, the shown finite-constant `transform!` intersection, and the
-primitive numeric sort/merge slice are implemented and exported. Natural
-integer/`f32`/`f64` sort lowers through CUB radix sort; custom ordering lowers
-through CUB merge sort. Floating radix transformation, including stable
-signed-zero equivalence, is selected from the explicit key type during macro
-expansion. The ordering parity gate remains failing until the kernel schedules
-and throughput match pinned CCCL. There is no CPU fallback.
+## The three semantic layers
 
-`sort_by!` has one mutable range. `stable_sort_by_key!` has separate key and
-value ranges and preserves the relative order of equal keys. The `_by_key`
-suffix therefore denotes a different semantic input shape, not a comparator
-kind. `compare` is an ordinary Rust closure expression; RCCL has no
-`Comparator`, `Less`, or `Greater` object hierarchy.
+### Ordinary Rust
 
-The macro parser stores runtime operands as `syn::Expr`; TMP types and constants
-are explicit `syn::Type`/literal syntax. It cannot inspect the inferred type or
-array extent of an operand expression. Any such fact needed by lowering is
-therefore a template input, not ordinary later type information:
-`sort!(::<u32>(...))`, `warp_reduce!(::<i32, 32>(...))`, and
-`warp_reduce_items!(::<i32, 32, 4>(...))`. Untyped forms are rejected. Rustc
-checks that the explicit TMP facts agree with the concrete expressions; it
-does not select the RCCL algorithm or policy.
+Rust traits and generics represent open behavior and capabilities:
 
-## What is and is not the DSL
+- `DeviceRange`, `ReadRange`, `WriteRange`, and
+  `RandomAccessRange` express range capabilities;
+- generic workspace owners express type/lifetime relationships;
+- `Fn` bounds express user callables;
+- associated types and const generics express normal CRTP/TMP relationships
+  that rustc can resolve during monomorphization;
+- tuples, arrays, `Option`, `Result`, `MaybeUninit`, borrows, and RAII
+  replace their C++ library counterparts directly.
 
-The user-facing macro invocation is the DSL. The files
-`rccl-cub-macros/src/catalog.rs` and
-`rccl-thrust-macros/src/catalog.rs` are private typed compiler data, not a
-language:
+These are not macro inputs merely because the corresponding CCCL code uses a
+template.
 
-```text
-CubCall       = operation-specific Rust Type* x Expr* fields
-CubPrimitive  = Name x Status x Scope x Dependency* x Schedule? x Kernel* x Contract
-Contract      = Capability* x CallableShape x StorageClass
-Schedule      = Name x (Target -> literal tuning row)
+### Declarative macros
 
-ThrustCall    = operation-specific Rust Type* x Expr* fields
-Algorithm     = Name x Status x Form x CubDependency* x SelectionRule*
-SelectionRule = CompileTimePredicate -> CubPrimitive
-```
+`rccl-thrust/src/macros` owns fixed Thrust-to-CUB lowering:
 
-Closed CCCL TMP/CRTP policy becomes enum/struct data and direct lowering in
-the macro crate. It does not become a public Rust policy, backend, strategy,
-proof type, trait object, `TypeId`, registry, or cache. Rust traits remain only
-where callers genuinely supply open behavior or capabilities.
+- program construction;
+- transform;
+- sort and stable sort;
+- sort-by-key forms;
+- merge and merge-by-key forms.
 
-The macro crates validate the complete typed catalogs for duplicate names,
-unknown dependencies, dependency cycles, incomplete target schedules,
-duplicate capabilities, illegal storage scope, and invalid selection targets.
-Each CUB primitive contains exactly one semantic contract by construction;
-there is no separately parsed binding table that can drift.
+The macros preserve evaluation-once bindings, allocate private temporary
+storage, and invoke the actual CUB dependency. They make no architecture or
+algorithm-policy decision. Natural order is an ordinary closure emitted by
+the declarative macro.
 
-## Crate boundary
+`rccl-cub/src/macros` owns the fixed device-wide program binder and the
+fixed transform launch wrapper.
 
-```text
-                         compile time only
-       +----------------------+-------------------------+
-       |                                                |
-rccl-cub-macros ------------------------------> rccl-thrust-macros
-       | operation parsing/catalog/lowering       | call parsing/CUB selection
-       v                                          v
-rccl-memory ----------------> rccl-cub -------> rccl-thrust -------> rccl
-                         runtime values only
-```
+A subtle Rust boundary matters here: forwarding a metavariable captured as
+`ty` makes that fragment opaque to a nested macro. The implemented primitive
+ordering surface therefore captures its supported bare primitive token as an
+`ident` and forwards it unchanged to the CUB proc macro. The CUB layer—not
+the Thrust wrapper—owns the closed primitive layout decision. Extending this
+surface to custom/decomposed keys requires an explicit macro-visible metadata
+contract; it must not fall back to runtime type inspection.
 
-There is no support-generation macro. Slices, buffers, tuples, range
-descriptors, storage layouts, and `Execution` are ordinary handwritten Rust.
-Only operation calls that require closed CUB/Thrust selection and concrete
-kernel construction are proc macros.
+### Procedural macros
 
-The macro crates own every authored compile-time fact:
+`rccl-cub-macros` is the only proc-macro crate. Every remaining public entry
+has a capability that `macro_rules!` or normal generics cannot provide:
 
-- the complete CCCL-family inventory and dependency graph;
-- thread, warp, block, agent, grid, and device kernel families;
-- type/callable selection rules;
-- target schedules, launch bounds, tile shapes, unroll factors, shared-memory
-  formulas, and fallback selection;
-- Thrust-to-CUB lowering rules; and
-- the concrete source generated for each macro invocation.
+| Entry family | Compile-time decision |
+|---|---|
+| `#[rccl_cub::program]` | validate and transform an inline module, then inject its scoped binder |
+| `warp_reduce!`, `warp_reduce_items!` | validate literal warp/item counts and select scalar shuffle/redux implementation |
+| `__device_kernels!` | emit the static cuda-oxide kernel family and exact shared-storage variants |
+| DeviceMerge operations/workspaces/counts | read the selected SM target, inspect supported type layout, and materialize literal CUB tile/load/shared-memory policy |
+| DeviceMergeSort operations/workspaces/counts | select target/type policy, launch bounds, static shared extent, and pass graph |
+| DeviceRadixSort operations/workspaces/counts | select ordered representation, bit width, Policy800 scaling, static unions, kernel entries, and pass graph |
 
-Runtime crates own only values that exist while a program runs:
+The proc-macro entry functions only parse and dispatch. A fixed public
+proc-macro function that merely returns `quote!` is rejected by the
+repository gate.
 
-- ordinary support types, range capabilities, and range adaptors;
-- borrowed contexts, streams, and allocators;
-- allocation owners, buffers, views, lengths, and temporary storage;
-- launch dimensions derived from runtime lengths; and
-- completion and error values.
+## Architecture boundary
 
-`Program` owns one statically typed program-local cuda-oxide module, while
-`Execution` borrows the program and stream and owns or borrows only its
-temporary-allocation capability. Neither contains a module set, schedule,
-architecture, type map, specialization cache, or compiler policy. Public
-algorithm calls never name the module or architecture; the proc macro reads
-cuda-oxide's selected build target.
+`CUDA_OXIDE_TARGET` is read only by
+`rccl-cub-macros/src/target.rs`. Merge and radix expansion request the
+already-selected target from that internal module. No public macro accepts an
+`sm_XX` token, and no runtime value carries architecture.
 
-For CUB block/warp primitives, the user kernel remains ordinary inline Rust:
-`#[rccl_cub::program] mod kernels { ... }` delegates kernel analysis to
-cuda-oxide and injects a scoped `kernels::program!(&context)` binder. The item
-macro owns the module provenance, while the expression macro keeps the backend
-context owner type inferred. No raw loader, module handle, architecture, or
-unsafe block becomes part of the user call shape.
+This prevents the target parameter from being threaded from the public API
+through every intermediate layer. The architecture affects only the CUB
+policy point that needs it.
 
-Direct device-wide CUB calls receive one operation-specific opaque workspace.
-The proc macro computes its target/type-dependent shape, while the runtime
-value owns only the resulting buffers. Scratch keys, partitions, radix bins,
-lookback state, and pass counters are never separate public operands.
+## C++ TMP and CRTP mapping
+
+| C++ form | Rust form |
+|---|---|
+| template parameter used only as a data/callable type | generic type parameter plus trait bounds |
+| CRTP interface specialization | trait implementation and associated types/consts |
+| overload selected by ownership/range category | distinct trait capability or borrow shape |
+| compile-time integer used by device code | const generic |
+| closed architecture/type tuning table | CUB proc-macro policy selection emitting literals |
+| template-generated kernel name/storage family | CUB proc-macro static item generation |
+| function object | ordinary closure, usually `Copy` on device |
+| runtime iterator pair | borrowed range whose length and exclusivity are intrinsic |
+
+A type parameter is not automatically “TMP that requires a macro.” A proc
+macro is justified only when rustc cannot provide the required closed token
+inspection before type checking or when concrete item generation is required.
 
 ## Expansion contract
 
-For call syntax `C`, macro-visible TMP type facts `T`, and compiler target `G`,
-the generated generic program realizes the partial function
+For a CUB call syntax `C`, macro-visible closed policy facts `T`, and the
+cuda-oxide build target `G`, expansion implements:
 
 ```text
-lower(C, T, G) = (concrete CUB operation, literal schedule, oxide kernel set)
+lower_cub(C, T, G)
+  = concrete operation source
+  + literal schedule operands
+  + exact static storage/kernel entry
 ```
 
-The proc macro sees `C` and `T` directly. It emits source for `G` that rustc and
-cuda-oxide type-check and monomorphize. RCCL never discovers a strategy through
-`TypeId`, `Any`, a runtime registry, or a fallback branch.
+Runtime values remain runtime values: lengths, bit windows, selected
+`DoubleBuffer` side, pass counters, launch counts derived from lengths, and
+errors. Runtime branches may select routes that are semantically runtime in
+CCCL (for example single-tile versus multi-tile by input length), but they do
+not discover type or architecture policy.
 
-For a device-wide operation, the CUB macro layer emits:
+The Thrust layer is:
 
-1. concrete cuda-oxide kernel items and operation-specific device helpers;
-2. literal schedule operands/compiler attributes;
-3. the selected temporary-storage formula and launch graph; and
-4. typed launch code with safe generated arguments.
+```text
+lower_thrust(C)
+  = evaluation-once bindings
+  + private temporary allocation
+  + one corresponding CUB macro invocation
+  + synchronization required by the Thrust API
+```
 
-For a cooperative device operation used inside a caller-authored kernel, such
-as `warp_reduce!`, it instead emits a safe expression selecting the concrete
-tile implementation. The caller's kernel remains ordinary cuda-oxide Rust;
-the macro owns scalar representation, tile width, per-thread item count,
-closure typing, and operation selection. Rustc checks the resulting expression.
+It contains no CUB kernel and no duplicate policy table.
 
-The Thrust layer parses the public algorithm shape and lowers directly to its
-CUB operation. It does not recreate C++ iterator-pair or execution-policy
-scaffolding when a Rust borrow/range already carries the semantics.
+## Ownership and safety boundary
 
-Before returning tokens, each proc macro parses generated output into a
-`syn::File` and runs a structural audit. Generated algorithm code is rejected
-if it contains `Arc`; raw pointer types, casts, extraction, or raw-address
-expressions; `NonNull`/`UnsafeCell`/`ptr`/`transmute`; unsafe blocks,
-signatures, traits, or impls; FFI blocks, unions, `static mut`; opaque nested
-macros; or unaudited attributes. The exact hidden Thrust-to-CUB operation
-edges are admitted only because the receiving CUB macros audit their final
-Rust with the identical pass. A genuinely unavoidable CUDA FFI action
-belongs in a tiny hand-audited backend primitive, never in generated algorithm
-code.
+Generated algorithms use borrowed ranges, typed workspaces, checked disjoint
+regions, closures, and cuda-oxide prepared launches. There is no raw-pointer
+view, erased comparator, `Arc` module registry, manual ABI vector, PTX
+loader, or RCCL compiler step.
 
-RCCL-generated code performs no compiler invocation, compiler configuration,
-manual symbol construction, or erased ABI argument-vector assembly. It emits
-pure Rust; cuda-oxide owns every later compilation decision. If cuda-oxide
-lacks a required Rust/device binding, that operation stays unexported.
+The only algorithm-facing `unsafe` source is the exact cuda-oxide module
+`load` provenance bind in the two declarative program constructors. Those
+macros generate the module and immediately load that same module; users do not
+write or receive an unsafe API. Any additional unsafe expression, loader, or
+manual launch ABI is rejected by the boundary gate.
 
-## Rust-native support mapping
+## Temporary storage
 
-Ordinary runtime code uses Rust vocabulary rather than generated compatibility
-wrappers:
+Direct device-wide CUB calls receive one operation-specific opaque workspace.
+The CUB proc macro computes target/type-dependent layout formulas; the runtime
+workspace owns only buffers and borrows.
 
-| CCCL concept | Rust representation |
-|---|---|
-| `span` | kernel `&[T]`, `&mut [T]`, or a checked disjoint slice |
-| `array` | `[T; N]` |
-| `pair`, `tuple` | Rust tuples; named records only when field names matter |
-| type traits/TMP | bounds, associated types, const generics, macro semantic checks |
-| `optional`, `expected` | `Option`, `Result` |
-| `device_vector` | `rccl_memory::DeviceBuffer` |
-| iterator categories/facade | minimal read/write/random-access range capabilities |
-| fancy iterator | zero-copy range-expression descriptor |
-| comparator/function object | ordinary Rust closure expression |
-| temporary storage query | checked `Layout` and exclusive allocation borrow |
-| execution policy | typed program owner plus borrowed stream; optional allocator through `par_in` |
+Thrust calls never expose scratch keys, partitions, radix bins, lookback
+state, or counters. Their declarative macros allocate one private temporary
+transaction, split it through safe affine typed regions, construct the CUB
+workspace, invoke CUB, and synchronize.
 
-Generated range descriptors contain no host `get`/`write` execution path.
-Construction records shape and closures but never evaluates device closures
-on the host, preventing CPU behavior from masking a missing GPU lowering.
+## Review rule
 
-## Rejection and verification
-
-Outside the macro crates, structural tests reject authored schedules,
-specialization/dispatch traits, compiler manifests, `TypeId`/`Any`, module
-caches, RCCL-owned compiler/loader paths, manual symbols/ABI vectors, generated `Arc`, raw
-pointers, broad unsafe, and compatibility aliases.
-
-Verification proceeds in these stages:
-
-1. Validate both complete typed Rust catalogs.
-2. Parse real shallow call syntax with `syn` 3.0.4 and compile-pass/compile-fail
-   consumers once each operation is exported.
-3. Audit generated syntax and ownership/capability boundaries.
-4. Add focused examples, unit tests, GPU reference tests, randomized tests,
-   and negative cases for each implemented family.
-5. Seed parser, lowering, launch, and output faults and prove the intended test
-   fails for the intended reason; inspect for vacuous passes, stale binaries,
-   CPU execution, shared oracles, skipped work, partial-output checks, and
-   swallowed errors.
-6. Run the cuda-oxide compiler/GPU/reference gate. Missing static support is a
-   compiler blocker and never a fallback.
+A change that makes an existing test pass is not sufficient. Each implemented
+slice needs an upstream-corresponding public example, focused unit/negative
+tests, result validation, and an adversarial iteration showing that a seeded
+implementation or launch error makes the relevant test fail. Performance
+thresholds and expected results may not be changed to hide the fault.

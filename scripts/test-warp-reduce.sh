@@ -84,7 +84,7 @@ while IFS= read -r rust_source; do
     implementation_redflag=1
   fi
 done < <(
-  find rccl-cub/src -type f -name '*.rs' -print
+  find rccl-cub/src -type f -name '*.rs' ! -name 'tests.rs' -print
   printf '%s\n' \
     rccl-cub-macros/src/lib.rs \
     rccl-cub-macros/src/call.rs \

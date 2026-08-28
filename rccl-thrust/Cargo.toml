@@ -11,7 +11,6 @@ cuda-device = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "6bc513b
 cuda-host = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "6bc513bbcdda781b13a328cf692df86f2215acf9" }
 rccl-cub = { path = "../rccl-cub" }
 rccl-memory = { path = "../rccl-memory" }
-rccl-thrust-macros = { path = "../rccl-thrust-macros" }
 
 [features]
 cuda-oxide-example = []

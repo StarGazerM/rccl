@@ -364,19 +364,6 @@ operation_call!(
     op,
 );
 
-// Internal CUB lowering target for the currently implemented Thrust
-// intersection. Thrust owns RepeatN validation; CUB owns the concrete kernel,
-// launch geometry, and typed cuda-oxide call.
-operation_call!(
-    DeviceTransformRepeatInPlaceCall,
-    "__device_transform_repeat_in_place!",
-    module,
-    stream,
-    output,
-    repeated,
-    op,
-);
-
 // Rust-native forms of pinned CUB DeviceMerge. Extents come from the borrowed
 // buffers, so the C++ count operands are deliberately absent. The ordering is
 // an ordinary Rust closure and the output borrow carries write exclusivity.

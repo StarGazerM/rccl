@@ -14,7 +14,7 @@ closure-based device helper. The generated expressions contain no `unsafe`,
 raw pointer, `static mut`, `Arc`, erased callable, operator policy, or compiler
 artifact control.
 
-## Masking audit
+## Masking review
 
 - The GPU executable asserts results; it cannot pass after only compiling or
   launching.
@@ -63,10 +63,10 @@ All faults were temporary and removed before the final gate.
 | Make all four benchmark addition closures semantically equal but syntactically ineligible for the hardware-add specialization | equal-work performance gate | results remained exact, but the best-median RCCL/CCCL ratio was `2.011273`, exceeding the `1.001` measurement-equivalence limit |
 
 Parser negative tests independently reject runtime tile widths, unsupported
-widths `9` and `7`, missing operands, and extra operands. Generated-expression
-audits independently reject unsafe/raw-pointer syntax. A parser regression test
-also proves that an integer literal forwarded through `macro_rules!` remains
-accepted rather than being mistaken for a runtime width.
+widths `9` and `7`, missing operands, and extra operands. The macro-boundary
+gate independently rejects runtime compiler metadata and loader/ABI control. A
+parser regression test also proves that an integer literal forwarded through
+`macro_rules!` remains accepted rather than being mistaken for a runtime width.
 
 ## Remaining upstream cases
 

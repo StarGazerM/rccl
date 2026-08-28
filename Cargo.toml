@@ -11,7 +11,6 @@ members = [
     "rccl-cub-macros",
     "rccl-memory",
     "rccl-thrust",
-    "rccl-thrust-macros",
 ]
 exclude = ["vendor/cuda-host", "vendor/cuda-macros"]
 

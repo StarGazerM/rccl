@@ -52,11 +52,12 @@ The runtime dependency direction is:
 rccl-memory -> rccl-cub -> rccl-thrust -> rccl
 ```
 
-All authored compile-time information is above that graph:
+Closed CUB policy information is above that graph; fixed Thrust lowering is
+declarative Rust in its runtime crate:
 
 ```text
-rccl-cub-macros    -> generated rccl-cub Rust
-rccl-thrust-macros -> generated rccl-thrust Rust
+rccl-cub-macros          -> generated policy-specialized rccl-cub Rust
+rccl-thrust macro_rules! -> fixed Thrust-to-CUB lowering
 ```
 
 `rccl-memory` is also consumed directly by `rccl-thrust`. Support code goes in
@@ -68,9 +69,8 @@ the lowest existing owner that needs it:
   cuda-oxide kernel families;
 - `rccl-cub`: handwritten support/runtime values plus macro-emitted operation
   code only after an operation is implemented;
-- `rccl-thrust-macros`: every Thrust-to-CUB compile-time lowering rule;
 - `rccl-thrust`: handwritten adaptors, execution/completion values, and
-  macro-emitted algorithm facades only after implementation;
+  declarative Thrust-to-CUB operation macros only after implementation;
 - `rccl`: re-exports only.
 
 Do not create a monolithic compatibility crate. If real implementation work
@@ -156,7 +156,7 @@ performance gate remains red until the upstream kernels are reproduced.
 | `device_reference` and proxy references | no free-standing fake `&T`; range/read/write capabilities and adaptor-specific device lowering | CUB + Thrust | partial; minimal host capability traits cover cuda-core and allocator-aware device buffers but deliberately not host slices, while generated kernels remain |
 | iterator traits/categories/facade/adaptor | descriptor structs compose range/read/write/random-access capabilities without host execution methods | CUB + Thrust | partial; finite constant input is operational for the binary in-place transform intersection; other handwritten descriptor forms remain non-operational planning vocabulary until their device lowering and upstream evidence exist |
 | `mdspan`, extents, layouts | typed multidimensional device view with shape, strides, and layout marker; contiguous 1-D case lowers to slice | CUB | missing; cuda-oxide checked 2-D views are reusable backend pieces |
-| functional objects | ordinary `Fn`/`FnMut` bounds plus `Copy` device-callable closures; specialization is emitted by `rccl-thrust-macros` | CUB + Thrust macros | catalogued; algorithm expansion is backend-blocked; no RCCL callable compatibility trait |
+| functional objects | ordinary `Fn`/`FnMut` bounds plus `Copy` device-callable closures; fixed Thrust forwarding is declarative and closed CUB specialization stays in `rccl-cub-macros` | CUB + Thrust macros | catalogued; algorithm expansion is backend-blocked; no RCCL callable compatibility trait |
 | `complex<T>` | RCCL-owned `#[repr(C)] Complex<T>` or an upstream cuda-core `DeviceCopy` implementation for a standard Rust complex type | CUB value layer | missing |
 | random engines/distributions | small copyable RNG state values with Rust methods; exact pinned sequences tested against Thrust | Thrust | missing |
 | memory construction/destruction and unique allocation | `MaybeUninit<T>`, RAII owners, `Drop`, and explicit stream-ordered destruction/release | memory + Thrust | partial; unique object/array helpers and nontrivial device construction remain |
@@ -197,10 +197,10 @@ already provide.
 
 - `rccl-memory` already has allocator-aware `DeviceBuffer`, `DeviceScalar`,
   managed/pinned/device resources, pool resources, and resource adaptors.
-- `rccl-cub-macros` validates the complete 59-primitive public CUB catalog;
-  `rccl-thrust-macros` validates all 34 algorithms and 19 iterator/adaptor
-  headers. Support families are ordinary-library coverage rows, not compiler
-  catalog entries.
+- `rccl-cub-macros` validates the complete 59-primitive public CUB catalog.
+  The coverage ledger tracks all 34 Thrust algorithms and 19 iterator/adaptor
+  headers; fixed Thrust lowering does not justify a second proc-macro catalog.
+  Support families are ordinary-library coverage rows, not compiler entries.
 - `rccl-cub` exposes handwritten safe support values, WarpReduce, DeviceMerge,
   DeviceMergeSort, and primitive integer/`f32`/`f64` DeviceRadixSort. Its
   32/64-bit Policy800 radix path includes the exact single-tile threshold,
@@ -478,7 +478,7 @@ masking, not closure.
 
 | Phase | Deliverable | Unlocks | Exit evidence |
 |---|---|---|---|
-| 0 | Machine-readable coverage ledger, exact pinned example/API-test inventory, typed private catalogs, shallow call parsers, and generated-algorithm safety audit | honest progress, drift checks, and one compile-time owner for every later primitive | every inventory item has an owner/status; all 19 programs, 378 embedded regions, 49 API tests, and 105 exercised CUB methods are pinned; runtime crates contain no closed compiler metadata; generated code rejects `Arc`, raw pointers, and unsafe; no RCCL-owned compiler or loader route exists |
+| 0 | Machine-readable coverage ledger, exact pinned example/API-test inventory, typed CUB policy catalog, shallow call boundary, and declarative/procedural macro classification | honest progress, drift checks, and one compile-time owner for every later primitive | every inventory item has an owner/status; all 19 programs, 378 embedded regions, 49 API tests, and 105 exercised CUB methods are pinned; runtime crates contain no closed compiler metadata; quote-only public proc macros are rejected; no RCCL-owned compiler or loader route exists |
 | 1 | Read/write/random-access range traits, callable bounds, product/key-value types, double buffer, offset selection, temp-storage layout; rely on native cuda-oxide slices | all general algorithms and CUB public forms | compile-fail alias/lifetime tests, host/device ABI tests, and zero-copy ownership checks |
 | 2 | Thrust adaptors: counting, constant, discard, offset, reverse, strided, transform, transform-output, transform-in/out, zip, permutation, shuffle, tabulate-output, retag/capability conversion | fancy-iterator parity for later algorithms | adaptor composition matrix on device, including read/write zip and non-contiguous outputs |
 | 3 | CUB thread then warp then block load/store/exchange/reduce/scan/search/sort/radix/histogram building blocks | reusable implementation base for device-wide algorithms | upstream example/test matrices, exact temp-storage sizes/alignment, and GPU synchronization stress tests |
@@ -575,7 +575,7 @@ A row becomes `implemented` only when all of the following hold:
 4. no host scratch or host data path is introduced;
 5. host tests, compile-fail tests, cuda-oxide builds, and runtime tests pass;
 6. randomized differential tests run against the exact pinned CCCL checkout;
-7. generated Rust audits and GPU runtime tests cover launch bounds,
+7. macro-boundary checks and GPU runtime tests cover launch bounds,
    synchronization, ownership, and specialization selection where relevant;
 8. performance compares identical allocation, synchronization, type,
    distribution, size, and stream boundaries;

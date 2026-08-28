@@ -12,12 +12,11 @@ expected_packages=(
   rccl-cub-macros
   rccl-memory
   rccl-thrust
-  rccl-thrust-macros
 )
 if ! diff -u \
   <(printf '%s\n' "${expected_packages[@]}") \
   <(printf '%s\n' "${workspace_packages[@]}"); then
-  printf '%s\n' 'workspace must contain the two compiler layers and four runtime layers only' >&2
+  printf '%s\n' 'workspace must contain one compile-time policy crate and four runtime crates' >&2
   exit 1
 fi
 
@@ -28,11 +27,11 @@ package_dependencies() {
 }
 
 if [[ "$(package_dependencies rccl-cub)" != 'cuda-core cuda-device cuda-host rccl-cub-macros rccl-memory' ]]; then
-  printf '%s\n' 'rccl-cub must own cuda-oxide device-transform kernel and launch lowering' >&2
+  printf '%s\n' 'rccl-cub must keep CUB policy expansion in rccl-cub-macros' >&2
   exit 1
 fi
-if [[ "$(package_dependencies rccl-thrust)" != 'cuda-core cuda-device cuda-host rccl-cub rccl-memory rccl-thrust-macros' ]]; then
-  printf '%s\n' 'rccl-thrust must separate ordinary support from its operation macro and cuda-oxide kernel dependencies' >&2
+if [[ "$(package_dependencies rccl-thrust)" != 'cuda-core cuda-device cuda-host rccl-cub rccl-memory' ]]; then
+  printf '%s\n' 'rccl-thrust must use declarative macros and may not depend on a proc-macro facade' >&2
   exit 1
 fi
 if [[ "$(package_dependencies rccl)" != 'rccl-cub rccl-thrust' ]]; then
@@ -44,122 +43,106 @@ if [[ -e rccl-cub/build.rs || -e rccl-thrust/build.rs ]]; then
   printf '%s\n' 'runtime build scripts may not select targets or generate schedules' >&2
   exit 1
 fi
-if rg -n 'emit_support' rccl-cub rccl-thrust --glob '*.rs' --glob 'Cargo.toml'; then
+if rg -n 'emit_support' rccl-cub rccl-thrust rccl-cub-macros --glob '*.rs' --glob 'Cargo.toml'; then
   printf '%s\n' 'ordinary support code must not be emitted by a proc macro' >&2
   exit 1
 fi
-if ! rg -q 'warp_reduce,' rccl-cub/src/lib.rs \
-  || ! rg -q 'warp_reduce_items,' rccl-cub/src/lib.rs \
-  || ! rg -q '__device_kernels' rccl-cub/src/lib.rs \
-  || ! rg -q '__device_transform_repeat_in_place' rccl-cub/src/lib.rs \
-  || ! rg -q 'device_radix_sort_keys' rccl-cub/src/lib.rs; then
-  printf '%s\n' 'rccl-cub must own the public collectives/ordering and hidden device-kernel operations' >&2
+
+mapfile -t runtime_sources < <(
+  find rccl-cub/src rccl-thrust/src src -type f -name '*.rs' \
+    ! -path '*/macros/program.rs' ! -path '*/tests.rs' | sort
+)
+forbidden_runtime='\b(TypeId|Any|Arc|AotKernelSet|TargetSchedule|KernelSet|DispatchEngine|SortConstInvocation|MergeConstInvocation|Comparator)\b|\bunsafe\b|\*mut|\*const|cuda_module|load_all_ptx|load_module_from_ptx|nvJit|PTX|ptx'
+if rg -n "$forbidden_runtime" "${runtime_sources[@]}"; then
+  printf '%s\n' 'runtime algorithm code contains compiler metadata, unsafe ownership, or backend compiler control' >&2
   exit 1
 fi
-
-runtime_roots=(rccl-cub/src rccl-thrust/src src)
-forbidden_runtime='\b(TypeId|Any|Arc|AotKernelSet|TargetSchedule|KernelSet|DispatchEngine|SortConstInvocation|MergeConstInvocation|Comparator|Less|Greater)\b|\bunsafe\b|\*mut|\*const|cuda_module|load_all_ptx|load_module_from_ptx|nvJit|PTX|ptx'
-if rg -n "$forbidden_runtime" "${runtime_roots[@]}" --glob '*.rs'; then
-  printf '%s\n' 'runtime algorithm crates contain compile-time metadata, unsafe ownership, or backend compiler control' >&2
+if [[ "$(rg -n '\bunsafe\b' rccl-cub/src/macros/program.rs rccl-thrust/src/macros/program.rs | wc -l)" -ne 2 ]] \
+  || ! rg -q 'unsafe \{ __rccl_cub_kernels::load\(__rccl_context\) \}' rccl-cub/src/macros/program.rs \
+  || ! rg -q 'unsafe \{ __rccl_thrust_kernels::load\(__rccl_context\) \}' rccl-thrust/src/macros/program.rs; then
+  printf '%s\n' 'only the two exact cuda-oxide artifact-provenance binds may be unsafe' >&2
   exit 1
 fi
 
 forbidden_codegen_loader='cuda_host::cuda_module|load_all_ptx_bundles_merged|load_module_from_ptx|nvJit|cuModuleLoadData|load_function\(|push_kernel_scalar|launch_kernel_on_stream'
-if rg -n "$forbidden_codegen_loader" \
-  rccl-cub-macros/src rccl-thrust-macros/src --glob '*.rs' --glob '!audit.rs'; then
-  printf '%s\n' 'proc-macro expansion contains a runtime loader or manual launch ABI' >&2
+if rg -n "$forbidden_codegen_loader" rccl-cub-macros/src rccl-cub/src/macros rccl-thrust/src/macros --glob '*.rs'; then
+  printf '%s\n' 'macro expansion contains a runtime loader or manual launch ABI' >&2
   exit 1
 fi
-for audit in rccl-cub-macros/src/audit.rs rccl-thrust-macros/src/audit.rs; do
-  for audit_rule in \
-    visit_attribute \
-    visit_expr_cast \
-    visit_expr_lit \
-    visit_expr_method_call \
-    visit_expr_raw_addr \
-    visit_expr_unsafe \
-    visit_item_foreign_mod \
-    visit_item_impl \
-    visit_item_static \
-    visit_item_trait \
-    visit_item_union \
-    visit_macro \
-    visit_path \
-    visit_signature \
-    visit_type_fn_ptr \
-    visit_type_ptr; do
-    if ! rg -q "fn $audit_rule" "$audit"; then
-      printf '%s\n' "$audit is missing generated-Rust safety rule $audit_rule" >&2
-      exit 1
-    fi
-  done
-done
-for cub_edge in \
-  device_merge_keys \
-  device_merge_pairs \
-  device_merge_sort_keys \
-  device_stable_merge_sort_keys \
-  device_merge_sort_pairs \
-  device_stable_merge_sort_pairs \
-  device_radix_sort_keys \
-  device_radix_sort_pairs; do
-  if ! rg -q "\"$cub_edge\"" rccl-thrust-macros/src/audit.rs; then
-    printf '%s\n' "Thrust generated-Rust audit is missing exact CUB edge $cub_edge" >&2
-    exit 1
-  fi
-done
 
-for manifest in rccl-cub-macros/Cargo.toml rccl-thrust-macros/Cargo.toml; do
-  if ! rg -q '^syn = \{ version = "3\.0\.4", features = \[' "$manifest" \
-    || ! rg -q '^syn_derive = "0\.2\.0"$' "$manifest"; then
-    printf '%s\n' "$manifest must use current syn and syn_derive parsers" >&2
-    exit 1
-  fi
-done
-if find rccl-cub-macros/src rccl-thrust-macros/src -type f -name '*.dsl' | rg .; then
+if ! rg -q '^syn = \{ version = "3\.0\.4", features = \[' rccl-cub-macros/Cargo.toml \
+  || ! rg -q '^syn_derive = "0\.2\.0"$' rccl-cub-macros/Cargo.toml; then
+  printf '%s\n' 'the CUB policy macro crate must use current syn and syn_derive parsers' >&2
+  exit 1
+fi
+if find rccl-cub-macros/src rccl-cub/src rccl-thrust/src -type f -name '*.dsl' | rg .; then
   printf '%s\n' 'RCCL uses shallow Rust call macros, not separate DSL source files' >&2
   exit 1
 fi
 if ! rg -q 'DeviceReduceSumCall' rccl-cub-macros/src/call.rs \
   || ! rg -q 'DeviceReduceArgMinMaxCall' rccl-cub-macros/src/call.rs \
   || ! rg -q 'DeviceReduceByKeyCall' rccl-cub-macros/src/call.rs \
-  || ! rg -q 'SortByCall' rccl-thrust-macros/src/call.rs \
-  || ! rg -q 'StableSortByKeyCall' rccl-thrust-macros/src/call.rs \
   || ! rg -q '#\[derive\(Debug, syn_derive::Parse\)\]' rccl-cub-macros/src/call.rs \
-  || ! rg -q '#\[derive\(Debug, syn_derive::Parse\)\]' rccl-thrust-macros/src/call.rs \
-  || ! rg -q 'Punctuated<Expr, Token!\[,\]>' rccl-cub-macros/src/call.rs \
-  || ! rg -q 'Punctuated<Expr, Token!\[,\]>' rccl-thrust-macros/src/call.rs \
+  || ! rg -q 'Punctuated<Expr, Token!\[,]>' rccl-cub-macros/src/call.rs \
   || ! rg -q 'Punctuated<Type' rccl-cub-macros/src/call.rs \
-  || ! rg -q 'Punctuated<Type' rccl-thrust-macros/src/call.rs \
-  || ! rg -q 'pub\(crate\).*: Expr' rccl-cub-macros/src/call.rs \
-  || ! rg -q 'pub\(crate\).*: Expr' rccl-thrust-macros/src/call.rs; then
-  printf '%s\n' 'operation DSLs must retain Rust expressions and macro-visible TMP types in shallow syn 3 ASTs' >&2
+  || ! rg -q 'pub\(crate\).*: Expr' rccl-cub-macros/src/call.rs; then
+  printf '%s\n' 'CUB operation parsing must retain Rust expressions and macro-visible TMP types' >&2
   exit 1
 fi
-if rg -n 'emit_support' rccl-cub-macros/src rccl-thrust-macros/src --glob '*.rs'; then
-  printf '%s\n' 'deleted support-generation syntax returned' >&2
+
+# Proc-macro entry points only parse and dispatch. Fixed quote-only wrappers
+# belong to the declarative runtime macro files.
+if rg -n 'quote!|use quote' rccl-cub-macros/src/lib.rs \
+  || rg -n '^pub fn (cub_program|__device_transform_repeat_in_place)\(' rccl-cub-macros/src/lib.rs; then
+  printf '%s\n' 'a quote-only public proc macro returned; use macro_rules for fixed lowering' >&2
   exit 1
 fi
-if ! rg -q '^pub fn warp_reduce\(' rccl-cub-macros/src/lib.rs \
+if ! rg -q '^pub fn program\(' rccl-cub-macros/src/lib.rs \
+  || ! rg -q '^pub fn warp_reduce\(' rccl-cub-macros/src/lib.rs \
   || ! rg -q '^pub fn warp_reduce_items\(' rccl-cub-macros/src/lib.rs \
-  || ! rg -q '^pub fn program\(' rccl-cub-macros/src/lib.rs \
-  || ! rg -q '^pub fn cub_program\(' rccl-cub-macros/src/lib.rs \
   || ! rg -q '^pub fn __device_kernels\(' rccl-cub-macros/src/lib.rs \
-  || ! rg -q '^pub fn __device_transform_repeat_in_place\(' rccl-cub-macros/src/lib.rs \
   || ! rg -q 'device_merge_keys' rccl-cub-macros/src/lib.rs \
-  || ! rg -q 'device_radix_sort_keys' rccl-cub-macros/src/lib.rs \
-  || ! rg -q 'device_radix_sort_keys_buffer' rccl-cub-macros/src/lib.rs \
-  || ! rg -q 'device_radix_sort_pairs_buffer' rccl-cub-macros/src/lib.rs \
-  || ! rg -q '^pub fn thrust_program\(' rccl-thrust-macros/src/lib.rs \
-  || ! rg -q '^pub fn transform\(' rccl-thrust-macros/src/lib.rs \
-  || ! rg -qF 'algorithm_macro!(sort' rccl-thrust-macros/src/lib.rs \
-  || ! rg -qF 'algorithm_macro!(merge' rccl-thrust-macros/src/lib.rs; then
-  printf '%s\n' 'exported proc macros must match the implemented CUB and Thrust slices' >&2
+  || ! rg -q 'device_radix_sort_keys' rccl-cub-macros/src/lib.rs; then
+  printf '%s\n' 'the remaining proc macros must be the item/kernel/policy specializers' >&2
   exit 1
 fi
-if rg -n '__rccl_(cub|thrust)_kernels|::load\(|cuda::par\(|\bunsafe\b|::<[^>]*sm_[0-9]+' \
+for declarative_macro in \
+  cub_program \
+  __device_transform_repeat_in_place; do
+  if ! rg -q "macro_rules! $declarative_macro" rccl-cub/src/macros/*.rs; then
+    printf '%s\n' "missing declarative CUB macro $declarative_macro" >&2
+    exit 1
+  fi
+done
+for declarative_macro in \
+  thrust_program transform sort sort_by stable_sort stable_sort_by \
+  sort_by_key sort_by_key_with stable_sort_by_key stable_sort_by_key_with \
+  merge merge_by merge_by_key merge_by_key_with; do
+  if ! rg -q "macro_rules! $declarative_macro" rccl-thrust/src/macros/*.rs; then
+    printf '%s\n' "missing declarative Thrust macro $declarative_macro" >&2
+    exit 1
+  fi
+done
+if rg -n '\$(key|value)_type:ty' rccl-thrust/src/macros --glob '*.rs'; then
+  printf '%s\n' 'opaque ty fragments would hide primitive policy input from the inner CUB macro' >&2
+  exit 1
+fi
+if rg -n 'sm_[0-9]+|CUDA_OXIDE_TARGET|CudaTarget|configured_cuda_target' "${runtime_sources[@]}" \
+  || [[ "$(rg -l 'configured_cuda_target' rccl-cub-macros/src/*.rs | sort | paste -sd ' ' -)" != 'rccl-cub-macros/src/merge.rs rccl-cub-macros/src/radix.rs rccl-cub-macros/src/target.rs' ]]; then
+  printf '%s\n' 'architecture selection escaped the CUB policy expansion boundary' >&2
+  exit 1
+fi
+if rg -n '#\[kernel|cuda_module' \
+  rccl-thrust/src/macros/{program,transform,ordering,merge}.rs \
+  || ! rg -q '__device_kernels' rccl-thrust/src/macros/program.rs \
+  || ! rg -q '__device_transform_repeat_in_place' rccl-thrust/src/macros/transform.rs; then
+  printf '%s\n' 'Thrust declarative macros must lower through CUB and never own CUDA kernels' >&2
+  exit 1
+fi
+
+if rg -n '__rccl_(cub|thrust)_kernels|::load\(|\bunsafe\b|::<[^>]*sm_[0-9]+' \
   rccl-cub/examples/device_*.rs rccl-thrust/examples --glob '*.rs'; then
-  printf '%s\n' 'public device-algorithm examples expose backend loading, invented CUB policy, unsafe, or target tokens' >&2
+  printf '%s\n' 'public device-algorithm examples expose backend loading, unsafe, or target tokens' >&2
   exit 1
 fi
 if rg -n 'cuda_module|::load\(|\bunsafe\b' rccl-cub/examples/warp_reduce*.rs --glob '*.rs' \
@@ -187,22 +170,8 @@ for workspace_macro in \
     exit 1
   fi
 done
-for audit in rccl-cub-macros/src/audit.rs rccl-thrust-macros/src/audit.rs; do
-  if ! rg -q 'generated_program_expression' "$audit" \
-    || ! rg -q 'program_loads != 1' "$audit"; then
-    printf '%s\n' "$audit must permit exactly one audited cuda-oxide program bind" >&2
-    exit 1
-  fi
-done
-if rg -n 'cuda_module|#\[kernel' rccl-thrust-macros/src/lib.rs \
-  || ! rg -q '__device_kernels' rccl-thrust-macros/src/lib.rs \
-  || ! rg -q '__device_transform_repeat_in_place' rccl-thrust-macros/src/lib.rs; then
-  printf '%s\n' 'Thrust must lower every GPU algorithm through CUB macros rather than own a CUDA kernel' >&2
-  exit 1
-fi
-if ! rg -q 'pub\(crate\) const PRIMITIVES: &\[Primitive\]' rccl-cub-macros/src/catalog.rs \
-  || ! rg -q 'pub\(crate\) const ALGORITHMS: &\[Algorithm\]' rccl-thrust-macros/src/catalog.rs; then
-  printf '%s\n' 'closed CCCL inventories must be typed Rust compiler catalogs' >&2
+if ! rg -q 'pub\(crate\) const PRIMITIVES: &\[Primitive\]' rccl-cub-macros/src/catalog.rs; then
+  printf '%s\n' 'the closed CUB inventory must remain typed compiler input' >&2
   exit 1
 fi
 if rg -n 'fn (get|write)\(' rccl-cub/src rccl-thrust/src; then
@@ -211,11 +180,6 @@ if rg -n 'fn (get|write)\(' rccl-cub/src rccl-thrust/src; then
 fi
 if rg -n 'DeviceRange for \[T\]' rccl-cub/src; then
   printf '%s\n' 'host slices must not masquerade as host-side device ranges' >&2
-  exit 1
-fi
-if ! rg -q 'generated_rust' rccl-cub-macros/src/audit.rs \
-  || ! rg -q 'generated_rust' rccl-thrust-macros/src/audit.rs; then
-  printf '%s\n' 'both operation generators must retain their generated-Rust audit' >&2
   exit 1
 fi
 
@@ -265,5 +229,5 @@ scripts/test-ordering-results.sh
 scripts/test-current-performance-parity.sh
 scripts/test-ordering-performance-parity.sh
 
-printf '%s\n' 'RCCL proc-macro compiler and runtime-boundary gate: PASS'
+printf '%s\n' 'RCCL compile-time policy and declarative-macro boundary gate: PASS'
 printf '%s\n' 'Pinned implemented CUB and Thrust examples plus result/performance parity executed.'
