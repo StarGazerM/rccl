@@ -59,6 +59,9 @@ logical-warp width in the compile-time layer and keeps the reduction operator
 as an ordinary Rust closure. The corresponding pinned CCCL overview and the
 150-case supported Catch2 matrix run on the GPU through cuda-oxide; see
 [rccl-cub/CCCL_WARP_REDUCE_PORT.md](rccl-cub/CCCL_WARP_REDUCE_PORT.md).
+User kernels are declared with `#[rccl_cub::program]` and bound once with
+`kernels::program!(&context)`, so the application source never calls the
+unsafe cuda-oxide artifact loader.
 
 The first executable Thrust intersection was binary in-place `transform!` with
 a finite constant input range. It runs the exact pinned `constant_iterator.cu`
@@ -66,10 +69,11 @@ values and result and has an equal-work performance reference; see
 [rccl-thrust/CCCL_CONSTANT_ITERATOR_TRANSFORM_PORT.md](rccl-thrust/CCCL_CONSTANT_ITERATOR_TRANSFORM_PORT.md).
 
 The handwritten runtime surface contains CUB range/storage values, Thrust
-range-expression adaptors, and `cuda::Execution`, which borrows a stream,
-allocator, and the cuda-oxide module value generated at the program's item
-boundary. It contains no algorithm policy, schedule, type map, module family,
-or cache.
+range-expression adaptors, a typed `cuda::Program` owner, and borrowed launch
+or execution values. Public code constructs the owner with
+`cub_program!(&context)` or `thrust_program!(&context)`; it never names a
+cuda-oxide module, calls a loader, or passes a module to `par`. These values
+contain no algorithm policy, schedule, type map, module family, or cache.
 
 ## Generated-Rust safety rule
 
@@ -79,13 +83,23 @@ Before returning tokens, both proc macros parse their own output back through
 - `Arc`;
 - raw pointer types, casts, raw-address expressions, pointer extraction,
   `NonNull`, `UnsafeCell`, `ptr`, or `transmute` plumbing;
-- unsafe blocks, signatures, traits, impls, and bare function types;
+- unsafe blocks, signatures, traits, impls, and bare function types in every
+  algorithm expansion;
 - FFI blocks, unions, or `static mut`;
 - opaque nested macro calls or unaudited attributes. Only the enumerated
   Thrust-to-CUB operation edges are allowed, and each receiving CUB proc macro
   runs its own structural audit on the final Rust.
 
-Generated code uses ownership, borrows, slices, checked disjoint slices,
+Program construction has one narrower audit: it must contain exactly one
+cuda-oxide contracted-artifact bind to the module emitted by that same macro.
+The latest cuda-oxide marks this bind unsafe because artifact provenance is
+not encoded in its loader type. RCCL proves the provenance structurally and
+does not expose the unsafe call to users; no algorithm expansion receives this
+exception.
+This rule covers both device-wide `cub_program!`/`thrust_program!` construction
+and the scoped `program!` injected by `#[rccl_cub::program]` for user kernels.
+
+Generated algorithm code uses ownership, borrows, slices, checked disjoint slices,
 `MaybeUninit`, closures, and typed cuda-oxide arguments. Any CUDA operation
 that cannot be represented safely must first be isolated and reviewed as a
 small backend primitive; there is no broad generator waiver. The hand-written
@@ -106,7 +120,8 @@ Native Rust vocabulary replaces support-library spelling:
 | `device_vector` | `rccl_memory::DeviceBuffer` |
 | function object/comparator | an ordinary copyable Rust closure |
 | iterator facade/categories | read/write/random-access capability traits and zero-copy adaptors |
-| execution policy | borrowed stream and allocator runtime values only |
+| CUB `d_temp_storage` | one caller-owned typed opaque workspace; no public byte pointer or agent-buffer tuple |
+| execution policy | `thrust_program!(&context)?.par(&stream)`; optional allocator only through `par_in` |
 
 There are no compatibility `Less`, `Greater`, `Comparator`, `DeviceSpan`,
 iterator-pair, schedule, policy, or legacy module aliases.

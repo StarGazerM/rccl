@@ -1,13 +1,10 @@
 //! Source-mapped probe for CUB's Policy800 `DeviceRadixSortSingleTileKernel`.
 //!
-//! The nonempty calls deliberately provide zero histogram, lookback, and
-//! counter workspace. Passing therefore proves the dedicated single-tile
-//! route ran; the one-sweep graph cannot silently satisfy these cases.
+//! The workspace macro materializes zero one-sweep state for these nonempty
+//! extents. Passing therefore proves the dedicated single-tile route ran.
 
 use cuda_core::{CudaContext, DeviceBuffer};
 use std::{cmp::Ordering, error::Error};
-
-rccl_cub::cub_kernels!();
 
 fn field(value: u32, bits: core::ops::Range<u32>) -> u32 {
     let width = bits.end - bits.start;
@@ -17,10 +14,8 @@ fn field(value: u32, bits: core::ops::Range<u32>) -> u32 {
 fn main() -> Result<(), Box<dyn Error>> {
     let context = CudaContext::new(0)?;
     let stream = context.default_stream();
-    // SAFETY: this executable owns the module emitted by its sole kernel DSL
-    // invocation. The generated radix operation and kernel body are safe Rust.
-    let module = unsafe { __rccl_cub_kernels::load(&context)? };
-    let exec = rccl_cub::cuda::par(&stream, &module);
+    let cub = rccl_cub::cub_program!(&context)?;
+    let launch = cub.on(&stream)?;
 
     // Policy800 u32 single-tile extent: RegBoundScaling<256, 19, u32>.
     let input = (0..4_864u32)
@@ -30,18 +25,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     expected.sort_unstable();
     let mut keys = DeviceBuffer::from_host(&stream, &input)?;
     let mut alternate = DeviceBuffer::<u32>::zeroed(&stream, input.len())?;
-    let mut bins = DeviceBuffer::<u64>::zeroed(&stream, 0)?;
-    let mut lookback = DeviceBuffer::<i32>::zeroed(&stream, 0)?;
-    let mut counters = DeviceBuffer::<i32>::zeroed(&stream, 0)?;
+    let mut workspace = rccl_cub::device_radix_sort_keys_buffer_workspace!(::<u32>(
+        &launch,
+        input.len(),
+    ))?;
     let mut buffers = rccl_cub::DoubleBuffer::new(&mut keys, &mut alternate)
         .expect("equal key buffers form one Rust selector");
-    rccl_cub::device_radix_sort_keys_buffer!(::<u32, sm_89>(
-        &exec,
+    rccl_cub::device_radix_sort_keys_buffer!(::<u32>(
+        &launch,
         &mut buffers,
         0u32..32u32,
-        &mut bins,
-        &mut lookback,
-        &mut counters,
+        &mut workspace,
     ))?;
     assert_eq!(buffers.current().to_host_vec(&stream)?, expected);
     assert!(!buffers.current_is_first());
@@ -65,13 +59,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut window_alternate = DeviceBuffer::<u32>::zeroed(&stream, window_input.len())?;
     let mut window_buffers =
         rccl_cub::DoubleBuffer::new(&mut window_keys, &mut window_alternate).unwrap();
-    rccl_cub::device_radix_sort_keys_buffer_descending!(::<u32, sm_89>(
-        &exec,
+    let mut window_workspace = rccl_cub::device_radix_sort_keys_buffer_workspace!(::<u32>(
+        &launch,
+        window_input.len(),
+    ))?;
+    rccl_cub::device_radix_sort_keys_buffer_descending!(::<u32>(
+        &launch,
         &mut window_buffers,
         bits,
-        &mut bins,
-        &mut lookback,
-        &mut counters,
+        &mut window_workspace,
     ))?;
     assert_eq!(
         window_buffers.current().to_host_vec(&stream)?,

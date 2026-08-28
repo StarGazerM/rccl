@@ -5,8 +5,6 @@ use cuda_core::{CudaContext, DeviceBuffer};
 use std::error::Error;
 use std::time::Instant;
 
-rccl_cub::cub_kernels!();
-
 fn argument(name: &str, default: usize) -> usize {
     let arguments = std::env::args().collect::<Vec<_>>();
     arguments
@@ -42,29 +40,24 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let context = CudaContext::new(0)?;
     let stream = context.default_stream();
-    // SAFETY: this executable owns the sole artifact emitted above. RCCL's
-    // generated operation contains no unsafe block or raw pointer.
-    let module = unsafe { __rccl_cub_kernels::load(&context)? };
-    let exec = rccl_cub::cuda::par(&stream, &module);
+    let cub = rccl_cub::cub_program!(&context)?;
+    let launch = cub.on(&stream)?;
 
     let input_host = random_u32(count);
     let mut expected = input_host.clone();
     expected.sort_unstable();
     let input = DeviceBuffer::from_host(&stream, &input_host)?;
     let mut output = DeviceBuffer::<u32>::zeroed(&stream, count)?;
-    let mut scratch = DeviceBuffer::<u32>::zeroed(&stream, count)?;
-    let partition_count = rccl_cub::device_merge_sort_partition_count!(::<u32, sm_89>(count))?;
-    let mut partitions = DeviceBuffer::<usize>::zeroed(&stream, partition_count)?;
+    let mut workspace = rccl_cub::device_merge_sort_keys_workspace!(::<u32>(&launch, count))?;
 
     let mut gpu_samples = Vec::with_capacity(iterations);
     let mut end_to_end_samples = Vec::with_capacity(iterations);
     {
         let mut operation = || {
-            rccl_cub::device_merge_sort_keys_copy!(::<u32, sm_89>(
-                &exec,
+            rccl_cub::device_merge_sort_keys_copy!(::<u32>(
+                &launch,
                 &input,
-                &mut scratch,
-                &mut partitions,
+                &mut workspace,
                 &mut output,
                 |left: &u32, right: &u32| left.cmp(right),
             ))

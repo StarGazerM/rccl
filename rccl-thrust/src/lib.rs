@@ -7,12 +7,12 @@
 pub use cuda_core::DeviceCopy;
 pub use rccl_cub::{
     ContiguousRange, DeviceAlgorithmError, DeviceRange, DoubleBuffer, KeyValue, RandomAccessRange,
-    ReadRange, TempStorage, TempStorageError, TempStorageLayout, WriteRange,
+    ReadRange, WriteRange,
 };
 pub use rccl_memory as memory;
 pub use rccl_thrust_macros::{
     merge, merge_by, merge_by_key, merge_by_key_with, sort, sort_by, sort_by_key, sort_by_key_with,
-    stable_sort, stable_sort_by, stable_sort_by_key, stable_sort_by_key_with, thrust_kernels,
+    stable_sort, stable_sort_by, stable_sort_by_key, stable_sort_by_key_with, thrust_program,
     transform,
 };
 

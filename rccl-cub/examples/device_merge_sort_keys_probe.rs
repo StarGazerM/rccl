@@ -4,8 +4,6 @@
 use cuda_core::{CudaContext, DeviceBuffer};
 use std::error::Error;
 
-rccl_cub::cub_kernels!();
-
 fn shuffled_unique(count: usize) -> Vec<u32> {
     let mut values = (0..count as u32).collect::<Vec<_>>();
     let mut state = 0x534d_4152_545f_534f_u64;
@@ -21,26 +19,20 @@ fn shuffled_unique(count: usize) -> Vec<u32> {
 fn main() -> Result<(), Box<dyn Error>> {
     let context = CudaContext::new(0)?;
     let stream = context.default_stream();
-    // SAFETY: this executable owns the sole artifact emitted by the one
-    // `cub_kernels!` invocation. Operation lowering itself is safe Rust.
-    let module = unsafe { __rccl_cub_kernels::load(&context)? };
-    let exec = rccl_cub::cuda::par(&stream, &module);
+    let cub = rccl_cub::cub_program!(&context)?;
+    let launch = cub.on(&stream)?;
 
     // `DeviceMergeSort::SortKeysCopy works`, including more than one full
     // 256 * 17 SM60+ tile and a partial final tile.
     let unique = shuffled_unique(10_003);
     let input = DeviceBuffer::from_host(&stream, &unique)?;
     let mut output = DeviceBuffer::<u32>::zeroed(&stream, unique.len())?;
-    let mut scratch = DeviceBuffer::<u32>::zeroed(&stream, unique.len())?;
-    let partition_count = rccl_cub::device_merge_sort_partition_count!(::<u32, sm_89>(
-        unique.len(),
-    ))?;
-    let mut partitions = DeviceBuffer::<usize>::zeroed(&stream, partition_count)?;
-    rccl_cub::device_merge_sort_keys_copy!(::<u32, sm_89>(
-        &exec,
+    let mut workspace =
+        rccl_cub::device_merge_sort_keys_workspace!(::<u32>(&launch, unique.len()))?;
+    rccl_cub::device_merge_sort_keys_copy!(::<u32>(
+        &launch,
         &input,
-        &mut scratch,
-        &mut partitions,
+        &mut workspace,
         &mut output,
         |left: &u32, right: &u32| left.cmp(right),
     ))?;
@@ -52,13 +44,12 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // `DeviceMergeSort::SortKeys works` with the same shuffled ranks.
     let mut in_place = DeviceBuffer::from_host(&stream, &unique)?;
-    let mut in_place_scratch = DeviceBuffer::<u32>::zeroed(&stream, unique.len())?;
-    let mut in_place_partitions = DeviceBuffer::<usize>::zeroed(&stream, partition_count)?;
-    rccl_cub::device_merge_sort_keys!(::<u32, sm_89>(
-        &exec,
+    let mut in_place_workspace =
+        rccl_cub::device_merge_sort_keys_workspace!(::<u32>(&launch, unique.len()))?;
+    rccl_cub::device_merge_sort_keys!(::<u32>(
+        &launch,
         &mut in_place,
-        &mut in_place_scratch,
-        &mut in_place_partitions,
+        &mut in_place_workspace,
         |left: &u32, right: &u32| left.cmp(right),
     ))?;
     assert_eq!(
@@ -76,16 +67,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         .collect::<Vec<_>>();
     let input_u64 = DeviceBuffer::from_host(&stream, &unique_u64)?;
     let mut output_u64 = DeviceBuffer::<u64>::zeroed(&stream, unique_u64.len())?;
-    let mut scratch_u64 = DeviceBuffer::<u64>::zeroed(&stream, unique_u64.len())?;
-    let partition_count_u64 = rccl_cub::device_merge_sort_partition_count!(::<u64, sm_89>(
-        unique_u64.len(),
-    ))?;
-    let mut partitions_u64 = DeviceBuffer::<usize>::zeroed(&stream, partition_count_u64)?;
-    rccl_cub::device_merge_sort_keys_copy!(::<u64, sm_89>(
-        &exec,
+    let mut workspace_u64 =
+        rccl_cub::device_merge_sort_keys_workspace!(::<u64>(&launch, unique_u64.len()))?;
+    rccl_cub::device_merge_sort_keys_copy!(::<u64>(
+        &launch,
         &input_u64,
-        &mut scratch_u64,
-        &mut partitions_u64,
+        &mut workspace_u64,
         &mut output_u64,
         |left: &u64, right: &u64| left.cmp(right),
     ))?;
@@ -100,16 +87,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     let stable_input_host = vec![25_i32, 14, 35, 16, 26, 34, 36, 24, 15];
     let stable_input = DeviceBuffer::from_host(&stream, &stable_input_host)?;
     let mut stable_output = DeviceBuffer::<i32>::zeroed(&stream, stable_input_host.len())?;
-    let mut stable_scratch = DeviceBuffer::<i32>::zeroed(&stream, stable_input_host.len())?;
-    let stable_partition_count = rccl_cub::device_merge_sort_partition_count!(::<i32, sm_89>(
+    let mut stable_workspace = rccl_cub::device_merge_sort_keys_workspace!(::<i32>(
+        &launch,
         stable_input_host.len(),
     ))?;
-    let mut stable_partitions = DeviceBuffer::<usize>::zeroed(&stream, stable_partition_count)?;
-    rccl_cub::device_stable_merge_sort_keys_copy!(::<i32, sm_89>(
-        &exec,
+    rccl_cub::device_stable_merge_sort_keys_copy!(::<i32>(
+        &launch,
         &stable_input,
-        &mut stable_scratch,
-        &mut stable_partitions,
+        &mut stable_workspace,
         &mut stable_output,
         |left: &i32, right: &i32| (left / 10).cmp(&(right / 10)),
     ))?;
@@ -121,15 +106,14 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // `DeviceMergeSort::StableSortKeys works`, in place.
     let mut stable_in_place = DeviceBuffer::from_host(&stream, &stable_input_host)?;
-    let mut stable_in_place_scratch =
-        DeviceBuffer::<i32>::zeroed(&stream, stable_input_host.len())?;
-    let mut stable_in_place_partitions =
-        DeviceBuffer::<usize>::zeroed(&stream, stable_partition_count)?;
-    rccl_cub::device_stable_merge_sort_keys!(::<i32, sm_89>(
-        &exec,
+    let mut stable_in_place_workspace = rccl_cub::device_merge_sort_keys_workspace!(::<i32>(
+        &launch,
+        stable_input_host.len(),
+    ))?;
+    rccl_cub::device_stable_merge_sort_keys!(::<i32>(
+        &launch,
         &mut stable_in_place,
-        &mut stable_in_place_scratch,
-        &mut stable_in_place_partitions,
+        &mut stable_in_place_workspace,
         |left: &i32, right: &i32| (left / 10).cmp(&(right / 10)),
     ))?;
     assert_eq!(

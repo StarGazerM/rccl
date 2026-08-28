@@ -4,8 +4,6 @@
 use cuda_core::{CudaContext, DeviceBuffer};
 use std::error::Error;
 
-rccl_cub::cub_kernels!();
-
 fn shuffled_unique(count: usize) -> Vec<u32> {
     let mut values = (0..count as u32).collect::<Vec<_>>();
     let mut state = 0x534d_4152_545f_534f_u64;
@@ -21,10 +19,8 @@ fn shuffled_unique(count: usize) -> Vec<u32> {
 fn main() -> Result<(), Box<dyn Error>> {
     let context = CudaContext::new(0)?;
     let stream = context.default_stream();
-    // SAFETY: this executable owns the sole artifact emitted by the one
-    // `cub_kernels!` invocation. Operation lowering itself is safe Rust.
-    let module = unsafe { __rccl_cub_kernels::load(&context)? };
-    let exec = rccl_cub::cuda::par(&stream, &module);
+    let cub = rccl_cub::cub_program!(&context)?;
+    let launch = cub.on(&stream)?;
 
     // `DeviceMergeSort::SortPairsCopy works`: the value is the shuffled rank,
     // so both output ranges must become the ascending counting sequence.
@@ -33,19 +29,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     let input_values = DeviceBuffer::from_host(&stream, &ranks)?;
     let mut output_keys = DeviceBuffer::<u32>::zeroed(&stream, ranks.len())?;
     let mut output_values = DeviceBuffer::<u32>::zeroed(&stream, ranks.len())?;
-    let mut scratch_keys = DeviceBuffer::<u32>::zeroed(&stream, ranks.len())?;
-    let mut scratch_values = DeviceBuffer::<u32>::zeroed(&stream, ranks.len())?;
-    let partition_count = rccl_cub::device_merge_sort_partition_count!(::<u32, sm_89>(
-        ranks.len(),
-    ))?;
-    let mut partitions = DeviceBuffer::<usize>::zeroed(&stream, partition_count)?;
-    rccl_cub::device_merge_sort_pairs_copy!(::<u32, u32, sm_89>(
-        &exec,
+    let mut workspace =
+        rccl_cub::device_merge_sort_pairs_workspace!(::<u32, u32>(&launch, ranks.len()))?;
+    rccl_cub::device_merge_sort_pairs_copy!(::<u32, u32>(
+        &launch,
         &input_keys,
         &input_values,
-        &mut scratch_keys,
-        &mut scratch_values,
-        &mut partitions,
+        &mut workspace,
         &mut output_keys,
         &mut output_values,
         |left: &u32, right: &u32| left.cmp(right),
@@ -59,16 +49,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     // `DeviceMergeSort::SortPairs works`, with the same pair association.
     let mut in_place_keys = DeviceBuffer::from_host(&stream, &ranks)?;
     let mut in_place_values = DeviceBuffer::from_host(&stream, &ranks)?;
-    let mut in_place_scratch_keys = DeviceBuffer::<u32>::zeroed(&stream, ranks.len())?;
-    let mut in_place_scratch_values = DeviceBuffer::<u32>::zeroed(&stream, ranks.len())?;
-    let mut in_place_partitions = DeviceBuffer::<usize>::zeroed(&stream, partition_count)?;
-    rccl_cub::device_merge_sort_pairs!(::<u32, u32, sm_89>(
-        &exec,
+    let mut in_place_workspace =
+        rccl_cub::device_merge_sort_pairs_workspace!(::<u32, u32>(&launch, ranks.len()))?;
+    rccl_cub::device_merge_sort_pairs!(::<u32, u32>(
+        &launch,
         &mut in_place_keys,
         &mut in_place_values,
-        &mut in_place_scratch_keys,
-        &mut in_place_scratch_values,
-        &mut in_place_partitions,
+        &mut in_place_workspace,
         |left: &u32, right: &u32| left.cmp(right),
     ))?;
     assert_eq!(in_place_keys.to_host_vec(&stream)?, ascending);
@@ -86,16 +73,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     expected.sort_by_key(|pair| pair.0);
     let mut stable_keys = DeviceBuffer::from_host(&stream, &stable_keys_host)?;
     let mut stable_values = DeviceBuffer::from_host(&stream, &stable_values_host)?;
-    let mut stable_scratch_keys = DeviceBuffer::<u32>::zeroed(&stream, ranks.len())?;
-    let mut stable_scratch_values = DeviceBuffer::<u32>::zeroed(&stream, ranks.len())?;
-    let mut stable_partitions = DeviceBuffer::<usize>::zeroed(&stream, partition_count)?;
-    rccl_cub::device_stable_merge_sort_pairs!(::<u32, u32, sm_89>(
-        &exec,
+    let mut stable_workspace =
+        rccl_cub::device_merge_sort_pairs_workspace!(::<u32, u32>(&launch, ranks.len()))?;
+    rccl_cub::device_stable_merge_sort_pairs!(::<u32, u32>(
+        &launch,
         &mut stable_keys,
         &mut stable_values,
-        &mut stable_scratch_keys,
-        &mut stable_scratch_values,
-        &mut stable_partitions,
+        &mut stable_workspace,
         |left: &u32, right: &u32| left.cmp(right),
     ))?;
     let actual = stable_keys

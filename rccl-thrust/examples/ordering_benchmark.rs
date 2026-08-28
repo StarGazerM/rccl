@@ -2,11 +2,8 @@
 //! through CUB and includes Thrust's synchronous completion contract.
 
 use cuda_core::{CudaContext, CudaStream, DeviceBuffer};
-use rccl_thrust::memory::CudaMemoryResource;
 use std::error::Error;
 use std::time::Instant;
-
-rccl_thrust::thrust_kernels!();
 
 fn argument(name: &str, default: usize) -> usize {
     let arguments = std::env::args().collect::<Vec<_>>();
@@ -73,10 +70,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let context = CudaContext::new(0)?;
     let stream = context.default_stream();
-    let allocator = CudaMemoryResource::new(context.clone());
-    // SAFETY: this executable owns the sole artifact emitted above.
-    let module = unsafe { __rccl_thrust_kernels::load(&context)? };
-    let exec = rccl_thrust::cuda::par(&stream, &allocator, &module)?;
+    let thrust = rccl_thrust::thrust_program!(&context)?;
+    let exec = thrust.par(&stream)?;
 
     let first_host = (0..count)
         .map(|index| (index * 2) as u32)
@@ -88,7 +83,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let second = DeviceBuffer::from_host(&stream, &second_host)?;
     let mut merged = DeviceBuffer::<u32>::zeroed(&stream, count * 2)?;
     let merge_timing = timed(&stream, iterations, || {
-        rccl_thrust::merge!(::<u32, sm_89>(
+        rccl_thrust::merge!(::<u32>(
             &exec,
             &first,
             &second,
@@ -115,7 +110,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut merged_pair_keys = DeviceBuffer::<u32>::zeroed(&stream, count * 2)?;
     let mut merged_pair_values = DeviceBuffer::<u64>::zeroed(&stream, count * 2)?;
     let pair_merge_timing = timed(&stream, iterations, || {
-        rccl_thrust::merge_by_key!(::<u32, u64, sm_89>(
+        rccl_thrust::merge_by_key!(::<u32, u64>(
             &exec,
             &first,
             &first_values,
@@ -142,7 +137,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     stream.synchronize()?;
     let mut sort_index = 0usize;
     let sort_timing = timed(&stream, iterations, || {
-        let result = rccl_thrust::sort!(::<u32, sm_89>(
+        let result = rccl_thrust::sort!(::<u32>(
             &exec,
             &mut sort_inputs[sort_index],
         ));
@@ -161,7 +156,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     stream.synchronize()?;
     let mut pair_sort_index = 0usize;
     let pair_sort_timing = timed(&stream, iterations, || {
-        let result = rccl_thrust::sort_by_key!(::<u32, u32, sm_89>(
+        let result = rccl_thrust::sort_by_key!(::<u32, u32>(
             &exec,
             &mut pair_sort_keys[pair_sort_index],
             &mut pair_sort_values[pair_sort_index],

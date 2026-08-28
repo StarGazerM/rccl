@@ -7,12 +7,12 @@
 //! Run with `cargo oxide run warp_reduce`.
 
 use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig1D};
-use cuda_device::{DisjointSlice, cuda_module, kernel, launch_bounds, launch_contract, thread};
+use cuda_device::{DisjointSlice, kernel, launch_bounds, launch_contract, thread};
 
 const THREADS: usize = 128;
 const ITEMS_PER_THREAD: usize = 4;
 
-#[cuda_module]
+#[rccl_cub::program]
 mod kernels {
     use super::*;
 
@@ -157,16 +157,14 @@ fn lane_zero_values<T: Copy>(output: &[T], logical_width: usize) -> Vec<T> {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let context = CudaContext::new(0)?;
     let stream = context.default_stream();
-    // SAFETY: this executable is the sole owner of the `kernels` artifact
-    // bundle emitted by its one `#[cuda_module]` declaration.
-    let module = unsafe { kernels::load(&context)? };
+    let program = kernels::program!(&context)?;
     let launch = LaunchConfig1D::new(1, THREADS as u32, 0);
 
     let overview_input = (0..THREADS as i32).collect::<Vec<_>>();
     let overview_device = DeviceBuffer::from_host(&stream, &overview_input)?;
     let mut overview_output = DeviceBuffer::<i32>::zeroed(&stream, THREADS)?;
-    let prepared = module.prepare_overview(launch)?;
-    module.overview(&stream, &prepared, &overview_device, &mut overview_output)?;
+    let prepared = program.prepare_overview(launch)?;
+    program.overview(&stream, &prepared, &overview_device, &mut overview_output)?;
     let overview_result = overview_output.to_host_vec(&stream)?;
     let overview_lane_zero = lane_zero_values(&overview_result, 32);
     assert_eq!(overview_lane_zero, [496, 1520, 2544, 3568]);
@@ -177,8 +175,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let valid_items = 13usize;
     let mut partial_output = DeviceBuffer::<i32>::zeroed(&stream, THREADS)?;
-    let prepared = module.prepare_partial_sum(launch)?;
-    module.partial_sum(
+    let prepared = program.prepare_partial_sum(launch)?;
+    program.partial_sum(
         &stream,
         &prepared,
         &overview_device,
@@ -191,8 +189,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let mut max_output = DeviceBuffer::<i32>::zeroed(&stream, THREADS)?;
-    let prepared = module.prepare_logical_16_max(launch)?;
-    module.logical_16_max(&stream, &prepared, &overview_device, &mut max_output)?;
+    let prepared = program.prepare_logical_16_max(launch)?;
+    program.logical_16_max(&stream, &prepared, &overview_device, &mut max_output)?;
     assert_eq!(
         lane_zero_values(&max_output.to_host_vec(&stream)?, 16),
         reference_groups(&overview_input, 16, 16, i32::max)
@@ -201,8 +199,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let items_input = (0..(THREADS * ITEMS_PER_THREAD) as i32).collect::<Vec<_>>();
     let items_device = DeviceBuffer::from_host(&stream, &items_input)?;
     let mut items_output = DeviceBuffer::<i32>::zeroed(&stream, THREADS)?;
-    let prepared = module.prepare_multiple_items(launch)?;
-    module.multiple_items(&stream, &prepared, &items_device, &mut items_output)?;
+    let prepared = program.prepare_multiple_items(launch)?;
+    program.multiple_items(&stream, &prepared, &items_device, &mut items_output)?;
     assert_eq!(
         lane_zero_values(&items_output.to_host_vec(&stream)?, 32),
         reference_groups(
@@ -218,8 +216,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect::<Vec<_>>();
     let i64_device = DeviceBuffer::from_host(&stream, &i64_input)?;
     let mut i64_output = DeviceBuffer::<i64>::zeroed(&stream, THREADS)?;
-    let prepared = module.prepare_i64_sum(launch)?;
-    module.i64_sum(&stream, &prepared, &i64_device, &mut i64_output)?;
+    let prepared = program.prepare_i64_sum(launch)?;
+    program.i64_sum(&stream, &prepared, &i64_device, &mut i64_output)?;
     assert_eq!(
         lane_zero_values(&i64_output.to_host_vec(&stream)?, 32),
         reference_groups(&i64_input, 32, 32, |left, right| left + right)
@@ -230,8 +228,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect::<Vec<_>>();
     let u8_device = DeviceBuffer::from_host(&stream, &u8_input)?;
     let mut u8_output = DeviceBuffer::<u8>::zeroed(&stream, THREADS)?;
-    let prepared = module.prepare_u8_sum(launch)?;
-    module.u8_sum(&stream, &prepared, &u8_device, &mut u8_output)?;
+    let prepared = program.prepare_u8_sum(launch)?;
+    program.u8_sum(&stream, &prepared, &u8_device, &mut u8_output)?;
     assert_eq!(
         lane_zero_values(&u8_output.to_host_vec(&stream)?, 32),
         reference_groups(&u8_input, 32, 32, u8::wrapping_add)

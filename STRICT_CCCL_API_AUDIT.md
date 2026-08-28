@@ -14,7 +14,7 @@ sort, merge, radix, or warp code.
 | A02 | fixed | `rccl-thrust-macros` is the only author of Thrust-to-CUB selection rules. Ordinary range-adaptor and execution values are handwritten in `rccl-thrust`. |
 | A03 | fixed | Both user-facing operation DSLs are shallow call-site macros parsed as operation-specific `syn` 3.0.4 ASTs. Runtime operands remain `syn::Expr`; every type that changes TMP selection is a macro-visible `syn::Type`. The complete inventories are private typed Rust catalogs, not separate language files. |
 | A04 | fixed | `rccl-cub` and `rccl-thrust` contain ordinary Rust runtime values but no target schedule, kernel family, specialization table, or compiler registry. |
-| A05 | fixed | `Execution` borrows a stream, allocator, and one statically typed cuda-oxide module value. It owns no module set, policy, type map, target, schedule, registry, or cache. |
+| A05 | fixed | `Program` owns one statically typed cuda-oxide module and creates borrowed CUB launches or Thrust execution policies. User-kernel examples use `#[rccl_cub::program]` plus its scoped `program!` binder. Public code never names, loads, or passes the module; none of these values owns a module set, policy, type map, target, schedule, registry, or cache. |
 | A06 | fixed | `AotKernelSet`, `TargetSchedule`, build-script schedule generation, `TypeId`/`Any` registries, module caches, and handwritten dispatch traits are deleted. |
 | A07 | fixed | RCCL owns no compiler invocation/configuration, manual symbol lookup, or raw ABI argument-vector path; it emits Rust and cuda-oxide owns compilation. |
 | A08 | fixed | There are no compatibility `Comparator`, `Less`, `Greater`, `DeviceSpan`, legacy execution, or stable-sort aliases. |
@@ -23,6 +23,7 @@ sort, merge, radix, or warp code.
 | A11 | fixed | Every one of the 59 typed CUB catalog entries contains exactly one operation contract declaring its range capabilities, callable shape, and storage class. |
 | A12 | fixed | Closed TMP/CRTP backend policy is lowered by the DSL; generated Rust has no policy/backend/strategy/proof type hierarchy. |
 | A13 | fixed | Thrust ordering calls expose only execution, semantic ranges/outputs, and optional Rust closures. CUB scratch buffers and partition/workspace counts are selected and allocated inside the Thrust macro; old scratch-bearing arities are rejected rather than retained as compatibility forms. |
+| A14 | fixed | Public CUB/Thrust algorithm calls contain no architecture token. `CUDA_OXIDE_TARGET` is read by the CUB proc macro, and an obsolete `sm_XX` type argument fails parser arity checks. |
 
 ## Generated Rust safety
 
@@ -33,12 +34,18 @@ Expansion rejects:
 - raw pointer types and casts, `&raw`, `NonNull`, pointer extraction such as
   `as_ptr`, and `ptr`/`transmute` paths;
 - unsafe blocks, all unsafe function/method signatures, traits, impls, and
-  bare function types;
+  bare function types in generated algorithm code;
 - FFI blocks, unions, `static mut`, and `UnsafeCell` plumbing;
 - opaque nested macro calls and unaudited attributes that could generate code
   after the structural pass. The exact hidden Thrust-to-CUB kernel/operation
   macro edges are allowlisted; the receiving CUB macros independently audit
   their final Rust with the identical pass.
+
+Program construction is separately audited and permits exactly one
+cuda-oxide contracted-artifact bind to the module generated in the same
+expansion. That is the only generated unsafe expression: it proves the
+artifact provenance required by cuda-oxide's current loader and never appears
+in an algorithm expansion or user call.
 
 Support code is not generated. A future generated CUDA operation that
 genuinely requires unsafe code must first be isolated as a small reviewed
@@ -61,9 +68,9 @@ identical structural auditors so this boundary cannot silently widen.
 | complete Thrust iterator catalog | implemented compiler input | the same typed catalog contains all 19 iterator/adaptor headers |
 | pinned CUB example/API-test input | implemented audit input | `CCCL_CUB_EXAMPLE_TEST_CONTRACT.md` and its checker track all 19 programs, 378 embedded regions, 49 API-test files, and 105 exercised methods |
 | shallow operation syntax | implemented parser boundary | `call.rs` in both macro crates retains positional Rust `Expr` nodes and macro-visible ordering `Type` nodes; parser tests reject missing TMP types, wrong arity, and deleted named-field syntax |
-| Rust support mappings | partial | handwritten `rccl-cub` code defines `KeyValue`, generic `DoubleBuffer`, checked `TempStorageLayout`/`TempStorage`, and range capabilities; `RepeatN` is operational only in the implemented transform intersection, while other handwritten descriptors remain non-operational planning vocabulary |
-| `cuda::Execution` | partial runtime value | borrows the stream, allocator, and program-local typed cuda-oxide module; contains no runtime compiler or dispatch metadata; cuda-oxide's checked synchronous slice launcher currently admits its concrete direct-allocation buffer, so non-default temporary allocators remain unexported instead of being silently ignored |
-| CUB collectives/device algorithms | partial | `warp_reduce!` and `warp_reduce_items!` cover the documented overview and 150 supported pinned Catch2 rows; DeviceMerge, DeviceMergeSort, and primitive integer/`f32`/`f64` DeviceRadixSort have safe GPU result coverage, including exact Policy800 single-tile boundary checks and bitwise signed-zero/NaN matrices, but the ordering performance gate intentionally fails until every CCCL schedule is reproduced; `ORDER-PERF-01` explicitly keeps the unresolved cuda-oxide/LLVM ballot-complement register gap backend-blocked rather than accepted |
+| Rust support mappings | partial | handwritten `rccl-cub` code defines `KeyValue`, generic `DoubleBuffer`, range capabilities, and opaque typed workspace owners for the implemented device-wide operations; the old non-operational byte-block `TempStorage` vocabulary was deleted; `RepeatN` is operational only in the implemented transform intersection |
+| CUDA program/policy values | partial runtime value | `cub_program!` and `thrust_program!` return typed owners; CUB uses `program.on(&stream)` and Thrust uses `program.par(&stream)` or explicit `par_in`; `#[rccl_cub::program]` gives user block/warp kernels a scoped inferred binder; callers never load or pass a module or select an architecture; cuda-oxide's checked synchronous slice launcher still limits custom temporary allocation to its concrete direct-allocation buffer |
+| CUB collectives/device algorithms | partial | `warp_reduce!` and `warp_reduce_items!` cover the documented overview and 150 supported pinned Catch2 rows; direct DeviceMerge, DeviceMergeSort, and primitive integer/`f32`/`f64` DeviceRadixSort calls take one caller-owned opaque workspace rather than leaking partitions, scratch buffers, bins, lookback state, or counters; safe GPU result coverage includes exact Policy800 single-tile boundary checks and bitwise signed-zero/NaN matrices, but the ordering performance gate intentionally fails until every CCCL schedule is reproduced; `ORDER-PERF-01` explicitly keeps the unresolved cuda-oxide/LLVM ballot-complement register gap backend-blocked rather than accepted |
 | Thrust algorithms | partial | binary in-place `transform!`, primitive numeric sort/stable-sort/by-key forms, merge, and merge-by-key are GPU exported; ordering callers never provide CUB scratch, and every form lowers through its actual CUB dependency; radix paths inherit `ORDER-PERF-01`, all ordering paths retain the non-parity temporary-buffer boundary `THRUST-TEMP-01`, and unsupported half/bfloat/decomposer radix cases fail closed |
 | support tests | implemented | ordinary unit tests cover extent/bounds composition, capability propagation, invalid layouts, and prove adaptor construction never executes user closures on the host; test-only descriptors prevent host slices from masquerading as device memory |
 | public algorithm examples/runtime parity | partial | pinned WarpReduce, constant-iterator transform, merge, merge-by-key, sort, stable-sort, and by-key executables validate exact upstream-derived results; equal-work ordering references are in the default gate and currently fail with explicit measured ratios rather than masking missing performance |

@@ -28,6 +28,34 @@ pub(crate) fn generated_expression(tokens: TokenStream) -> syn::Result<TokenStre
     }
 }
 
+/// Audit the one program-construction expression that binds cuda-oxide's
+/// contracted launcher type to the artifact emitted by the same expansion.
+///
+/// cuda-oxide deliberately marks that provenance bind unsafe. This audit
+/// permits exactly one such bind and keeps the ordinary generated-algorithm
+/// audit unchanged: algorithms still cannot emit any unsafe Rust.
+pub(crate) fn generated_program_expression(
+    tokens: TokenStream,
+    module: &syn::Ident,
+) -> syn::Result<TokenStream> {
+    let expression = syn::parse2::<Expr>(tokens.clone())?;
+    let mut audit = SafetyAudit {
+        allowed_program_module: Some(module.to_string()),
+        ..SafetyAudit::default()
+    };
+    audit.visit_expr(&expression);
+    if audit.error.is_none() && audit.program_loads != 1 {
+        return Err(Error::new_spanned(
+            expression,
+            "program expansion must contain exactly one audited cuda-oxide artifact bind",
+        ));
+    }
+    match audit.error {
+        Some(error) => Err(error),
+        None => Ok(tokens),
+    }
+}
+
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Algorithm {
@@ -67,6 +95,8 @@ pub(crate) fn generated_algorithm_expression(
 #[derive(Default)]
 struct SafetyAudit {
     error: Option<Error>,
+    allowed_program_module: Option<String>,
+    program_loads: usize,
 }
 
 struct ImplementationAudit {
@@ -201,6 +231,35 @@ impl SafetyAudit {
             self.error = Some(error);
         }
     }
+
+    fn is_allowed_program_load(&self, expression: &ExprUnsafe) -> bool {
+        let Some(expected_module) = self.allowed_program_module.as_deref() else {
+            return false;
+        };
+        let [syn::Stmt::Expr(Expr::Call(call), _)] = expression.block.stmts.as_slice() else {
+            return false;
+        };
+        if call.args.len() != 1 {
+            return false;
+        }
+        let Expr::Path(function) = call.func.as_ref() else {
+            return false;
+        };
+        let segments = function
+            .path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect::<Vec<_>>();
+        matches!(
+            segments.as_slice(),
+            [module, load] if module == expected_module && load == "load"
+        ) || matches!(
+            segments.as_slice(),
+            [root, module, load]
+                if root == "crate" && module == expected_module && load == "load"
+        )
+    }
 }
 
 fn is_trusted_cub_lowering(path: &Path) -> bool {
@@ -295,6 +354,11 @@ impl<'ast> Visit<'ast> for SafetyAudit {
     }
 
     fn visit_expr_unsafe(&mut self, expression: &'ast ExprUnsafe) {
+        if self.is_allowed_program_load(expression) {
+            self.program_loads += 1;
+            visit::visit_block(self, &expression.block);
+            return;
+        }
         self.reject(
             expression,
             "generated RCCL algorithm code may not contain unsafe blocks",
@@ -675,6 +739,39 @@ mod tests {
                 message.contains("pure Rust for cuda-oxide"),
                 "unexpected rejection: {message}"
             );
+        }
+    }
+
+    #[test]
+    fn program_bind_allows_only_one_exact_generated_module_load() {
+        let module: syn::Ident = syn::parse_quote!(__test_kernels);
+        generated_program_expression(
+            quote! {{
+                let context = &context;
+                unsafe { __test_kernels::load(context) }
+            }},
+            &module,
+        )
+        .expect("the one cuda-oxide provenance bind owned by the program macro must pass");
+
+        generated_program_expression(
+            quote! {{ unsafe { crate::__test_kernels::load(&context) } }},
+            &module,
+        )
+        .expect("an item macro may bind its exact crate-root kernel module");
+
+        for generated in [
+            quote! {{ unsafe { another_module::load(&context) } }},
+            quote! {{ unsafe { __test_kernels::load(&context, extra) } }},
+            quote! {{
+                let first = unsafe { __test_kernels::load(&context) };
+                let second = unsafe { __test_kernels::load(&context) };
+                (first, second)
+            }},
+            quote! {{ unsafe { pointer.write(value) } }},
+        ] {
+            generated_program_expression(generated, &module)
+                .expect_err("program construction must reject every broader unsafe shape");
         }
     }
 

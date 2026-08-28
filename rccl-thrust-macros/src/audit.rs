@@ -28,9 +28,36 @@ pub(crate) fn generated_expression(tokens: TokenStream) -> syn::Result<TokenStre
     }
 }
 
+/// Audit the one program-construction expression that binds cuda-oxide's
+/// contracted launcher type to the artifact emitted by the same expansion.
+/// Ordinary generated algorithms continue to reject every unsafe expression.
+pub(crate) fn generated_program_expression(
+    tokens: TokenStream,
+    module: &syn::Ident,
+) -> syn::Result<TokenStream> {
+    let expression = syn::parse2::<Expr>(tokens.clone())?;
+    let mut audit = SafetyAudit {
+        allowed_program_module: Some(module.to_string()),
+        ..SafetyAudit::default()
+    };
+    audit.visit_expr(&expression);
+    if audit.error.is_none() && audit.program_loads != 1 {
+        return Err(Error::new_spanned(
+            expression,
+            "program expansion must contain exactly one audited cuda-oxide artifact bind",
+        ));
+    }
+    match audit.error {
+        Some(error) => Err(error),
+        None => Ok(tokens),
+    }
+}
+
 #[derive(Default)]
 struct SafetyAudit {
     error: Option<Error>,
+    allowed_program_module: Option<String>,
+    program_loads: usize,
 }
 
 impl SafetyAudit {
@@ -41,6 +68,29 @@ impl SafetyAudit {
         } else {
             self.error = Some(error);
         }
+    }
+
+    fn is_allowed_program_load(&self, expression: &ExprUnsafe) -> bool {
+        let Some(expected_module) = self.allowed_program_module.as_deref() else {
+            return false;
+        };
+        let [syn::Stmt::Expr(Expr::Call(call), _)] = expression.block.stmts.as_slice() else {
+            return false;
+        };
+        if call.args.len() != 1 {
+            return false;
+        }
+        let Expr::Path(function) = call.func.as_ref() else {
+            return false;
+        };
+        let mut segments = function.path.segments.iter().rev();
+        segments
+            .next()
+            .is_some_and(|segment| segment.ident == "load")
+            && segments
+                .next()
+                .is_some_and(|segment| segment.ident == expected_module)
+            && segments.next().is_none()
     }
 }
 
@@ -56,7 +106,13 @@ fn is_trusted_cub_lowering(path: &Path) -> bool {
                 && private == "__private"
                 && matches!(
                     operation.as_str(),
-                    "__device_kernels" | "__device_transform_repeat_in_place"
+                    "__device_kernels"
+                        | "__device_radix_sort_workspace_counts"
+                        | "__device_radix_sort_pairs_workspace_counts"
+                        | "__device_transform_repeat_in_place"
+                        | "__device_merge_keys_partition_count"
+                        | "__device_merge_pairs_partition_count"
+                        | "__device_merge_sort_partition_count"
                 )
         }
         [crate_name, operation] => {
@@ -64,19 +120,14 @@ fn is_trusted_cub_lowering(path: &Path) -> bool {
                 && matches!(
                     operation.as_str(),
                     "device_merge_keys"
-                        | "device_merge_keys_partition_count"
                         | "device_merge_pairs"
-                        | "device_merge_pairs_partition_count"
                         | "device_merge_sort_keys"
-                        | "device_merge_sort_partition_count"
                         | "device_stable_merge_sort_keys"
                         | "device_merge_sort_pairs"
                         | "device_stable_merge_sort_pairs"
                         | "device_radix_sort_keys"
                         | "device_radix_sort_keys_descending"
-                        | "device_radix_sort_workspace"
                         | "device_radix_sort_pairs"
-                        | "device_radix_sort_pairs_workspace"
                         | "device_radix_sort_pairs_descending"
                 )
         }
@@ -156,6 +207,11 @@ impl<'ast> Visit<'ast> for SafetyAudit {
     }
 
     fn visit_expr_unsafe(&mut self, expression: &'ast ExprUnsafe) {
+        if self.is_allowed_program_load(expression) {
+            self.program_loads += 1;
+            visit::visit_block(self, &expression.block);
+            return;
+        }
         self.reject(
             expression,
             "generated RCCL algorithm code may not contain unsafe blocks",
@@ -356,5 +412,32 @@ mod tests {
         let message = error.into_compile_error().to_string();
         assert!(message.contains("load PTX/cubin"));
         assert!(message.contains("materialized PTX/cubin paths"));
+    }
+
+    #[test]
+    fn program_bind_allows_only_one_exact_generated_module_load() {
+        let module: syn::Ident = syn::parse_quote!(__test_kernels);
+        generated_program_expression(
+            quote! {{
+                let context = &context;
+                unsafe { __test_kernels::load(context) }
+            }},
+            &module,
+        )
+        .expect("the one cuda-oxide provenance bind owned by the program macro must pass");
+
+        for generated in [
+            quote! {{ unsafe { another_module::load(&context) } }},
+            quote! {{ unsafe { __test_kernels::load(&context, extra) } }},
+            quote! {{
+                let first = unsafe { __test_kernels::load(&context) };
+                let second = unsafe { __test_kernels::load(&context) };
+                (first, second)
+            }},
+            quote! {{ unsafe { pointer.write(value) } }},
+        ] {
+            generated_program_expression(generated, &module)
+                .expect_err("program construction must reject every broader unsafe shape");
+        }
     }
 }

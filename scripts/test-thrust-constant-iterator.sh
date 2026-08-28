@@ -21,7 +21,7 @@ printf '%s  %s\n' \
   "$test_source" | sha256sum --check --status
 
 for required in \
-  'rccl_thrust::thrust_kernels!()' \
+  'rccl_thrust::thrust_program!(&context)' \
   'RepeatN::new(10_i32, data.len())' \
   'rccl_thrust::transform!(&exec, &mut data, repeated' \
   '[13, 17, 12, 15]'; do

@@ -383,27 +383,36 @@ operation_call!(
 typed_operation_call!(
     DeviceMergeKeysCall,
     "device_merge_keys!",
-    [key_type, target],
+    [key_type],
     execution,
     first,
     second,
-    partitions,
+    workspace,
     output,
     order,
 );
 
 typed_operation_call!(
+    DeviceMergeKeysWorkspaceCall,
+    "device_merge_keys_workspace!",
+    [key_type],
+    execution,
+    first_len,
+    second_len,
+);
+
+typed_operation_call!(
     DeviceMergeKeysPartitionCountCall,
-    "device_merge_keys_partition_count!",
-    [key_type, target],
+    "__device_merge_keys_partition_count!",
+    [key_type],
     first_len,
     second_len,
 );
 
 typed_operation_call!(
     DeviceMergePairsPartitionCountCall,
-    "device_merge_pairs_partition_count!",
-    [key_type, value_type, target],
+    "__device_merge_pairs_partition_count!",
+    [key_type, value_type],
     first_len,
     second_len,
 );
@@ -411,16 +420,25 @@ typed_operation_call!(
 typed_operation_call!(
     DeviceMergePairsCall,
     "device_merge_pairs!",
-    [key_type, value_type, target],
+    [key_type, value_type],
     execution,
     first_keys,
     first_values,
     second_keys,
     second_values,
-    partitions,
+    workspace,
     output_keys,
     output_values,
     order,
+);
+
+typed_operation_call!(
+    DeviceMergePairsWorkspaceCall,
+    "device_merge_pairs_workspace!",
+    [key_type, value_type],
+    execution,
+    first_len,
+    second_len,
 );
 
 // DeviceMergeSort's in-place key and key/value forms. Copy and stable forms
@@ -429,123 +447,154 @@ typed_operation_call!(
 typed_operation_call!(
     DeviceMergeSortKeysCall,
     "device_merge_sort_keys!",
-    [key_type, target],
+    [key_type],
     execution,
     keys,
-    scratch_keys,
-    partitions,
+    workspace,
     order,
 );
 
 typed_operation_call!(
     DeviceMergeSortKeysCopyCall,
     "device_merge_sort_keys_copy!",
-    [key_type, target],
+    [key_type],
     execution,
     input,
-    scratch_keys,
-    partitions,
+    workspace,
     output,
     order,
 );
 
 typed_operation_call!(
+    DeviceMergeSortKeysWorkspaceCall,
+    "device_merge_sort_keys_workspace!",
+    [key_type],
+    execution,
+    len,
+);
+
+typed_operation_call!(
     DeviceMergeSortPartitionCountCall,
-    "device_merge_sort_partition_count!",
-    [key_type, target],
+    "__device_merge_sort_partition_count!",
+    [key_type],
     len,
 );
 
 typed_operation_call!(
     DeviceMergeSortPairsCall,
     "device_merge_sort_pairs!",
-    [key_type, value_type, target],
+    [key_type, value_type],
     execution,
     keys,
     values,
-    scratch_keys,
-    scratch_values,
-    partitions,
+    workspace,
     order,
 );
 
 typed_operation_call!(
     DeviceMergeSortPairsCopyCall,
     "device_merge_sort_pairs_copy!",
-    [key_type, value_type, target],
+    [key_type, value_type],
     execution,
     input_keys,
     input_values,
-    scratch_keys,
-    scratch_values,
-    partitions,
+    workspace,
     output_keys,
     output_values,
     order,
 );
 
 typed_operation_call!(
+    DeviceMergeSortPairsWorkspaceCall,
+    "device_merge_sort_pairs_workspace!",
+    [key_type, value_type],
+    execution,
+    len,
+);
+
+typed_operation_call!(
     DeviceRadixSortKeysCall,
     "device_radix_sort_keys!",
-    [key_type, target],
+    [key_type],
     execution,
     keys,
-    scratch_keys,
-    bins,
-    lookback,
-    counters,
+    workspace,
 );
 
 typed_operation_call!(
     DeviceRadixSortKeysBufferCall,
     "device_radix_sort_keys_buffer!",
-    [key_type, target],
+    [key_type],
     execution,
     buffers,
     bit_range,
-    bins,
-    lookback,
-    counters,
+    workspace,
 );
 
 typed_operation_call!(
     DeviceRadixSortWorkspaceCall,
     "device_radix_sort_workspace!",
-    [key_type, target],
+    [key_type],
+    execution,
+    len,
+);
+
+typed_operation_call!(
+    DeviceRadixSortWorkspaceCountsCall,
+    "__device_radix_sort_workspace_counts!",
+    [key_type],
+    len,
+);
+
+typed_operation_call!(
+    DeviceRadixSortKeysBufferWorkspaceCall,
+    "device_radix_sort_keys_buffer_workspace!",
+    [key_type],
+    execution,
     len,
 );
 
 typed_operation_call!(
     DeviceRadixSortPairsWorkspaceCall,
     "device_radix_sort_pairs_workspace!",
-    [key_type, value_type, target],
+    [key_type, value_type],
+    execution,
+    len,
+);
+
+typed_operation_call!(
+    DeviceRadixSortPairsWorkspaceCountsCall,
+    "__device_radix_sort_pairs_workspace_counts!",
+    [key_type, value_type],
+    len,
+);
+
+typed_operation_call!(
+    DeviceRadixSortPairsBufferWorkspaceCall,
+    "device_radix_sort_pairs_buffer_workspace!",
+    [key_type, value_type],
+    execution,
     len,
 );
 
 typed_operation_call!(
     DeviceRadixSortPairsCall,
     "device_radix_sort_pairs!",
-    [key_type, value_type, target],
+    [key_type, value_type],
     execution,
     keys,
     values,
-    scratch_keys,
-    scratch_values,
-    bins,
-    lookback,
-    counters,
+    workspace,
 );
 
 typed_operation_call!(
     DeviceRadixSortPairsBufferCall,
     "device_radix_sort_pairs_buffer!",
-    [key_type, value_type, target],
+    [key_type, value_type],
     execution,
     buffers,
     bit_range,
-    bins,
-    lookback,
-    counters,
+    workspace,
 );
 
 #[cfg(test)]
@@ -725,42 +774,39 @@ mod tests {
     #[test]
     fn ordering_tmp_types_are_macro_visible_and_untyped_calls_fail_closed() {
         let keys: DeviceMergeSortKeysCall = syn::parse_quote! {
-            ::<u32, sm_89>(
+            ::<u32>(
                 &exec,
                 &mut keys,
-                &mut scratch_keys,
-                &mut partitions,
+                &mut workspace,
                 |left: &u32, right: &u32| left.cmp(right)
             )
         };
         assert_eq!(keys.key_type.to_token_stream().to_string(), "u32");
-        assert_eq!(keys.target.to_token_stream().to_string(), "sm_89");
+
+        let leaked_target = syn::parse_str::<DeviceMergeSortKeysCall>(
+            "::<u32, sm_89>(&exec, &mut keys, &mut workspace, |left: &u32, right: &u32| left.cmp(right))",
+        )
+        .expect_err("CUDA architecture must be selected by the proc macro");
+        assert!(leaked_target.to_string().contains("TMP type"));
 
         let merge_pairs: DeviceMergeSortPairsCall = syn::parse_quote! {
-            ::<u32, u32, sm_89>(
+            ::<u32, u32>(
                 &exec,
                 &mut keys,
                 &mut values,
-                &mut scratch_keys,
-                &mut scratch_values,
-                &mut partitions,
+                &mut workspace,
                 |left: &u32, right: &u32| left.cmp(right)
             )
         };
         assert_eq!(merge_pairs.value_type.to_token_stream().to_string(), "u32");
-        assert_eq!(tokens(&merge_pairs.scratch_values), "& mut scratch_values");
-        assert_eq!(tokens(&merge_pairs.partitions), "& mut partitions");
+        assert_eq!(tokens(&merge_pairs.workspace), "& mut workspace");
 
         let pairs: DeviceRadixSortPairsCall = syn::parse_quote! {
-            ::<u64, i32, sm_89>(
+            ::<u64, i32>(
                 &exec,
                 &mut keys,
                 &mut values,
-                &mut scratch_keys,
-                &mut scratch_values,
-                &mut bins,
-                &mut lookback,
-                &mut counters
+                &mut workspace
             )
         };
         assert_eq!(pairs.key_type.to_token_stream().to_string(), "u64");
@@ -769,5 +815,34 @@ mod tests {
         let error = syn::parse_str::<DeviceRadixSortKeysCall>("&exec, &mut keys")
             .expect_err("runtime-inferred key types must not select a CUB policy");
         assert!(error.to_string().contains("macro-visible TMP"));
+
+        let leaked_radix_parts = syn::parse_str::<DeviceRadixSortKeysCall>(
+            "::<u32>(&exec, &mut keys, &mut scratch, &mut bins, &mut lookback, &mut counters)",
+        )
+        .expect_err("direct CUB must expose one opaque workspace, not its agent buffers");
+        assert!(
+            leaked_radix_parts
+                .to_string()
+                .contains("expects 3 operands")
+        );
+
+        let leaked_merge_sort_parts = syn::parse_str::<DeviceMergeSortKeysCall>(
+            "::<u32>(&exec, &mut keys, &mut scratch, &mut partitions, |a: &u32, b: &u32| a.cmp(b))",
+        )
+        .expect_err("merge-sort scratch and partitions must remain inside one workspace");
+        assert!(
+            leaked_merge_sort_parts
+                .to_string()
+                .contains("expects 4 operands")
+        );
+
+        let missing_workspace_execution =
+            syn::parse_str::<DeviceRadixSortWorkspaceCall>("::<u32>(len)")
+                .expect_err("workspace construction must be tied to a launch stream");
+        assert!(
+            missing_workspace_execution
+                .to_string()
+                .contains("expects 2 operands")
+        );
     }
 }

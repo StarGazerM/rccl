@@ -3,10 +3,7 @@
 //! from the natural-order radix route.
 
 use cuda_core::{CudaContext, DeviceBuffer};
-use rccl_thrust::memory::CudaMemoryResource;
 use std::error::Error;
-
-rccl_thrust::thrust_kernels!();
 
 fn shuffled_unique(count: usize) -> Vec<u32> {
     let mut values = (0..count as u32).collect::<Vec<_>>();
@@ -23,10 +20,8 @@ fn shuffled_unique(count: usize) -> Vec<u32> {
 fn main() -> Result<(), Box<dyn Error>> {
     let context = CudaContext::new(0)?;
     let stream = context.default_stream();
-    let allocator = CudaMemoryResource::new(context.clone());
-    // SAFETY: this executable owns the one artifact generated above.
-    let module = unsafe { __rccl_thrust_kernels::load(&context)? };
-    let exec = rccl_thrust::cuda::par(&stream, &allocator, &module)?;
+    let thrust = rccl_thrust::thrust_program!(&context)?;
+    let exec = thrust.par(&stream)?;
 
     let input = shuffled_unique(10_003);
 
@@ -34,7 +29,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // closure. Its CUB schedule and temporary storage stay implementation
     // details of the macro and execution policy.
     let mut descending = DeviceBuffer::from_host(&stream, &input)?;
-    rccl_thrust::sort_by!(::<u32, sm_89>(
+    rccl_thrust::sort_by!(::<u32>(
         &exec,
         &mut descending,
         |left: &u32, right: &u32| right.cmp(left),
@@ -47,7 +42,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Pinned Thrust comparison `sort_by_key`: values must follow their keys.
     let mut pair_keys = DeviceBuffer::from_host(&stream, &input)?;
     let mut pair_values = DeviceBuffer::from_host(&stream, &input)?;
-    rccl_thrust::sort_by_key_with!(::<u32, u32, sm_89>(
+    rccl_thrust::sort_by_key_with!(::<u32, u32>(
         &exec,
         &mut pair_keys,
         &mut pair_values,
@@ -70,7 +65,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     expected.sort_by_key(|pair| pair.0);
     let mut stable_keys = DeviceBuffer::from_host(&stream, &stable_keys_host)?;
     let mut stable_values = DeviceBuffer::from_host(&stream, &stable_values_host)?;
-    rccl_thrust::stable_sort_by_key_with!(::<u32, u32, sm_89>(
+    rccl_thrust::stable_sort_by_key_with!(::<u32, u32>(
         &exec,
         &mut stable_keys,
         &mut stable_values,

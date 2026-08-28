@@ -2,23 +2,18 @@
 //! `thrust/testing/merge.cu` and `thrust/testing/merge_by_key.cu`.
 
 use cuda_core::{CudaContext, DeviceBuffer};
-use rccl_thrust::memory::CudaMemoryResource;
 use std::error::Error;
-
-rccl_thrust::thrust_kernels!();
 
 fn main() -> Result<(), Box<dyn Error>> {
     let context = CudaContext::new(0)?;
     let stream = context.default_stream();
-    let allocator = CudaMemoryResource::new(context.clone());
-    // SAFETY: this executable owns the one artifact generated above.
-    let module = unsafe { __rccl_thrust_kernels::load(&context)? };
-    let exec = rccl_thrust::cuda::par(&stream, &allocator, &module)?;
+    let thrust = rccl_thrust::thrust_program!(&context)?;
+    let exec = thrust.par(&stream)?;
 
     let first = DeviceBuffer::from_host(&stream, &[0_i32, 2, 4])?;
     let second = DeviceBuffer::from_host(&stream, &[0_i32, 3, 3, 4])?;
     let mut merged = DeviceBuffer::<i32>::zeroed(&stream, 7)?;
-    rccl_thrust::merge!(::<i32, sm_89>(
+    rccl_thrust::merge!(::<i32>(
         &exec,
         &first,
         &second,
@@ -29,7 +24,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let descending_first = DeviceBuffer::from_host(&stream, &[9_i32, 7, 3, 1])?;
     let descending_second = DeviceBuffer::from_host(&stream, &[8_i32, 7, 2, 0])?;
     let mut descending_output = DeviceBuffer::<i32>::zeroed(&stream, 8)?;
-    rccl_thrust::merge_by!(::<i32, sm_89>(
+    rccl_thrust::merge_by!(::<i32>(
         &exec,
         &descending_first,
         &descending_second,
@@ -45,7 +40,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let second_values = DeviceBuffer::from_host(&stream, &[42_i32, 42, 7, 13])?;
     let mut output_keys = DeviceBuffer::<i32>::zeroed(&stream, 7)?;
     let mut output_values = DeviceBuffer::<i32>::zeroed(&stream, 7)?;
-    rccl_thrust::merge_by_key!(::<i32, i32, sm_89>(
+    rccl_thrust::merge_by_key!(::<i32, i32>(
         &exec,
         &first,
         &first_values,
@@ -64,7 +59,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let descending_second_values = DeviceBuffer::from_host(&stream, &[80_i32, 71, 20, 0])?;
     let mut descending_output_keys = DeviceBuffer::<i32>::zeroed(&stream, 8)?;
     let mut descending_output_values = DeviceBuffer::<i32>::zeroed(&stream, 8)?;
-    rccl_thrust::merge_by_key_with!(::<i32, i32, sm_89>(
+    rccl_thrust::merge_by_key_with!(::<i32, i32>(
         &exec,
         &descending_first,
         &descending_first_values,

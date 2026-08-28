@@ -3,39 +3,27 @@
 //!
 //! CUB checks 0/1/random sizes in both directions and verifies the stable
 //! key-value permutation. Its shipped example uses `f32` keys with `i32`
-//! values. The Rust port keeps those as direct borrowed ranges plus explicit,
-//! caller-owned Policy800 workspace.
+//! values. The Rust port keeps those as direct borrowed ranges plus one
+//! caller-owned opaque workspace.
 
 use cuda_core::{CudaContext, DeviceBuffer};
 use std::error::Error;
 
-rccl_cub::cub_kernels!();
-
 fn main() -> Result<(), Box<dyn Error>> {
     let context = CudaContext::new(0)?;
     let stream = context.default_stream();
-    // SAFETY: this executable owns the artifact emitted by its sole
-    // `cub_kernels!` invocation. Algorithm lowering itself is safe Rust.
-    let module = unsafe { __rccl_cub_kernels::load(&context)? };
-    let exec = rccl_cub::cuda::par(&stream, &module);
+    let cub = rccl_cub::cub_program!(&context)?;
+    let launch = cub.on(&stream)?;
 
-    let empty_workspace = rccl_cub::device_radix_sort_pairs_workspace!(::<u32, i32, sm_89>(0));
+    let mut empty_workspace =
+        rccl_cub::device_radix_sort_pairs_workspace!(::<u32, i32>(&launch, 0))?;
     let mut empty_keys = DeviceBuffer::from_host(&stream, &[])?;
     let mut empty_values = DeviceBuffer::from_host(&stream, &[])?;
-    let mut empty_scratch_keys = DeviceBuffer::<u32>::zeroed(&stream, 0)?;
-    let mut empty_scratch_values = DeviceBuffer::<i32>::zeroed(&stream, 0)?;
-    let mut empty_bins = DeviceBuffer::<u64>::zeroed(&stream, empty_workspace.bins)?;
-    let mut empty_lookback = DeviceBuffer::<i32>::zeroed(&stream, empty_workspace.lookback)?;
-    let mut empty_counters = DeviceBuffer::<i32>::zeroed(&stream, empty_workspace.counters)?;
-    rccl_cub::device_radix_sort_pairs!(::<u32, i32, sm_89>(
-        &exec,
+    rccl_cub::device_radix_sort_pairs!(::<u32, i32>(
+        &launch,
         &mut empty_keys,
         &mut empty_values,
-        &mut empty_scratch_keys,
-        &mut empty_scratch_values,
-        &mut empty_bins,
-        &mut empty_lookback,
-        &mut empty_counters,
+        &mut empty_workspace,
     ))?;
     assert!(empty_keys.to_host_vec(&stream)?.is_empty());
     assert!(empty_values.to_host_vec(&stream)?.is_empty());
@@ -57,23 +45,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         .collect::<Vec<_>>();
     ascending_reference.sort_by_key(|&(key, _)| key);
 
-    let workspace = rccl_cub::device_radix_sort_pairs_workspace!(::<u32, i32, sm_89>(keys.len()));
+    let mut workspace =
+        rccl_cub::device_radix_sort_pairs_workspace!(::<u32, i32>(&launch, keys.len()))?;
     let mut device_keys = DeviceBuffer::from_host(&stream, &keys)?;
     let mut device_values = DeviceBuffer::from_host(&stream, &values)?;
-    let mut scratch_keys = DeviceBuffer::<u32>::zeroed(&stream, workspace.scratch_keys)?;
-    let mut scratch_values = DeviceBuffer::<i32>::zeroed(&stream, workspace.scratch_values)?;
-    let mut bins = DeviceBuffer::<u64>::zeroed(&stream, workspace.bins)?;
-    let mut lookback = DeviceBuffer::<i32>::zeroed(&stream, workspace.lookback)?;
-    let mut counters = DeviceBuffer::<i32>::zeroed(&stream, workspace.counters)?;
-    rccl_cub::device_radix_sort_pairs!(::<u32, i32, sm_89>(
-        &exec,
+    rccl_cub::device_radix_sort_pairs!(::<u32, i32>(
+        &launch,
         &mut device_keys,
         &mut device_values,
-        &mut scratch_keys,
-        &mut scratch_values,
-        &mut bins,
-        &mut lookback,
-        &mut counters,
+        &mut workspace,
     ))?;
     assert_eq!(
         device_keys.to_host_vec(&stream)?,
@@ -98,15 +78,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     descending_reference.sort_by_key(|entry| std::cmp::Reverse(entry.0));
     let mut descending_keys = DeviceBuffer::from_host(&stream, &keys)?;
     let mut descending_values = DeviceBuffer::from_host(&stream, &values)?;
-    rccl_cub::device_radix_sort_pairs_descending!(::<u32, i32, sm_89>(
-        &exec,
+    rccl_cub::device_radix_sort_pairs_descending!(::<u32, i32>(
+        &launch,
         &mut descending_keys,
         &mut descending_values,
-        &mut scratch_keys,
-        &mut scratch_values,
-        &mut bins,
-        &mut lookback,
-        &mut counters,
+        &mut workspace,
     ))?;
     assert_eq!(
         descending_keys.to_host_vec(&stream)?,
@@ -136,25 +112,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         .zip(wide_values.iter().copied())
         .collect::<Vec<_>>();
     wide_reference.sort_by_key(|&(key, _)| key);
-    let wide_workspace =
-        rccl_cub::device_radix_sort_pairs_workspace!(::<u32, u64, sm_89>(keys.len()));
+    let mut wide_workspace =
+        rccl_cub::device_radix_sort_pairs_workspace!(::<u32, u64>(&launch, keys.len()))?;
     let mut wide_keys = DeviceBuffer::from_host(&stream, &keys)?;
     let mut wide_values = DeviceBuffer::from_host(&stream, &wide_values)?;
-    let mut wide_scratch_keys = DeviceBuffer::<u32>::zeroed(&stream, wide_workspace.scratch_keys)?;
-    let mut wide_scratch_values =
-        DeviceBuffer::<u64>::zeroed(&stream, wide_workspace.scratch_values)?;
-    let mut wide_bins = DeviceBuffer::<u64>::zeroed(&stream, wide_workspace.bins)?;
-    let mut wide_lookback = DeviceBuffer::<i32>::zeroed(&stream, wide_workspace.lookback)?;
-    let mut wide_counters = DeviceBuffer::<i32>::zeroed(&stream, wide_workspace.counters)?;
-    rccl_cub::device_radix_sort_pairs!(::<u32, u64, sm_89>(
-        &exec,
+    rccl_cub::device_radix_sort_pairs!(::<u32, u64>(
+        &launch,
         &mut wide_keys,
         &mut wide_values,
-        &mut wide_scratch_keys,
-        &mut wide_scratch_values,
-        &mut wide_bins,
-        &mut wide_lookback,
-        &mut wide_counters,
+        &mut wide_workspace,
     ))?;
     assert_eq!(
         wide_keys.to_host_vec(&stream)?,
@@ -184,26 +150,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         .zip(wide_key_values.iter().copied())
         .collect::<Vec<_>>();
     wide_key_reference.sort_by_key(|&(key, _)| key);
-    let wide_key_workspace =
-        rccl_cub::device_radix_sort_pairs_workspace!(::<u64, u64, sm_89>(keys.len()));
+    let mut wide_key_workspace =
+        rccl_cub::device_radix_sort_pairs_workspace!(::<u64, u64>(&launch, keys.len()))?;
     let mut wide_pair_keys = DeviceBuffer::from_host(&stream, &wide_keys_input)?;
     let mut wide_pair_values = DeviceBuffer::from_host(&stream, &wide_key_values)?;
-    let mut wide_pair_scratch_keys =
-        DeviceBuffer::<u64>::zeroed(&stream, wide_key_workspace.scratch_keys)?;
-    let mut wide_pair_scratch_values =
-        DeviceBuffer::<u64>::zeroed(&stream, wide_key_workspace.scratch_values)?;
-    let mut wide_pair_bins = DeviceBuffer::<u64>::zeroed(&stream, wide_key_workspace.bins)?;
-    let mut wide_pair_lookback = DeviceBuffer::<i32>::zeroed(&stream, wide_key_workspace.lookback)?;
-    let mut wide_pair_counters = DeviceBuffer::<i32>::zeroed(&stream, wide_key_workspace.counters)?;
-    rccl_cub::device_radix_sort_pairs!(::<u64, u64, sm_89>(
-        &exec,
+    rccl_cub::device_radix_sort_pairs!(::<u64, u64>(
+        &launch,
         &mut wide_pair_keys,
         &mut wide_pair_values,
-        &mut wide_pair_scratch_keys,
-        &mut wide_pair_scratch_values,
-        &mut wide_pair_bins,
-        &mut wide_pair_lookback,
-        &mut wide_pair_counters,
+        &mut wide_key_workspace,
     ))?;
     assert_eq!(
         wide_pair_keys.to_host_vec(&stream)?,
@@ -225,27 +180,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     // mask a key twiddle or pair-permutation error.
     let float_input = [1.25_f32, -0.0, f32::INFINITY, -3.5, 0.0, f32::NEG_INFINITY];
     let float_input_values = [4_i32, 2, 5, 1, 3, 0];
-    let float_workspace = rccl_cub::device_radix_sort_pairs_workspace!(::<f32, i32, sm_89>(
-        float_input.len()
-    ));
+    let mut float_workspace = rccl_cub::device_radix_sort_pairs_workspace!(::<f32, i32>(
+        &launch,
+        float_input.len(),
+    ))?;
     let mut float_keys = DeviceBuffer::from_host(&stream, &float_input)?;
     let mut float_values = DeviceBuffer::from_host(&stream, &float_input_values)?;
-    let mut float_scratch_keys =
-        DeviceBuffer::<f32>::zeroed(&stream, float_workspace.scratch_keys)?;
-    let mut float_scratch_values =
-        DeviceBuffer::<i32>::zeroed(&stream, float_workspace.scratch_values)?;
-    let mut float_bins = DeviceBuffer::<u64>::zeroed(&stream, float_workspace.bins)?;
-    let mut float_lookback = DeviceBuffer::<i32>::zeroed(&stream, float_workspace.lookback)?;
-    let mut float_counters = DeviceBuffer::<i32>::zeroed(&stream, float_workspace.counters)?;
-    rccl_cub::device_radix_sort_pairs!(::<f32, i32, sm_89>(
-        &exec,
+    rccl_cub::device_radix_sort_pairs!(::<f32, i32>(
+        &launch,
         &mut float_keys,
         &mut float_values,
-        &mut float_scratch_keys,
-        &mut float_scratch_values,
-        &mut float_bins,
-        &mut float_lookback,
-        &mut float_counters,
+        &mut float_workspace,
     ))?;
     assert_eq!(
         float_keys
@@ -276,13 +221,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         (&mut example_alt_keys, &mut example_alt_values),
     )
     .expect("all four pair ranges must have the same extent");
-    rccl_cub::device_radix_sort_pairs_buffer!(::<f32, i32, sm_89>(
-        &exec,
+    let mut example_workspace = rccl_cub::device_radix_sort_pairs_buffer_workspace!(::<f32, i32>(
+        &launch,
+        float_input.len(),
+    ))?;
+    rccl_cub::device_radix_sort_pairs_buffer!(::<f32, i32>(
+        &launch,
         &mut example_buffers,
         0u32..32u32,
-        &mut float_bins,
-        &mut float_lookback,
-        &mut float_counters,
+        &mut example_workspace,
     ))?;
     let (example_output_keys, example_output_values) = example_buffers.current();
     assert_eq!(
@@ -315,12 +262,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let window_values = (0..window_keys.len())
         .map(|index| index as i32)
         .collect::<Vec<_>>();
-    let window_workspace = rccl_cub::device_radix_sort_pairs_workspace!(::<u32, i32, sm_89>(
-        window_keys.len()
-    ));
-    let mut window_bins = DeviceBuffer::<u64>::zeroed(&stream, window_workspace.bins)?;
-    let mut window_lookback = DeviceBuffer::<i32>::zeroed(&stream, window_workspace.lookback)?;
-    let mut window_counters = DeviceBuffer::<i32>::zeroed(&stream, window_workspace.counters)?;
+    let mut window_workspace = rccl_cub::device_radix_sort_pairs_buffer_workspace!(::<u32, i32>(
+        &launch,
+        window_keys.len(),
+    ))?;
     for descending in [false, true] {
         let mut first_keys = DeviceBuffer::from_host(&stream, &window_keys)?;
         let mut first_values = DeviceBuffer::from_host(&stream, &window_values)?;
@@ -332,22 +277,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         )
         .expect("all four pair ranges must have the same extent");
         if descending {
-            rccl_cub::device_radix_sort_pairs_buffer_descending!(::<u32, i32, sm_89>(
-                &exec,
+            rccl_cub::device_radix_sort_pairs_buffer_descending!(::<u32, i32>(
+                &launch,
                 &mut buffers,
                 pair_window.clone(),
-                &mut window_bins,
-                &mut window_lookback,
-                &mut window_counters,
+                &mut window_workspace,
             ))?;
         } else {
-            rccl_cub::device_radix_sort_pairs_buffer!(::<u32, i32, sm_89>(
-                &exec,
+            rccl_cub::device_radix_sort_pairs_buffer!(::<u32, i32>(
+                &launch,
                 &mut buffers,
                 pair_window.clone(),
-                &mut window_bins,
-                &mut window_lookback,
-                &mut window_counters,
+                &mut window_workspace,
             ))?;
         }
         let mut expected = window_keys

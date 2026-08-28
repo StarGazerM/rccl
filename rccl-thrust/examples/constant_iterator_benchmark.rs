@@ -1,7 +1,7 @@
 //! Equivalent-work benchmark for the pinned Thrust constant-iterator example.
 
 use cuda_core::{CudaContext, DeviceBuffer};
-use rccl_thrust::{memory::CudaMemoryResource, range::RepeatN};
+use rccl_thrust::range::RepeatN;
 use std::error::Error;
 
 const ITEMS: usize = 8 * 1024 * 1024;
@@ -10,8 +10,6 @@ const SAMPLES: usize = 21;
 const LAUNCHES: usize = 100;
 const ADD: u32 = 10;
 
-rccl_thrust::thrust_kernels!();
-
 fn input_value(index: usize) -> u32 {
     ((index * 17 + 3) % 251) as u32
 }
@@ -19,10 +17,8 @@ fn input_value(index: usize) -> u32 {
 fn main() -> Result<(), Box<dyn Error>> {
     let context = CudaContext::new(0)?;
     let stream = context.default_stream();
-    let allocator = CudaMemoryResource::new(context.clone());
-    // SAFETY: this executable owns the sole generated artifact bundle.
-    let module = unsafe { __rccl_thrust_kernels::load(&context)? };
-    let exec = rccl_thrust::cuda::par(&stream, &allocator, &module)?;
+    let thrust = rccl_thrust::thrust_program!(&context)?;
+    let exec = thrust.par(&stream)?;
 
     let host_input = (0..ITEMS).map(input_value).collect::<Vec<_>>();
     let mut data = DeviceBuffer::from_host(&stream, &host_input)?;

@@ -4,9 +4,7 @@
 //! are kept identical to `benchmarks/warp-reduce-reference.cu`.
 
 use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig1D};
-use cuda_device::{
-    DisjointSlice, cuda_module, kernel, launch_bounds, launch_contract, thread, warp,
-};
+use cuda_device::{DisjointSlice, kernel, launch_bounds, launch_contract, thread, warp};
 use std::error::Error;
 
 const BLOCK_THREADS: usize = 256;
@@ -19,7 +17,7 @@ const LAUNCHES: usize = 100;
 const ITEMS: usize = BLOCK_THREADS * BLOCKS;
 const WARPS: usize = ITEMS / WARP_THREADS;
 
-#[cuda_module]
+#[rccl_cub::program]
 mod kernels {
     use super::*;
 
@@ -49,16 +47,15 @@ fn input_value(index: usize) -> i32 {
 fn main() -> Result<(), Box<dyn Error>> {
     let context = CudaContext::new(0)?;
     let stream = context.default_stream();
-    // SAFETY: this executable owns the one cuda-oxide module bundle it binds.
-    let module = unsafe { kernels::load(&context)? };
+    let program = kernels::program!(&context)?;
     let launch = LaunchConfig1D::new(BLOCKS as u32, BLOCK_THREADS as u32, 0);
-    let prepared = module.prepare_reduce_warps(launch)?;
+    let prepared = program.prepare_reduce_warps(launch)?;
 
     let host_input = (0..ITEMS).map(input_value).collect::<Vec<_>>();
     let mut values = DeviceBuffer::from_host(&stream, &host_input)?;
 
     for _ in 0..WARMUPS {
-        module.reduce_warps(&stream, &prepared, &mut values)?;
+        program.reduce_warps(&stream, &prepared, &mut values)?;
     }
     stream.synchronize()?;
 
@@ -67,7 +64,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     for _ in 0..SAMPLES {
         let start = stream.record_event(timing)?;
         for _ in 0..LAUNCHES {
-            module.reduce_warps(&stream, &prepared, &mut values)?;
+            program.reduce_warps(&stream, &prepared, &mut values)?;
         }
         let end = stream.record_event(timing)?;
         end.synchronize()?;
@@ -75,7 +72,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     values.copy_from_host(&stream, &host_input)?;
-    module.reduce_warps(&stream, &prepared, &mut values)?;
+    program.reduce_warps(&stream, &prepared, &mut values)?;
     let host_output = values.to_host_vec(&stream)?;
     for warp in 0..WARPS {
         let values = (0..WARP_THREADS)

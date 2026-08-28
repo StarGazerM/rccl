@@ -206,16 +206,20 @@ already provide.
   32/64-bit Policy800 radix path includes the exact single-tile threshold,
   runtime bit windows, and borrowed key/pair DoubleBuffers; pair buffers have
   one structural selector rather than synchronized C++ selector integers.
+  Each direct device-wide call takes one caller-owned typed opaque workspace;
+  partitions, ping-pong scratch, bins, lookback state, and counters are not
+  public operands.
   The old pointer-heavy registry implementations were removed rather than
   hidden behind a runtime loader; the current ordering kernels remain
   performance-incomplete.
-- `rccl-thrust` exposes handwritten `cuda::Execution`, borrowing a stream,
-  allocator, and program-local typed module, plus binary in-place `transform!`,
-  sort/stable/by-key, and merge/by-key. Every ordering algorithm lowers through
-  its actual CUB dependency.
-- Other descriptor-only fancy-range algebra and the checked device
-  temporary-storage value protocol remain support/planning vocabulary; they
-  are not counted as executable algorithm coverage.
+- `rccl-thrust` exposes a macro-generated typed program owner and handwritten
+  `cuda::Execution` values borrowing that program and a stream. Ordinary
+  `par` supplies the default temporary allocator; `par_in` is the explicit
+  resource form. Public code never loads or passes a module or architecture.
+  Binary in-place `transform!`, sort/stable/by-key, and merge/by-key all lower
+  through their actual CUB dependency.
+- Other descriptor-only fancy-range algebra remains support/planning
+  vocabulary; it is not counted as executable algorithm coverage.
 
 ### Slice and device-range contract
 
@@ -391,7 +395,7 @@ uniform_real_distribution.h       xor_combine_engine.h
 | Device queries/reduction | `device_find`, `device_reduce`, `device_scan`, `device_segmented_reduce`, `device_segmented_scan`, `device_adjacent_difference` | missing |
 | Device compaction | `device_select`, `device_partition`, `device_run_length_encode` | missing |
 | Device histogram | `device_histogram` | missing |
-| Device ordered | `device_merge`, `device_merge_sort`, `device_radix_sort`, `device_segmented_radix_sort`, `device_segmented_sort` | contiguous merge/merge-sort and primitive integer/`f32`/`f64` radix result semantics are partial and performance-incomplete; the 32/64-bit Policy800 borrowed-DoubleBuffer path supports runtime bit windows and zero-width selection preservation; pointer-output windows, range-specific storage query, small-key/other-architecture policies, and segmented families remain |
+| Device ordered | `device_merge`, `device_merge_sort`, `device_radix_sort`, `device_segmented_radix_sort`, `device_segmented_sort` | contiguous merge/merge-sort and primitive integer/`f32`/`f64` radix result semantics are partial and performance-incomplete; direct calls use typed opaque workspaces, and the 32/64-bit Policy800 borrowed-DoubleBuffer path supports runtime bit windows and zero-width selection preservation; a byte-count-only storage query, pointer-output windows, range-specific storage sizing, small-key/other-architecture policies, and segmented families remain |
 | Device top-k | `device_topk`, `device_batched_topk` | missing |
 | CUB iterators | `arg_index_input_iterator`, `cache_modified_input_iterator`, `cache_modified_output_iterator`, `tex_obj_input_iterator` | missing; cache/texture semantics need cuda-oxide backend checks |
 
@@ -402,7 +406,7 @@ uniform_real_distribution.h       xor_combine_engine.h
 | Agents (26) | adjacent difference, batch memcpy, batched top-k and cluster top-k, find and sorted-bound find, for, histogram, merge, merge sort, radix histogram/up/down/OneSweep, reduce/reduce-by-key, RLE, scan/scan-by-key, segmented radix sort, select-if, sub-warp merge sort, three-way partition, top-k, unique-by-key, single-pass scan operators | private kernel-level structs/functions shared by device APIs; one implementation may serve several public operations |
 | Grid (3) | `grid_even_share`, `grid_mapping`, `grid_queue` | typed partition/grid mapping and decoupled-lookback state; use 64-bit global offsets when required |
 | Detail (22) | array utilities, binary search helpers, compute-capability dispatch, offset selection, deferred parameters, delays, runtime detection, device double buffer, device memory resource, environment dispatch, fast division, mdspan helpers, prefetch, RFA, segmented params/helpers, strong load/store, temporary storage, type traits, uninitialized copy, bitcast | implement behavior at its Rust owner; do not expose a mirror `detail` namespace merely to match filenames |
-| Root utilities (16) | config, umbrella/version, allocator, architecture, dialect, debug, device, macro, math, namespace, policy wrapper, PTX, temporary storage, type, virtual shared memory | reuse Rust/cuda-oxide facilities; retain only semantic types such as temp layout, double buffer, offset selection, and schedules |
+| Root utilities (16) | config, umbrella/version, allocator, architecture, dialect, debug, device, macro, math, namespace, policy wrapper, PTX, temporary storage, type, virtual shared memory | reuse Rust/cuda-oxide facilities; retain only semantic values such as typed opaque workspaces, double buffers, offset selection, and schedules |
 
 The device-wide APIs must expose both of CUB's relevant allocation forms:
 

@@ -60,7 +60,33 @@ queries CUB for `storage_size`, creates `temporary_array<std::uint8_t,
 Derived>` from the execution policy, and then runs the CUB operation. RCCL's
 Thrust macro therefore selects the CUB workspace/partition formula, derives
 its runtime extent from the ranges, and acquires the concrete buffers through
-`Execution`. Only direct CUB retains an explicit caller-storage boundary.
+`Execution`. Direct CUB retains the explicit caller-storage boundary as one
+typed, opaque, reusable workspace. Its fields are private, matching CUB's
+single `d_temp_storage` operand without importing byte pointers into Rust.
+
+CUDA modules and architecture tags are not algorithm operands either. Pinned
+Thrust uses `cuda::par.on(stream)` and pinned CUB receives the stream as an
+ordinary call operand; neither API receives a module or an `sm_XX` token.
+RCCL now constructs one typed program owner with `thrust_program!` or
+`cub_program!`, binds CUB with `program.on(&stream)`, and constructs the
+ordinary Thrust policy with `program.par(&stream)`. The CUB proc macro reads
+the target selected by cuda-oxide. Parser tests reject a caller-provided
+architecture token rather than ignoring it.
+
+## Public call-shape comparison
+
+| Pinned CCCL call boundary | Rust call boundary | Deliberate Rust translation |
+|---|---|---|
+| `thrust::cuda::par.on(stream)` | `let exec = thrust.par(&stream)?` | the typed `Program` owns the cuda-oxide program artifact; the execution value contains only runtime stream/allocation state |
+| `thrust::sort(policy, first, last, comp)` | `sort_by!(::<T>(&exec, &mut range, closure))` | one mutable device range replaces the iterator pair; a Rust closure replaces the comparator object |
+| `thrust::merge(policy, first1, last1, first2, last2, result, comp)` | `merge_by!(::<T>(&exec, &first, &second, &mut output, closure))` | range lengths and output exclusivity come from borrows |
+| CUB query/execute with one `d_temp_storage` and `temp_storage_bytes` pair | one `device_*_workspace!` construction followed by `device_*!(..., &mut workspace, ...)` | a typed opaque owner replaces the byte pointer/size pair; internal scratch and agent state are private |
+| CUB stream/environment operand | `let launch = cub.on(&stream)?`, then `&launch` | the stream binding is reusable runtime state; no invented CUB execution policy, module argument, or architecture token |
+| CUB block/warp primitive inside a user `__global__` kernel | `#[rccl_cub::program] mod kernels { #[kernel] fn ... { warp_reduce!(...) } }`, then one `kernels::program!(&context)` bind | cuda-oxide requires an explicit Rust program boundary; the paired item/expression macros prove artifact provenance and keep its unsafe loader out of user code |
+
+The extra `Program` construction is a cuda-oxide program-lifetime boundary,
+not an algorithm operand. It occurs once before example or benchmark work;
+neither the benchmarked operation nor its comparator receives a module.
 
 ## Result masking audit
 
@@ -79,14 +105,15 @@ its runtime extent from the ranges, and acquires the concrete buffers through
   payloads use an independently stable CPU reference, so key-only agreement
   cannot hide a scatter or selector error.
 - A zero-width window starts with different contents in the two allocations
-  and supplies zero-sized workspace. It must preserve the original selected
-  range without launching. Reversed ranges and undersized workspace return
-  their specific errors and leave selection and contents unchanged.
+  and uses the macro-selected zero-sized single-tile workspace. It must
+  preserve the original selected range without launching. Reversed ranges
+  return their specific error and leave selection and contents unchanged.
 - The exact Policy800 single-tile boundaries are tested on both sides: 4,864
-  `u32` keys and key/value pairs succeed with zero one-sweep workspace, while
-  4,865 keys fail with the specific bins-storage error before launch. This
-  prevents an unconditional single-tile route or an unconditional workspace
-  requirement from passing the current fixtures.
+  `u32` keys and key/value pairs receive zero one-sweep state, while 4,865
+  keys receive the exact bins/lookback/counter extents and run the one-sweep
+  route. Macro expansion tests assert both sides of that conditional, so an
+  unconditional single-tile route or unconditional workspace allocation
+  cannot pass the current fixtures.
 - Single-tile probes require exactly one selector transition and compare every
   key and stable payload against independent CPU references. Direct owning
   buffer calls materialize that transition with safe `mem::swap`, without a
@@ -113,11 +140,12 @@ its runtime extent from the ranges, and acquires the concrete buffers through
 - All calls propagate `Result`; no launch error is discarded. None of the
   semantic fixtures is empty, so the zero-length fast path cannot make them
   vacuously pass.
-- Thrust parser tests reject every former scratch-bearing sort arity, while
-  expansion tests require the exact radix-workspace, merge-sort-partition, or
-  merge-partition macro plus an `Execution` temporary acquisition. This keeps
-  a hand-sized allocation or silently ignored legacy operand from passing the
-  current examples.
+- CUB and Thrust parser tests reject every former scratch-bearing arity.
+  Thrust expansion tests require the internal radix-workspace,
+  merge-sort-partition, or merge-partition formula plus an `Execution`
+  temporary acquisition; direct CUB examples require one opaque workspace
+  constructor. This keeps a hand-sized allocation or silently ignored legacy
+  operand from passing the current examples.
 - The executable is built with `cargo oxide build` immediately before
   execution. Both fault iterations reported recompilation of the macro and
   runtime crates, ruling out a stale pre-fault executable.
@@ -126,9 +154,9 @@ its runtime extent from the ranges, and acquires the concrete buffers through
   failing, so result parity cannot be misreported as CCCL performance parity.
   The direct bit-window and Policy800 single-tile additions bring the gate to
   fourteen paths. Its latest median-of-medians run still fails, including
-  key-only radix at 1.062280x, bit-window keys at 1.090674x, single-tile keys
-  at 1.020335x, and historical pre-storage-fix Thrust sort at 1.030226x; the
-  direct-CUB gate still exits nonzero with
+  key-only radix at 1.064799x, bit-window keys at 1.083551x, single-tile keys
+  at 1.049953x, and current internal-storage Thrust sort at 1.263096x; the
+  combined gate still exits nonzero with
   `implementation gap is not masked`. The complete ratios and backend-boundary
   diagnosis are recorded in
   `reviews/current-implemented-performance.md`.

@@ -5,8 +5,6 @@ use cuda_core::{CudaContext, DeviceBuffer};
 use std::error::Error;
 use std::time::Instant;
 
-rccl_cub::cub_kernels!();
-
 fn argument(name: &str, default: usize) -> usize {
     let arguments = std::env::args().collect::<Vec<_>>();
     arguments
@@ -42,10 +40,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let context = CudaContext::new(0)?;
     let stream = context.default_stream();
-    // SAFETY: this executable owns the sole artifact emitted above. RCCL's
-    // generated operation contains no unsafe block or raw pointer.
-    let module = unsafe { __rccl_cub_kernels::load(&context)? };
-    let exec = rccl_cub::cuda::par(&stream, &module);
+    let cub = rccl_cub::cub_program!(&context)?;
+    let launch = cub.on(&stream)?;
 
     let input_host = random_u32(count);
     let mut expected = input_host.clone();
@@ -54,22 +50,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     let input_values = DeviceBuffer::from_host(&stream, &input_host)?;
     let mut output_keys = DeviceBuffer::<u32>::zeroed(&stream, count)?;
     let mut output_values = DeviceBuffer::<u32>::zeroed(&stream, count)?;
-    let mut scratch_keys = DeviceBuffer::<u32>::zeroed(&stream, count)?;
-    let mut scratch_values = DeviceBuffer::<u32>::zeroed(&stream, count)?;
-    let partition_count = rccl_cub::device_merge_sort_partition_count!(::<u32, sm_89>(count))?;
-    let mut partitions = DeviceBuffer::<usize>::zeroed(&stream, partition_count)?;
+    let mut workspace = rccl_cub::device_merge_sort_pairs_workspace!(::<u32, u32>(&launch, count))?;
 
     let mut gpu_samples = Vec::with_capacity(iterations);
     let mut end_to_end_samples = Vec::with_capacity(iterations);
     {
         let mut operation = || {
-            rccl_cub::device_merge_sort_pairs_copy!(::<u32, u32, sm_89>(
-                &exec,
+            rccl_cub::device_merge_sort_pairs_copy!(::<u32, u32>(
+                &launch,
                 &input_keys,
                 &input_values,
-                &mut scratch_keys,
-                &mut scratch_values,
-                &mut partitions,
+                &mut workspace,
                 &mut output_keys,
                 &mut output_values,
                 |left: &u32, right: &u32| left.cmp(right),

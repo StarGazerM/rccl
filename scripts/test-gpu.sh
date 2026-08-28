@@ -50,7 +50,8 @@ if rg -n 'emit_support' rccl-cub rccl-thrust --glob '*.rs' --glob 'Cargo.toml'; 
 fi
 if ! rg -q 'warp_reduce,' rccl-cub/src/lib.rs \
   || ! rg -q 'warp_reduce_items,' rccl-cub/src/lib.rs \
-  || ! rg -q '__device_kernels, __device_transform_repeat_in_place' rccl-cub/src/lib.rs \
+  || ! rg -q '__device_kernels' rccl-cub/src/lib.rs \
+  || ! rg -q '__device_transform_repeat_in_place' rccl-cub/src/lib.rs \
   || ! rg -q 'device_radix_sort_keys' rccl-cub/src/lib.rs; then
   printf '%s\n' 'rccl-cub must own the public collectives/ordering and hidden device-kernel operations' >&2
   exit 1
@@ -141,20 +142,58 @@ if rg -n 'emit_support' rccl-cub-macros/src rccl-thrust-macros/src --glob '*.rs'
 fi
 if ! rg -q '^pub fn warp_reduce\(' rccl-cub-macros/src/lib.rs \
   || ! rg -q '^pub fn warp_reduce_items\(' rccl-cub-macros/src/lib.rs \
-  || ! rg -q '^pub fn cub_kernels\(' rccl-cub-macros/src/lib.rs \
+  || ! rg -q '^pub fn program\(' rccl-cub-macros/src/lib.rs \
+  || ! rg -q '^pub fn cub_program\(' rccl-cub-macros/src/lib.rs \
   || ! rg -q '^pub fn __device_kernels\(' rccl-cub-macros/src/lib.rs \
   || ! rg -q '^pub fn __device_transform_repeat_in_place\(' rccl-cub-macros/src/lib.rs \
   || ! rg -q 'device_merge_keys' rccl-cub-macros/src/lib.rs \
   || ! rg -q 'device_radix_sort_keys' rccl-cub-macros/src/lib.rs \
   || ! rg -q 'device_radix_sort_keys_buffer' rccl-cub-macros/src/lib.rs \
   || ! rg -q 'device_radix_sort_pairs_buffer' rccl-cub-macros/src/lib.rs \
-  || ! rg -q '^pub fn thrust_kernels\(' rccl-thrust-macros/src/lib.rs \
+  || ! rg -q '^pub fn thrust_program\(' rccl-thrust-macros/src/lib.rs \
   || ! rg -q '^pub fn transform\(' rccl-thrust-macros/src/lib.rs \
   || ! rg -qF 'algorithm_macro!(sort' rccl-thrust-macros/src/lib.rs \
   || ! rg -qF 'algorithm_macro!(merge' rccl-thrust-macros/src/lib.rs; then
   printf '%s\n' 'exported proc macros must match the implemented CUB and Thrust slices' >&2
   exit 1
 fi
+if rg -n '__rccl_(cub|thrust)_kernels|::load\(|cuda::par\(|\bunsafe\b|::<[^>]*sm_[0-9]+' \
+  rccl-cub/examples/device_*.rs rccl-thrust/examples --glob '*.rs'; then
+  printf '%s\n' 'public device-algorithm examples expose backend loading, invented CUB policy, unsafe, or target tokens' >&2
+  exit 1
+fi
+if rg -n 'cuda_module|::load\(|\bunsafe\b' rccl-cub/examples/warp_reduce*.rs --glob '*.rs' \
+  || [[ "$(rg -l '#\[rccl_cub::program\]' rccl-cub/examples/warp_reduce*.rs | wc -l)" -ne 4 ]] \
+  || [[ "$(rg -l 'kernels::program!\(&context\)' rccl-cub/examples/warp_reduce*.rs | wc -l)" -ne 4 ]]; then
+  printf '%s\n' 'public block/warp examples must use the scoped Rust program macro, never a raw cuda-oxide loader' >&2
+  exit 1
+fi
+if rg -n 'device_merge_(keys|pairs)_partition_count!|device_merge_sort_partition_count!|\.(scratch_keys|scratch_values|bins|lookback|counters)|&mut [A-Za-z0-9_]*(scratch|bins|lookback|counters|partitions)' \
+  rccl-cub/examples/device_*.rs --glob '*.rs'; then
+  printf '%s\n' 'direct CUB examples expose private temporary-storage components' >&2
+  exit 1
+fi
+for workspace_macro in \
+  device_merge_keys_workspace \
+  device_merge_pairs_workspace \
+  device_merge_sort_keys_workspace \
+  device_merge_sort_pairs_workspace \
+  device_radix_sort_workspace \
+  device_radix_sort_pairs_workspace \
+  device_radix_sort_keys_buffer_workspace \
+  device_radix_sort_pairs_buffer_workspace; do
+  if ! rg -q "$workspace_macro" rccl-cub/src/lib.rs; then
+    printf '%s\n' "rccl-cub is missing opaque temporary-storage macro $workspace_macro" >&2
+    exit 1
+  fi
+done
+for audit in rccl-cub-macros/src/audit.rs rccl-thrust-macros/src/audit.rs; do
+  if ! rg -q 'generated_program_expression' "$audit" \
+    || ! rg -q 'program_loads != 1' "$audit"; then
+    printf '%s\n' "$audit must permit exactly one audited cuda-oxide program bind" >&2
+    exit 1
+  fi
+done
 if rg -n 'cuda_module|#\[kernel' rccl-thrust-macros/src/lib.rs \
   || ! rg -q '__device_kernels' rccl-thrust-macros/src/lib.rs \
   || ! rg -q '__device_transform_repeat_in_place' rccl-thrust-macros/src/lib.rs; then

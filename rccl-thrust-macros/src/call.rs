@@ -114,11 +114,11 @@ macro_rules! typed_algorithm_call {
     };
 }
 
-typed_algorithm_call!(SortCall, "sort!", [key_type, target], execution, range);
+typed_algorithm_call!(SortCall, "sort!", [key_type], execution, range);
 typed_algorithm_call!(
     SortByCall,
     "sort_by!",
-    [key_type, target],
+    [key_type],
     execution,
     range,
     compare
@@ -126,7 +126,7 @@ typed_algorithm_call!(
 typed_algorithm_call!(
     SortByKeyCall,
     "sort_by_key!",
-    [key_type, value_type, target],
+    [key_type, value_type],
     execution,
     keys,
     values
@@ -134,7 +134,7 @@ typed_algorithm_call!(
 typed_algorithm_call!(
     SortByKeyWithCall,
     "sort_by_key_with!",
-    [key_type, value_type, target],
+    [key_type, value_type],
     execution,
     keys,
     values,
@@ -143,7 +143,7 @@ typed_algorithm_call!(
 typed_algorithm_call!(
     MergeCall,
     "merge!",
-    [value_type, target],
+    [value_type],
     execution,
     first,
     second,
@@ -152,7 +152,7 @@ typed_algorithm_call!(
 typed_algorithm_call!(
     MergeByCall,
     "merge_by!",
-    [value_type, target],
+    [value_type],
     execution,
     first,
     second,
@@ -162,7 +162,7 @@ typed_algorithm_call!(
 typed_algorithm_call!(
     MergeByKeyCall,
     "merge_by_key!",
-    [key_type, value_type, target],
+    [key_type, value_type],
     execution,
     first_keys,
     first_values,
@@ -174,7 +174,7 @@ typed_algorithm_call!(
 typed_algorithm_call!(
     MergeByKeyWithCall,
     "merge_by_key_with!",
-    [key_type, value_type, target],
+    [key_type, value_type],
     execution,
     first_keys,
     first_values,
@@ -195,7 +195,7 @@ algorithm_call!(
 typed_algorithm_call!(
     StableSortByKeyCall,
     "stable_sort_by_key!",
-    [key_type, value_type, target],
+    [key_type, value_type],
     execution,
     keys,
     values,
@@ -210,7 +210,7 @@ mod tests {
     #[test]
     fn sort_by_is_positional_rust_syntax_with_an_ordering_closure() {
         let call: SortByCall = syn::parse_quote! {
-            ::<i64, sm_89>(
+            ::<i64>(
                 &exec,
                 &mut keys,
                 |left: &i64, right: &i64| right.cmp(left)
@@ -224,7 +224,7 @@ mod tests {
     #[test]
     fn by_key_with_comparator_exposes_only_thrust_operands() {
         let call: StableSortByKeyCall = syn::parse_quote! {
-            ::<i64, i32, sm_89>(
+            ::<i64, i32>(
                 &exec, &mut keys, &mut values,
                 |left: &i64, right: &i64| left.cmp(right)
             )
@@ -248,13 +248,13 @@ mod tests {
     #[test]
     fn parser_does_not_mask_missing_extra_or_old_named_operands() {
         let missing = syn::parse_str::<StableSortByKeyCall>(
-            "::<i64, i32, sm_89>(&exec, &mut keys, |left: &i64, right: &i64| left.cmp(right))",
+            "::<i64, i32>(&exec, &mut keys, |left: &i64, right: &i64| left.cmp(right))",
         )
         .expect_err("the values range is required by the by-key shape");
         assert!(missing.to_string().contains("expects 4 operands"));
 
         let extra = syn::parse_str::<SortByCall>(
-            "::<i64, sm_89>(&exec, &mut keys, |left: &i64, right: &i64| left.cmp(right), accidental)",
+            "::<i64>(&exec, &mut keys, |left: &i64, right: &i64| left.cmp(right), accidental)",
         )
         .expect_err("an extra operand must not be ignored");
         assert!(extra.to_string().contains("expects 3 operands"));
@@ -266,7 +266,7 @@ mod tests {
         assert!(!obsolete.to_string().is_empty());
 
         let leaked_key_workspace = syn::parse_str::<SortCall>(
-            "::<i64, sm_89>(&exec, &mut keys, &mut scratch_keys, &mut bins, &mut lookback, &mut counters)",
+            "::<i64>(&exec, &mut keys, &mut scratch_keys, &mut bins, &mut lookback, &mut counters)",
         )
         .expect_err("Thrust sort must not expose CUB radix workspace");
         assert!(
@@ -276,7 +276,7 @@ mod tests {
         );
 
         let leaked_pair_workspace = syn::parse_str::<SortByKeyCall>(
-            "::<i64, i32, sm_89>(&exec, &mut keys, &mut values, &mut scratch_keys, &mut scratch_values, &mut bins, &mut lookback, &mut counters)",
+            "::<i64, i32>(&exec, &mut keys, &mut values, &mut scratch_keys, &mut scratch_values, &mut bins, &mut lookback, &mut counters)",
         )
         .expect_err("Thrust sort_by_key must not expose CUB radix workspace");
         assert!(

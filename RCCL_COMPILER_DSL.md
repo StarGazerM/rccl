@@ -160,9 +160,24 @@ Runtime crates own only values that exist while a program runs:
 - launch dimensions derived from runtime lengths; and
 - completion and error values.
 
-`Execution` is only borrowed runtime values: stream, allocator where required,
-and one statically typed program-local cuda-oxide module. It contains no module
-set, schedule, architecture, type map, specialization cache, or compiler policy.
+`Program` owns one statically typed program-local cuda-oxide module, while
+`Execution` borrows the program and stream and owns or borrows only its
+temporary-allocation capability. Neither contains a module set, schedule,
+architecture, type map, specialization cache, or compiler policy. Public
+algorithm calls never name the module or architecture; the proc macro reads
+cuda-oxide's selected build target.
+
+For CUB block/warp primitives, the user kernel remains ordinary inline Rust:
+`#[rccl_cub::program] mod kernels { ... }` delegates kernel analysis to
+cuda-oxide and injects a scoped `kernels::program!(&context)` binder. The item
+macro owns the module provenance, while the expression macro keeps the backend
+context owner type inferred. No raw loader, module handle, architecture, or
+unsafe block becomes part of the user call shape.
+
+Direct device-wide CUB calls receive one operation-specific opaque workspace.
+The proc macro computes its target/type-dependent shape, while the runtime
+value owns only the resulting buffers. Scratch keys, partitions, radix bins,
+lookback state, and pass counters are never separate public operands.
 
 ## Expansion contract
 
@@ -227,7 +242,7 @@ wrappers:
 | fancy iterator | zero-copy range-expression descriptor |
 | comparator/function object | ordinary Rust closure expression |
 | temporary storage query | checked `Layout` and exclusive allocation borrow |
-| execution policy | borrowed stream, allocator, and statically typed program-local module values only |
+| execution policy | typed program owner plus borrowed stream; optional allocator through `par_in` |
 
 Generated range descriptors contain no host `get`/`write` execution path.
 Construction records shape and closures but never evaluates device closures

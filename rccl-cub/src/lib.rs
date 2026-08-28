@@ -4,29 +4,12 @@
 //! policy selection, kernel construction, and launch lowering belong to
 //! `rccl-cub-macros`; support vocabulary does not.
 
-use core::alloc::{Layout, LayoutError};
-
-use cuda_core::DeviceCopy;
-use rccl_memory::{DeviceAllocator, DeviceBlock};
+use cuda_core::{DeviceBuffer, DeviceCopy};
+use rccl_memory::DeviceAllocator;
 
 mod ordering_backend;
 
-pub use rccl_cub_macros::{
-    cub_kernels, device_merge_keys, device_merge_keys_partition_count, device_merge_pairs,
-    device_merge_pairs_partition_count, device_merge_sort_keys, device_merge_sort_keys_copy,
-    device_merge_sort_pairs, device_merge_sort_pairs_copy, device_merge_sort_partition_count,
-    device_radix_sort_keys, device_radix_sort_keys_buffer,
-    device_radix_sort_keys_buffer_descending, device_radix_sort_keys_descending,
-    device_radix_sort_pairs, device_radix_sort_pairs_buffer,
-    device_radix_sort_pairs_buffer_descending, device_radix_sort_pairs_descending,
-    device_radix_sort_pairs_workspace, device_radix_sort_workspace, device_stable_merge_sort_keys,
-    device_stable_merge_sort_keys_copy, device_stable_merge_sort_pairs, warp_reduce,
-    warp_reduce_items,
-};
-
-/// Runtime extents for the typed buffers borrowed by a radix-sort operation.
-/// The policy that produced these numbers exists only in the proc macro.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[doc(hidden)]
 pub struct RadixSortWorkspaceCounts {
     pub scratch_keys: usize,
     pub bins: usize,
@@ -34,9 +17,7 @@ pub struct RadixSortWorkspaceCounts {
     pub counters: usize,
 }
 
-/// Runtime extents for the key and value buffers borrowed by a radix pair sort.
-/// The dominant-type scaling and target policy remain proc-macro-only facts.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[doc(hidden)]
 pub struct RadixSortPairsWorkspaceCounts {
     pub scratch_keys: usize,
     pub scratch_values: usize,
@@ -45,21 +26,208 @@ pub struct RadixSortPairsWorkspaceCounts {
     pub counters: usize,
 }
 
-/// Borrowed launch context for direct CUB device-wide operations.
-///
-/// It contains runtime values only. Kernel families and schedules are emitted
-/// by `cub_kernels!`; this value does not own a registry, cache, policy, target,
-/// or compiler handle.
-pub mod cuda {
-    use cuda_core::CudaStream;
+pub use rccl_cub_macros::{
+    cub_program, device_merge_keys, device_merge_keys_workspace, device_merge_pairs,
+    device_merge_pairs_workspace, device_merge_sort_keys, device_merge_sort_keys_copy,
+    device_merge_sort_keys_workspace, device_merge_sort_pairs, device_merge_sort_pairs_copy,
+    device_merge_sort_pairs_workspace, device_radix_sort_keys, device_radix_sort_keys_buffer,
+    device_radix_sort_keys_buffer_descending, device_radix_sort_keys_buffer_workspace,
+    device_radix_sort_keys_descending, device_radix_sort_pairs, device_radix_sort_pairs_buffer,
+    device_radix_sort_pairs_buffer_descending, device_radix_sort_pairs_buffer_workspace,
+    device_radix_sort_pairs_descending, device_radix_sort_pairs_workspace,
+    device_radix_sort_workspace, device_stable_merge_sort_keys, device_stable_merge_sort_keys_copy,
+    device_stable_merge_sort_pairs, program, warp_reduce, warp_reduce_items,
+};
 
-    #[derive(Clone, Copy)]
-    pub struct Execution<'stream, 'module, M> {
-        stream: &'stream CudaStream,
-        module: &'module M,
+/// Opaque temporary storage for one direct DeviceMerge operation.
+pub struct DeviceMergeWorkspace {
+    partitions: DeviceBuffer<usize>,
+}
+
+impl DeviceMergeWorkspace {
+    #[doc(hidden)]
+    pub fn __from_partitions(partitions: DeviceBuffer<usize>) -> Self {
+        Self { partitions }
     }
 
-    impl<M> Execution<'_, '_, M> {
+    #[doc(hidden)]
+    pub fn __partitions_mut(&mut self) -> &mut DeviceBuffer<usize> {
+        &mut self.partitions
+    }
+}
+
+/// Opaque temporary storage for direct key-only DeviceMergeSort operations.
+pub struct DeviceMergeSortKeysWorkspace<K: DeviceCopy> {
+    scratch_keys: DeviceBuffer<K>,
+    partitions: DeviceBuffer<usize>,
+}
+
+impl<K: DeviceCopy> DeviceMergeSortKeysWorkspace<K> {
+    #[doc(hidden)]
+    pub fn __from_parts(scratch_keys: DeviceBuffer<K>, partitions: DeviceBuffer<usize>) -> Self {
+        Self {
+            scratch_keys,
+            partitions,
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn __parts_mut(&mut self) -> (&mut DeviceBuffer<K>, &mut DeviceBuffer<usize>) {
+        (&mut self.scratch_keys, &mut self.partitions)
+    }
+}
+
+/// Opaque temporary storage for direct key/value DeviceMergeSort operations.
+pub struct DeviceMergeSortPairsWorkspace<K: DeviceCopy, V: DeviceCopy> {
+    scratch_keys: DeviceBuffer<K>,
+    scratch_values: DeviceBuffer<V>,
+    partitions: DeviceBuffer<usize>,
+}
+
+impl<K: DeviceCopy, V: DeviceCopy> DeviceMergeSortPairsWorkspace<K, V> {
+    #[doc(hidden)]
+    pub fn __from_parts(
+        scratch_keys: DeviceBuffer<K>,
+        scratch_values: DeviceBuffer<V>,
+        partitions: DeviceBuffer<usize>,
+    ) -> Self {
+        Self {
+            scratch_keys,
+            scratch_values,
+            partitions,
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn __parts_mut(
+        &mut self,
+    ) -> (
+        &mut DeviceBuffer<K>,
+        &mut DeviceBuffer<V>,
+        &mut DeviceBuffer<usize>,
+    ) {
+        (
+            &mut self.scratch_keys,
+            &mut self.scratch_values,
+            &mut self.partitions,
+        )
+    }
+}
+
+/// Opaque temporary storage for direct key-only DeviceRadixSort operations.
+pub struct DeviceRadixSortKeysWorkspace<K: DeviceCopy> {
+    scratch_keys: DeviceBuffer<K>,
+    controls: DeviceRadixSortBufferWorkspace,
+}
+
+impl<K: DeviceCopy> DeviceRadixSortKeysWorkspace<K> {
+    #[doc(hidden)]
+    pub fn __from_parts(
+        scratch_keys: DeviceBuffer<K>,
+        bins: DeviceBuffer<u64>,
+        lookback: DeviceBuffer<i32>,
+        counters: DeviceBuffer<i32>,
+    ) -> Self {
+        Self {
+            scratch_keys,
+            controls: DeviceRadixSortBufferWorkspace::__from_parts(bins, lookback, counters),
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn __parts_mut(&mut self) -> (&mut DeviceBuffer<K>, &mut DeviceRadixSortBufferWorkspace) {
+        (&mut self.scratch_keys, &mut self.controls)
+    }
+}
+
+/// Opaque temporary storage for direct key/value DeviceRadixSort operations.
+pub struct DeviceRadixSortPairsWorkspace<K: DeviceCopy, V: DeviceCopy> {
+    scratch_keys: DeviceBuffer<K>,
+    scratch_values: DeviceBuffer<V>,
+    controls: DeviceRadixSortBufferWorkspace,
+}
+
+impl<K: DeviceCopy, V: DeviceCopy> DeviceRadixSortPairsWorkspace<K, V> {
+    #[doc(hidden)]
+    pub fn __from_parts(
+        scratch_keys: DeviceBuffer<K>,
+        scratch_values: DeviceBuffer<V>,
+        bins: DeviceBuffer<u64>,
+        lookback: DeviceBuffer<i32>,
+        counters: DeviceBuffer<i32>,
+    ) -> Self {
+        Self {
+            scratch_keys,
+            scratch_values,
+            controls: DeviceRadixSortBufferWorkspace::__from_parts(bins, lookback, counters),
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn __parts_mut(
+        &mut self,
+    ) -> (
+        &mut DeviceBuffer<K>,
+        &mut DeviceBuffer<V>,
+        &mut DeviceRadixSortBufferWorkspace,
+    ) {
+        (
+            &mut self.scratch_keys,
+            &mut self.scratch_values,
+            &mut self.controls,
+        )
+    }
+}
+
+/// Opaque CUB-owned state used with caller-owned radix double buffers.
+pub struct DeviceRadixSortBufferWorkspace {
+    bins: DeviceBuffer<u64>,
+    lookback: DeviceBuffer<i32>,
+    counters: DeviceBuffer<i32>,
+}
+
+impl DeviceRadixSortBufferWorkspace {
+    #[doc(hidden)]
+    pub fn __from_parts(
+        bins: DeviceBuffer<u64>,
+        lookback: DeviceBuffer<i32>,
+        counters: DeviceBuffer<i32>,
+    ) -> Self {
+        Self {
+            bins,
+            lookback,
+            counters,
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn __parts_mut(
+        &mut self,
+    ) -> (
+        &mut DeviceBuffer<u64>,
+        &mut DeviceBuffer<i32>,
+        &mut DeviceBuffer<i32>,
+    ) {
+        (&mut self.bins, &mut self.lookback, &mut self.counters)
+    }
+}
+
+/// CUDA program ownership and stream binding for direct CUB operations.
+///
+/// Architecture policy and kernel selection remain entirely in the proc
+/// macro. Neither [`cuda::Program`] nor [`cuda::Launch`] stores compiler
+/// metadata or a runtime registry.
+pub mod cuda {
+    use cuda_core::{CudaContext, CudaStream};
+    use rccl_memory::MemoryError;
+
+    #[derive(Clone, Copy)]
+    pub struct Launch<'stream, 'program, M> {
+        stream: &'stream CudaStream,
+        module: &'program M,
+    }
+
+    impl<M> Launch<'_, '_, M> {
         pub fn stream(&self) -> &CudaStream {
             self.stream
         }
@@ -70,11 +238,31 @@ pub mod cuda {
         }
     }
 
-    pub fn par<'stream, 'module, M>(
-        stream: &'stream CudaStream,
-        module: &'module M,
-    ) -> Execution<'stream, 'module, M> {
-        Execution { stream, module }
+    /// Runtime owner for one macro-generated CUB program.
+    pub struct Program<'context, M> {
+        context: &'context CudaContext,
+        module: M,
+    }
+
+    impl<'context, M> Program<'context, M> {
+        #[doc(hidden)]
+        pub fn __from_module(context: &'context CudaContext, module: M) -> Self {
+            Self { context, module }
+        }
+
+        /// Bind this program to the stream used by a direct CUB call.
+        pub fn on<'program, 'stream>(
+            &'program self,
+            stream: &'stream CudaStream,
+        ) -> Result<Launch<'stream, 'program, M>, MemoryError> {
+            if self.context != stream.context().as_ref() {
+                return Err(MemoryError::ContextMismatch);
+            }
+            Ok(Launch {
+                stream,
+                module: &self.module,
+            })
+        }
     }
 }
 
@@ -187,7 +375,12 @@ pub mod __private {
     pub use cuda_device;
     pub use cuda_host;
     #[doc(hidden)]
-    pub use rccl_cub_macros::{__device_kernels, __device_transform_repeat_in_place};
+    pub use rccl_cub_macros::{
+        __device_kernels, __device_merge_keys_partition_count,
+        __device_merge_pairs_partition_count, __device_merge_sort_partition_count,
+        __device_radix_sort_pairs_workspace_counts, __device_radix_sort_workspace_counts,
+        __device_transform_repeat_in_place,
+    };
     pub use rccl_memory::static_block_shared_memory;
     /// Normalize cuda-oxide and RCCL allocator buffers for CUB's required
     /// stream-ordered lookback memset. Implemented only for the signed
@@ -446,81 +639,6 @@ impl<R> DoubleBuffer<R> {
     }
 }
 
-/// Size and alignment computed by one macro-generated operation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct TempStorageLayout {
-    layout: Layout,
-}
-
-impl TempStorageLayout {
-    pub fn new(size: usize, align: usize) -> Result<Self, LayoutError> {
-        Ok(Self {
-            layout: Layout::from_size_align(size, align)?,
-        })
-    }
-
-    pub fn layout(self) -> Layout {
-        self.layout
-    }
-
-    pub fn size(self) -> usize {
-        self.layout.size()
-    }
-
-    pub fn align(self) -> usize {
-        self.layout.align()
-    }
-}
-
-/// Why an owned device block cannot satisfy an operation layout.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TempStorageError {
-    TooSmall { required: usize, actual: usize },
-    InsufficientAlignment { required: usize, actual: usize },
-}
-
-/// A checked borrow of caller-owned device temporary storage.
-///
-/// The allocation owner retains deallocation responsibility. Generated launch
-/// code receives this value through a safe backend boundary.
-pub struct TempStorage<'a> {
-    block: &'a mut DeviceBlock,
-    required: TempStorageLayout,
-}
-
-impl<'a> TempStorage<'a> {
-    pub fn new(
-        block: &'a mut DeviceBlock,
-        required: TempStorageLayout,
-    ) -> Result<Self, TempStorageError> {
-        if block.size() < required.size() {
-            return Err(TempStorageError::TooSmall {
-                required: required.size(),
-                actual: block.size(),
-            });
-        }
-        if block.align() < required.align() {
-            return Err(TempStorageError::InsufficientAlignment {
-                required: required.align(),
-                actual: block.align(),
-            });
-        }
-        Ok(Self { block, required })
-    }
-
-    pub fn layout(&self) -> TempStorageLayout {
-        self.required
-    }
-
-    pub fn block(&self) -> &DeviceBlock {
-        self.block
-    }
-
-    pub fn block_mut(&mut self) -> &mut DeviceBlock {
-        self.block
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -624,13 +742,5 @@ mod tests {
             )
             .is_none()
         );
-    }
-
-    #[test]
-    fn temporary_storage_layout_preserves_size_and_alignment() {
-        let layout = TempStorageLayout::new(4097, 256).expect("valid layout must construct");
-        assert_eq!(layout.size(), 4097);
-        assert_eq!(layout.align(), 256);
-        assert!(TempStorageLayout::new(1, 3).is_err());
     }
 }

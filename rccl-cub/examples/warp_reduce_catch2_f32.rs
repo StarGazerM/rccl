@@ -4,7 +4,7 @@
 //! is the complete 150-row supported matrix derived from the pinned test.
 
 use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig1D};
-use cuda_device::{DisjointSlice, cuda_module, kernel, launch_bounds, launch_contract, thread};
+use cuda_device::{DisjointSlice, kernel, launch_bounds, launch_contract, thread};
 use std::error::Error;
 
 const THREADS: usize = 128;
@@ -27,7 +27,7 @@ macro_rules! f32_min_max_operation {
     };
 }
 
-#[cuda_module]
+#[rccl_cub::program]
 mod kernels {
     use super::*;
 
@@ -72,10 +72,9 @@ fn lane_zero_values(output: &[f32], logical_width: usize) -> Vec<f32> {
 fn main() -> Result<(), Box<dyn Error>> {
     let context = CudaContext::new(0)?;
     let stream = context.default_stream();
-    // SAFETY: this executable owns the one cuda-oxide module bundle it binds.
-    let module = unsafe { kernels::load(&context)? };
+    let program = kernels::program!(&context)?;
     let launch = LaunchConfig1D::new(1, THREADS as u32, 0);
-    let prepared = module.prepare_f32_min_max(launch)?;
+    let prepared = program.prepare_f32_min_max(launch)?;
     let input = (0..THREADS)
         .map(|index| ((index * 73 + 10) % 211) as f32 - 105.0)
         .collect::<Vec<_>>();
@@ -88,7 +87,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     for (width_index, width) in widths.into_iter().enumerate() {
         for (operation_index, operation) in operations.into_iter().enumerate() {
             let case = (width_index * 2 + operation_index) as u32;
-            module.f32_min_max(&stream, &prepared, &device_input, case, &mut device_output)?;
+            program.f32_min_max(&stream, &prepared, &device_input, case, &mut device_output)?;
             assert_eq!(
                 lane_zero_values(&device_output.to_host_vec(&stream)?, width),
                 reference_groups(&input, width, operation),
