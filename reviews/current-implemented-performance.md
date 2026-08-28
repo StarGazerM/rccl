@@ -144,6 +144,13 @@ PTX address machinery, but ptxas still reports 99 registers and the measured
 key radix time remains about 0.616 ms. It is retained as the Rust-qualified
 source mapping, not counted as a performance fix.
 
+Spelling CUB's predicated ballot complement as a mutable mask followed by a
+conditional assignment was also measured and removed. cuda-oxide emitted
+byte-identical PTX for the complete key one-sweep entry, Nsight still reported
+99 registers and 34,304 static shared bytes, and five 16M-item samples remained
+in the same 0.616--0.617 ms band. The idiomatic Rust `if` expression therefore
+remains; a source-spelling assertion cannot manufacture a backend improvement.
+
 ## Policy800 single-tile backend boundary
 
 The single-block lowering now retains the pinned 256-thread, 19-item u32
