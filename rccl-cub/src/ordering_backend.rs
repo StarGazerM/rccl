@@ -19,10 +19,10 @@ use core::{mem::MaybeUninit, ops::Range};
 use cuda_device::{DisjointSlice, LinearTiles, thread, warp};
 use rccl_memory::device::{
     AlignedBlockSharedMemory, BlockSharedMemory, BlockStripedBlockWrite, DeviceRegion,
-    MergePathSearch, OneDimensionalLaunch, SharedRegion, WarpStripedBlockInput,
-    WarpStripedBlockRead, WarpStripedBlockTile, WarpStripedBlockWrite, commit_and_wait_async_copy,
-    commit_async_copy, initialized_ref, initialized_value, threadfence_block, wait_async_copy,
-    warp_striped_pair_into_write,
+    FullWarpStripedInput, MergePathSearch, OneDimensionalLaunch, PartialWarpStripedInput,
+    SharedRegion, WarpLane, WarpStripedBlockInput, WarpStripedBlockRead, WarpStripedBlockTile,
+    WarpStripedBlockWrite, commit_and_wait_async_copy, commit_async_copy, initialized_ref,
+    initialized_value, threadfence_block, wait_async_copy, warp_striped_pair_into_write,
 };
 
 // CUB marks each per-thread item loop with `_CCCL_PRAGMA_UNROLL_FULL()`. A
@@ -136,6 +136,46 @@ macro_rules! for_each_radix_warp_bin {
     }};
 }
 
+// Policy800's histogram agent has 128 threads, so each thread owns exactly
+// two of the 256 digit counters. CUB fully unrolls this fixed bin loop.
+macro_rules! for_each_histogram_thread_bin {
+    ($threads:expr, $thread:expr, $bin:ident, $body:block) => {{
+        macro_rules! one {
+            ($offset:expr) => {{
+                let $bin = $thread + $offset * $threads;
+                $body
+            }};
+        }
+        one!(0usize);
+        one!(1usize);
+    }};
+}
+
+// The primitive radix surface tops out at eight 8-bit passes for 64-bit
+// keys. CUB marks every histogram pass loop as fully unrolled even though the
+// selected bit range is runtime state. Materialize that same bounded shape in
+// Rust; `MAX_PASSES` remains a proc-macro-selected type-level policy.
+macro_rules! for_each_histogram_pass {
+    ($maximum:expr, $active:expr, $pass:ident, $body:block) => {{
+        macro_rules! one {
+            ($index:expr) => {
+                if $index < $maximum && $index < $active {
+                    let $pass = $index;
+                    $body
+                }
+            };
+        }
+        one!(0usize);
+        one!(1usize);
+        one!(2usize);
+        one!(3usize);
+        one!(4usize);
+        one!(5usize);
+        one!(6usize);
+        one!(7usize);
+    }};
+}
+
 macro_rules! for_each_raking_item {
     ($count:expr, $item:ident, $body:block) => {{
         macro_rules! one {
@@ -158,6 +198,25 @@ macro_rules! for_each_raking_item {
         one!(9usize);
         one!(10usize);
         one!(11usize);
+    }};
+}
+
+// CUB's WarpScan specialization fully unrolls the five shuffle steps for a
+// 32-lane logical warp. Keep that fixed instruction dependency graph visible
+// to Rust instead of relying on a later optimizer to discover a rolled loop.
+macro_rules! for_each_warp_scan_offset {
+    ($offset:ident, $body:block) => {{
+        macro_rules! one {
+            ($value:expr) => {{
+                let $offset = $value;
+                $body
+            }};
+        }
+        one!(1u32);
+        one!(2u32);
+        one!(4u32);
+        one!(8u32);
+        one!(16u32);
     }};
 }
 
@@ -2785,8 +2844,8 @@ where
         });
     }
 
-    let mut thread_prefixes = [0u16; ITEMS];
-    let mut counter_indices = [0u32; ITEMS];
+    let mut thread_prefixes = [MaybeUninit::<u16>::uninit(); ITEMS];
+    let mut counter_indices = [MaybeUninit::<u32>::uninit(); ITEMS];
     {
         let mut counters = shared_memory.region::<u16>(0, grid_words * PACKING_RATIO);
         for_each_thread_item!(ITEMS, item, {
@@ -2800,8 +2859,8 @@ where
             let counter_index =
                 (counter_lane * THREADS as u32 + thread_index) * PACKING_RATIO as u32 + sub_counter;
             let prefix = counters.read(counter_index as usize);
-            thread_prefixes[item] = prefix;
-            counter_indices[item] = counter_index;
+            thread_prefixes[item].write(prefix);
+            counter_indices[item].write(counter_index);
             counters.write(counter_index as usize, prefix.wrapping_add(1));
         });
         thread::sync_threads();
@@ -2811,13 +2870,17 @@ where
     // packed aggregate per thread with the warp-scans block algorithm, then
     // perform the exclusive downsweep in registers.
     {
-        let mut cached_segment = [0u32; RAKING_SEGMENT];
-        let mut aggregate = 0u32;
+        let mut cached_segment = [MaybeUninit::<u32>::uninit(); RAKING_SEGMENT];
         let mut grid = shared_memory.region::<u32>(0, grid_words);
         for_each_radix_raking_word!(word, {
             let value = grid.read(thread_index as usize * RAKING_SEGMENT + word);
-            cached_segment[word] = value;
-            aggregate = aggregate.wrapping_add(value);
+            cached_segment[word].write(value);
+        });
+        let mut aggregate = initialized_value(&cached_segment[0]);
+        for_each_radix_raking_word!(word, {
+            if word != 0 {
+                aggregate = aggregate.wrapping_add(initialized_value(&cached_segment[word]));
+            }
         });
 
         let (warp_exclusive, warp_inclusive) = warp_exclusive_sum_u32(aggregate, lane);
@@ -2856,23 +2919,25 @@ where
         }
         let mut running = exclusive_partial;
         for_each_radix_raking_word!(word, {
-            let value = cached_segment[word];
-            cached_segment[word] = running;
+            let value = initialized_value(&cached_segment[word]);
+            cached_segment[word].write(running);
             running = running.wrapping_add(value);
-            grid.write(
-                thread_index as usize * RAKING_SEGMENT + word,
-                cached_segment[word],
-            );
         });
         let _ = running;
+        for_each_radix_raking_word!(word, {
+            grid.write(
+                thread_index as usize * RAKING_SEGMENT + word,
+                initialized_value(&cached_segment[word]),
+            );
+        });
         thread::sync_threads();
     }
 
     let mut ranks = [0u32; ITEMS];
     let counters = shared_memory.region::<u16>(0, grid_words * PACKING_RATIO);
     for_each_thread_item!(ITEMS, item, {
-        let block_prefix = counters.read(counter_indices[item] as usize);
-        ranks[item] = thread_prefixes[item] as u32 + block_prefix as u32;
+        let block_prefix = counters.read(initialized_value(&counter_indices[item]) as usize);
+        ranks[item] = initialized_value(&thread_prefixes[item]) as u32 + block_prefix as u32;
     });
     ranks
 }
@@ -2917,7 +2982,6 @@ pub fn radix_single_tile_keys_agent<
     RankDigit,
     const THREADS: usize,
     const ITEMS: usize,
-    const SHARED_BYTES: usize,
     const DESCENDING: bool,
 >(
     input: &[K],
@@ -2925,6 +2989,7 @@ pub fn radix_single_tile_keys_agent<
     bit_range: Range<u32>,
     operations: (DefaultOrdered, ToOrdered, FromOrdered, RankDigit),
     launch_context: OneDimensionalLaunch<'_>,
+    shared_memory: AlignedBlockSharedMemory<32>,
 ) where
     K: Copy,
     B: Copy,
@@ -2936,7 +3001,6 @@ pub fn radix_single_tile_keys_agent<
     let (default_ordered, to_ordered, from_ordered, rank_digit) = operations;
     let mut output =
         BlockStripedBlockWrite::<K, THREADS, ITEMS>::new(output, launch_context, input.len());
-    let shared_memory = AlignedBlockSharedMemory::<32>::new(SHARED_BYTES);
     let thread_index = thread::threadIdx_x() as usize;
     let default = default_ordered();
     let mut keys = [default; ITEMS];
@@ -2989,7 +3053,6 @@ pub fn radix_single_tile_pairs_agent<
     RankDigit,
     const THREADS: usize,
     const ITEMS: usize,
-    const SHARED_BYTES: usize,
     const DESCENDING: bool,
 >(
     input: (&[K], &[V]),
@@ -3000,6 +3063,7 @@ pub fn radix_single_tile_pairs_agent<
     bit_range: Range<u32>,
     operations: (DefaultOrdered, ToOrdered, FromOrdered, RankDigit),
     launch_context: OneDimensionalLaunch<'_>,
+    shared_memory: AlignedBlockSharedMemory<32>,
 ) where
     K: Copy,
     V: Copy,
@@ -3022,7 +3086,6 @@ pub fn radix_single_tile_pairs_agent<
         launch_context,
         input_values.len(),
     );
-    let shared_memory = AlignedBlockSharedMemory::<32>::new(SHARED_BYTES);
     let thread_index = thread::threadIdx_x() as usize;
     let default = default_ordered();
     let mut keys = [default; ITEMS];
@@ -3107,12 +3170,12 @@ pub fn radix_histogram_agent<
     const MAX_PASSES: usize,
 >(
     keys: &[K],
-    begin_bit: u32,
-    end_bit: u32,
+    bit_range: core::ops::Range<u32>,
     default_key: DefaultKey,
     to_ordered: ToOrdered,
     digit: Digit,
     bins: DisjointSlice<u64>,
+    shared_memory: BlockSharedMemory,
 ) where
     K: Copy,
     B: Copy,
@@ -3123,20 +3186,19 @@ pub fn radix_histogram_agent<
     const RADIX_DIGITS: usize = 256;
     let thread_index = thread::threadIdx_x() as usize;
     let tile_items = THREADS * ITEMS;
-    let shared_memory =
-        BlockSharedMemory::new(MAX_PASSES * RADIX_DIGITS * core::mem::size_of::<u32>());
+    if shared_memory.bytes() != MAX_PASSES * RADIX_DIGITS * core::mem::size_of::<u32>() {
+        cuda_device::debug::trap();
+    }
     let mut shared = shared_memory.region::<u32>(0, MAX_PASSES * RADIX_DIGITS);
     let mut bins = DeviceRegion::new(bins);
-    let num_passes = (end_bit - begin_bit).div_ceil(8) as usize;
+    let num_passes = (bit_range.end - bit_range.start).div_ceil(8) as usize;
     let sentinel = default_key();
 
-    for bin in (thread_index..RADIX_DIGITS).step_by(THREADS) {
-        let mut pass = 0usize;
-        while pass < num_passes {
+    for_each_histogram_thread_bin!(THREADS, thread_index, bin, {
+        for_each_histogram_pass!(MAX_PASSES, num_passes, pass, {
             shared.write(pass * RADIX_DIGITS + bin, 0);
-            pass += 1;
-        }
-    }
+        });
+    });
     thread::sync_threads();
 
     let mut tile_offset = thread::blockIdx_x() as usize * tile_items;
@@ -3156,10 +3218,9 @@ pub fn radix_histogram_agent<
         });
         // `current_bit` and `pass` are ordinary agent state in CUB. Only the
         // per-thread item array is compile-time and fully unrolled.
-        let mut current_bit = begin_bit;
-        let mut pass = 0usize;
-        while current_bit < end_bit {
-            let num_bits = (end_bit - current_bit).min(8);
+        for_each_histogram_pass!(MAX_PASSES, num_passes, pass, {
+            let current_bit = bit_range.start + pass as u32 * 8;
+            let num_bits = (bit_range.end - current_bit).min(8);
             let digit_mask = (1u32 << num_bits) - 1;
             for_each_thread_item!(ITEMS, item, {
                 let bin = digit(
@@ -3169,37 +3230,31 @@ pub fn radix_histogram_agent<
                 ) as usize;
                 shared.fetch_add_block(pass * RADIX_DIGITS + bin, 1);
             });
-            current_bit += 8;
-            pass += 1;
-        }
+        });
         tile_offset += tile_stride;
     }
     thread::sync_threads();
 
-    for bin in (thread_index..RADIX_DIGITS).step_by(THREADS) {
-        let mut pass = 0usize;
-        while pass < num_passes {
+    for_each_histogram_thread_bin!(THREADS, thread_index, bin, {
+        for_each_histogram_pass!(MAX_PASSES, num_passes, pass, {
             let count = shared.read(pass * RADIX_DIGITS + bin);
             if count != 0 {
                 bins.fetch_add_device(pass * RADIX_DIGITS + bin, count as u64);
             }
-            pass += 1;
-        }
-    }
+        });
+    });
     thread::sync_threads();
 }
 
 #[inline(always)]
 fn warp_exclusive_sum_u64(value: u64, lane: u32) -> (u64, u64) {
     let mut inclusive = value;
-    let mut offset = 1u32;
-    while offset < 32 {
+    for_each_warp_scan_offset!(offset, {
         let preceding = warp::shuffle_up_u64_sync(u32::MAX, inclusive, offset);
         if lane >= offset {
             inclusive += preceding;
         }
-        offset <<= 1;
-    }
+    });
     (inclusive - value, inclusive)
 }
 
@@ -3217,30 +3272,30 @@ fn block_exclusive_sum_raking_256_u64(value: u64, grid: &mut SharedRegion<u64>) 
 
     if thread_index < RAKING_THREADS {
         let segment = thread_index * (SEGMENT_LENGTH + 1);
-        let mut cached = [0u64; SEGMENT_LENGTH];
+        let mut cached = [MaybeUninit::<u64>::uninit(); SEGMENT_LENGTH];
         for_each_raking_item!(SEGMENT_LENGTH, item, {
-            cached[item] = grid.read(segment + item);
+            cached[item].write(grid.read(segment + item));
         });
-        let mut aggregate = cached[0];
+        let mut aggregate = initialized_value(&cached[0]);
         for_each_raking_item!(SEGMENT_LENGTH - 1, offset, {
-            aggregate += cached[offset + 1];
+            aggregate += initialized_value(&cached[offset + 1]);
         });
         let (segment_prefix, _) = warp_exclusive_sum_u64(aggregate, thread_index as u32);
 
         // Policy default is BLOCK_SCAN_RAKING, not memoize: the downsweep
         // deliberately reloads the segment from shared memory.
         for_each_raking_item!(SEGMENT_LENGTH, item, {
-            cached[item] = grid.read(segment + item);
+            cached[item].write(grid.read(segment + item));
         });
         let mut running = segment_prefix;
         for_each_raking_item!(SEGMENT_LENGTH, item, {
-            let current = cached[item];
-            cached[item] = running;
+            let current = initialized_value(&cached[item]);
+            cached[item].write(running);
             running += current;
         });
         let _ = running;
         for_each_raking_item!(SEGMENT_LENGTH, item, {
-            grid.write(segment + item, cached[item]);
+            grid.write(segment + item, initialized_value(&cached[item]));
         });
     }
     thread::sync_threads();
@@ -3254,6 +3309,7 @@ fn block_exclusive_sum_raking_256_u64(value: u64, grid: &mut SharedRegion<u64>) 
 pub fn radix_exclusive_sum_agent<const PASSES: usize>(
     mut bins: DisjointSlice<u64>,
     bin_thread: cuda_device::ThreadIndex32<'_>,
+    shared_memory: BlockSharedMemory,
 ) {
     let pass = thread::blockIdx_x() as usize;
     if pass >= PASSES {
@@ -3261,7 +3317,9 @@ pub fn radix_exclusive_sum_agent<const PASSES: usize>(
     }
     const SHARED_BYTES: usize = 2_336;
     const GRID_OFFSET_BYTES: usize = 16;
-    let shared_memory = BlockSharedMemory::new(SHARED_BYTES);
+    if shared_memory.bytes() != SHARED_BYTES {
+        cuda_device::debug::trap();
+    }
     let mut grid = shared_memory.region::<u64>(
         GRID_OFFSET_BYTES,
         (SHARED_BYTES - GRID_OFFSET_BYTES) / core::mem::size_of::<u64>(),
@@ -3277,16 +3335,14 @@ pub fn radix_exclusive_sum_agent<const PASSES: usize>(
 #[inline(always)]
 fn warp_exclusive_sum_i32(value: i32, lane: u32) -> (i32, i32) {
     let mut inclusive = value;
-    let mut offset = 1u32;
-    while offset < 32 {
+    for_each_warp_scan_offset!(offset, {
         // cuda-oxide's typed 32-bit shuffle transports bits as `u32`; the
         // pinned CUB scan value is nevertheless C++ `int` throughout.
         let preceding = warp::shuffle_up_sync(u32::MAX, inclusive as u32, offset) as i32;
         if lane >= offset {
             inclusive += preceding;
         }
-        offset <<= 1;
-    }
+    });
     (inclusive - value, inclusive)
 }
 
@@ -3330,13 +3386,13 @@ fn block_exclusive_sum_raking_memoize_384_i32(value: i32, grid: &mut SharedRegio
 
     if thread_index < RAKING_THREADS {
         let segment = thread_index * (SEGMENT_LENGTH + 1);
-        let mut cached = [0i32; SEGMENT_LENGTH];
+        let mut cached = [MaybeUninit::<i32>::uninit(); SEGMENT_LENGTH];
         for_each_raking_item!(SEGMENT_LENGTH, item, {
-            cached[item] = grid.read(segment + item);
+            cached[item].write(grid.read(segment + item));
         });
-        let mut aggregate = cached[0];
+        let mut aggregate = initialized_value(&cached[0]);
         for_each_raking_item!(SEGMENT_LENGTH - 1, offset, {
-            aggregate += cached[offset + 1];
+            aggregate += initialized_value(&cached[offset + 1]);
         });
         let (segment_prefix, _) = warp_exclusive_sum_i32(aggregate, thread_index as u32);
 
@@ -3344,13 +3400,13 @@ fn block_exclusive_sum_raking_memoize_384_i32(value: i32, grid: &mut SharedRegio
         // segment loaded during the upsweep instead of rereading shared.
         let mut running = segment_prefix;
         for_each_raking_item!(SEGMENT_LENGTH, item, {
-            let current = cached[item];
-            cached[item] = running;
+            let current = initialized_value(&cached[item]);
+            cached[item].write(running);
             running += current;
         });
         let _ = running;
         for_each_raking_item!(SEGMENT_LENGTH, item, {
-            grid.write(segment + item, cached[item]);
+            grid.write(segment + item, initialized_value(&cached[item]));
         });
     }
     thread::sync_threads();
@@ -3404,8 +3460,9 @@ fn radix_lookback_global(
 /// Exact pinned SM80 `AgentRadixSortOnesweep` keys-only path.
 ///
 /// The proc macro fixes the policy (`THREADS`, `ITEMS`) and supplies primitive
-/// bit conversions. The backend owns the only raw-memory boundary required for
-/// CUB's phase-aliased shared storage and device-wide atomic lookback protocol.
+/// bit conversions. Checked `rccl-memory` capabilities own CUB's phase-aliased
+/// shared storage, device-wide atomic lookback, and disjoint output contracts;
+/// the algorithm itself receives only affine values and borrowed slices.
 #[inline(always)]
 pub fn radix_onesweep_keys_agent<
     K,
@@ -3422,30 +3479,30 @@ pub fn radix_onesweep_keys_agent<
     buffers: (&[K], DisjointSlice<K>),
     pass: (usize, usize, u32, u32),
     transforms: (DefaultKey, ToOrdered, FromOrdered, Digit),
+    shared_memory: BlockSharedMemory,
 ) where
     K: Copy,
     B: Copy,
     DefaultKey: Fn() -> B + Copy,
     ToOrdered: Fn(K) -> B + Copy,
     FromOrdered: Fn(B) -> K + Copy,
-    Digit: FnMut(B, u32, u32) -> u32 + Copy,
+    Digit: Fn(B, u32, u32) -> u32 + Copy,
 {
     let (lookback, counter, bins) = storage;
     let (input, output) = buffers;
     let (bin_offset, counter_offset, current_bit, num_bits) = pass;
-    let (default_key, to_ordered, from_ordered, mut digit) = transforms;
+    let (default_key, to_ordered, from_ordered, digit) = transforms;
     let digit_mask = (1u32 << num_bits) - 1;
     const RADIX_DIGITS: usize = 256;
     let thread_index = thread::threadIdx_x();
-    let lane = warp::lane_id();
+    let lane_capability = WarpLane::current();
+    let lane = lane_capability.index();
     let warp_index = thread_index >> 5;
     let tile_items = (THREADS * ITEMS) as u32;
     let num_items = input.len() as u32;
-    let shared_bytes = UNION_BYTES + RADIX_DIGITS * core::mem::size_of::<u64>();
     let warp_offsets_bytes = (THREADS / 32) * RADIX_DIGITS * core::mem::size_of::<u32>();
     let prefix_storage_offset = warp_offsets_bytes + RADIX_DIGITS * core::mem::size_of::<u32>();
     let prefix_grid_offset = prefix_storage_offset + 16;
-    let shared_memory = BlockSharedMemory::new(shared_bytes);
     let mut lookback = DeviceRegion::new(lookback);
     let mut counter = DeviceRegion::new(counter);
     let mut output = DeviceRegion::new(output);
@@ -3480,32 +3537,18 @@ pub fn radix_onesweep_keys_agent<
     let warp_base = warp_index * 32 * ITEMS as u32 + lane;
     let warp_group_base = tile_base as usize + warp_index as usize * 32usize * ITEMS;
     if full_block {
-        // Prove the complete warp-striped input band once.  The prior
-        // full-tile predicate guarantees this range for every warp; matching
-        // the checked `Option` keeps the proof in safe Rust and avoids 21
-        // duplicated slice bounds checks in the unrolled load.
         let Some(warp_group) = input.get(warp_group_base..warp_group_base + 32usize * ITEMS) else {
             return;
         };
+        let full_input = FullWarpStripedInput::<K, ITEMS>::new(warp_group, lane_capability);
         for_each_thread_item!(ITEMS, item, {
-            let source_index = lane as usize + item * 32usize;
-            keys[item].write(to_ordered(warp_group[source_index]));
+            keys[item].write(to_ordered(full_input.read(item)));
         });
     } else {
-        // Only the final tile is partial. A warp whose band starts beyond the
-        // input receives an empty slice; `get` is then exactly CUB's guarded
-        // warp-striped load and supplies the default key for invalid lanes.
-        let empty_input = &input[..0];
-        let warp_group = input.get(warp_group_base..).unwrap_or(empty_input);
+        let partial_input =
+            PartialWarpStripedInput::<K, ITEMS>::new(input, warp_group_base, lane_capability);
         for_each_thread_item!(ITEMS, item, {
-            let source_index = lane as usize + item * 32usize;
-            keys[item].write(
-                warp_group
-                    .get(source_index)
-                    .copied()
-                    .map(to_ordered)
-                    .unwrap_or(sentinel),
-            );
+            keys[item].write(partial_input.map_or(item, sentinel, to_ordered));
         });
     }
 
@@ -3729,6 +3772,7 @@ pub fn radix_onesweep_pairs_agent<
     buffers: (&[K], &[V], DisjointSlice<K>, DisjointSlice<V>),
     pass: (usize, usize, u32, u32),
     transforms: (DefaultKey, ToOrdered, FromOrdered, Digit),
+    shared_memory: BlockSharedMemory,
 ) where
     K: Copy,
     V: Copy,
@@ -3736,24 +3780,23 @@ pub fn radix_onesweep_pairs_agent<
     DefaultKey: Fn() -> B + Copy,
     ToOrdered: Fn(K) -> B + Copy,
     FromOrdered: Fn(B) -> K + Copy,
-    Digit: FnMut(B, u32, u32) -> u32 + Copy,
+    Digit: Fn(B, u32, u32) -> u32 + Copy,
 {
     let (lookback, counter, bins) = storage;
     let (input_keys, input_values, output_keys, output_values) = buffers;
     let (bin_offset, counter_offset, current_bit, num_bits) = pass;
-    let (default_key, to_ordered, from_ordered, mut digit) = transforms;
+    let (default_key, to_ordered, from_ordered, digit) = transforms;
     let digit_mask = (1u32 << num_bits) - 1;
     const RADIX_DIGITS: usize = 256;
     let thread_index = thread::threadIdx_x();
-    let lane = warp::lane_id();
+    let lane_capability = WarpLane::current();
+    let lane = lane_capability.index();
     let warp_index = thread_index >> 5;
     let tile_items = (THREADS * ITEMS) as u32;
     let num_items = input_keys.len() as u32;
-    let shared_bytes = UNION_BYTES + RADIX_DIGITS * core::mem::size_of::<u64>();
     let warp_offsets_bytes = (THREADS / 32) * RADIX_DIGITS * core::mem::size_of::<u32>();
     let prefix_storage_offset = warp_offsets_bytes + RADIX_DIGITS * core::mem::size_of::<u32>();
     let prefix_grid_offset = prefix_storage_offset + 16;
-    let shared_memory = BlockSharedMemory::new(shared_bytes);
     let mut lookback = DeviceRegion::new(lookback);
     let mut counter = DeviceRegion::new(counter);
     let mut output_keys = DeviceRegion::new(output_keys);
@@ -3785,20 +3828,15 @@ pub fn radix_onesweep_pairs_agent<
         else {
             return;
         };
+        let full_input = FullWarpStripedInput::<K, ITEMS>::new(warp_group, lane_capability);
         for_each_thread_item!(ITEMS, item, {
-            keys[item].write(to_ordered(warp_group[lane as usize + item * 32usize]));
+            keys[item].write(to_ordered(full_input.read(item)));
         });
     } else {
-        let empty_input = &input_keys[..0];
-        let warp_group = input_keys.get(warp_group_base..).unwrap_or(empty_input);
+        let partial_input =
+            PartialWarpStripedInput::<K, ITEMS>::new(input_keys, warp_group_base, lane_capability);
         for_each_thread_item!(ITEMS, item, {
-            keys[item].write(
-                warp_group
-                    .get(lane as usize + item * 32usize)
-                    .copied()
-                    .map(to_ordered)
-                    .unwrap_or(sentinel),
-            );
+            keys[item].write(partial_input.map_or(item, sentinel, to_ordered));
         });
     }
 
@@ -3891,21 +3929,26 @@ pub fn radix_onesweep_pairs_agent<
         }
 
         let mut values = [MaybeUninit::<V>::uninit(); ITEMS];
-        let empty_values = &input_values[..0];
-        let value_group = if full_block {
-            let Some(group) = input_values.get(warp_group_base..warp_group_base + 32usize * ITEMS)
+        if full_block {
+            let Some(warp_group) =
+                input_values.get(warp_group_base..warp_group_base + 32usize * ITEMS)
             else {
                 return;
             };
-            group
+            let full_values = FullWarpStripedInput::<V, ITEMS>::new(warp_group, lane_capability);
+            for_each_thread_item!(ITEMS, item, {
+                values[item].write(full_values.read(item));
+            });
         } else {
-            input_values.get(warp_group_base..).unwrap_or(empty_values)
-        };
-        for_each_thread_item!(ITEMS, item, {
-            if let Some(value) = value_group.get(lane as usize + item * 32usize).copied() {
-                values[item].write(value);
-            }
-        });
+            let partial_values = PartialWarpStripedInput::<V, ITEMS>::new(
+                input_values,
+                warp_group_base,
+                lane_capability,
+            );
+            for_each_thread_item!(ITEMS, item, {
+                partial_values.load_into(item, &mut values[item]);
+            });
+        }
         if full_block {
             for_each_thread_item!(ITEMS, item, {
                 let local_index = warp_base + item as u32 * 32;
@@ -4029,21 +4072,25 @@ pub fn radix_onesweep_pairs_agent<
     });
 
     let mut values = [MaybeUninit::<V>::uninit(); ITEMS];
-    let empty_values = &input_values[..0];
-    let value_group = if full_block {
-        let Some(group) = input_values.get(warp_group_base..warp_group_base + 32usize * ITEMS)
+    if full_block {
+        let Some(warp_group) = input_values.get(warp_group_base..warp_group_base + 32usize * ITEMS)
         else {
             return;
         };
-        group
+        let full_values = FullWarpStripedInput::<V, ITEMS>::new(warp_group, lane_capability);
+        for_each_thread_item!(ITEMS, item, {
+            values[item].write(full_values.read(item));
+        });
     } else {
-        input_values.get(warp_group_base..).unwrap_or(empty_values)
-    };
-    for_each_thread_item!(ITEMS, item, {
-        if let Some(value) = value_group.get(lane as usize + item * 32usize).copied() {
-            values[item].write(value);
-        }
-    });
+        let partial_values = PartialWarpStripedInput::<V, ITEMS>::new(
+            input_values,
+            warp_group_base,
+            lane_capability,
+        );
+        for_each_thread_item!(ITEMS, item, {
+            partial_values.load_into(item, &mut values[item]);
+        });
+    }
     thread::sync_threads();
     let mut values_shared = shared_memory
         .region::<MaybeUninit<V>>(0, UNION_BYTES / core::mem::size_of::<MaybeUninit<V>>());
@@ -4298,6 +4345,8 @@ mod tests {
             "radix_single_tile_scatter::<B, THREADS, ITEMS, false>",
             "BlockStripedBlockWrite",
             "MaybeUninit::<V>::uninit()",
+            "MaybeUninit::<u16>::uninit()",
+            "MaybeUninit::<u32>::uninit(); RAKING_SEGMENT",
             "warp::shuffle_sync(u32::MAX, input_values.len() as u32, 0)",
         ] {
             assert!(
@@ -4317,6 +4366,8 @@ mod tests {
             "sort_unstable",
             "device_merge_sort",
             "striped: bool",
+            "let mut cached_segment = [0u32; RAKING_SEGMENT]",
+            "let mut thread_prefixes = [0u16; ITEMS]",
             &["un", "safe"].concat(),
             &["*", "mut"].concat(),
         ] {
@@ -4408,6 +4459,70 @@ mod tests {
     }
 
     #[test]
+    fn policy800_raking_scan_materializes_each_pinned_warp_step() {
+        let source = include_str!("ordering_backend.rs");
+        let macro_begin = source
+            .find("macro_rules! for_each_warp_scan_offset")
+            .expect("the fixed warp-scan expansion must exist");
+        let macro_end = source[macro_begin..]
+            .find("macro_rules! for_each_radix_raking_word")
+            .map(|offset| macro_begin + offset)
+            .expect("the radix-raking expansion must follow the warp scan");
+        let expansion = &source[macro_begin..macro_end];
+        for offset in [
+            "one!(1u32)",
+            "one!(2u32)",
+            "one!(4u32)",
+            "one!(8u32)",
+            "one!(16u32)",
+        ] {
+            assert!(
+                expansion.contains(offset),
+                "missing pinned warp-scan offset: {offset}"
+            );
+        }
+
+        let scan_begin = source
+            .find("fn warp_exclusive_sum_i32")
+            .expect("the Policy800 warp scan must exist");
+        let scan_end = source[scan_begin..]
+            .find("fn radix_match_any_8")
+            .map(|offset| scan_begin + offset)
+            .expect("the match-any helper must follow the warp scan");
+        let scan = &source[scan_begin..scan_end];
+        assert!(scan.contains("for_each_warp_scan_offset!"));
+        assert!(!scan.contains("while offset < 32"));
+
+        let block_scan_begin = source
+            .find("fn block_exclusive_sum_raking_memoize_384_i32")
+            .expect("the Policy800 memoized block scan must exist");
+        let block_scan_end = source[block_scan_begin..]
+            .find("fn radix_lookback_global")
+            .map(|offset| block_scan_begin + offset)
+            .expect("the lookback helper must follow the block scan");
+        let block_scan = &source[block_scan_begin..block_scan_end];
+        assert!(
+            block_scan.contains("let mut cached = [MaybeUninit::<i32>::uninit(); SEGMENT_LENGTH]")
+        );
+        assert!(!block_scan.contains("let mut cached = [0i32; SEGMENT_LENGTH]"));
+
+        let u64_scan_begin = source
+            .find("fn warp_exclusive_sum_u64")
+            .expect("the bin-scan warp primitive must exist");
+        let u64_scan_end = source[u64_scan_begin..]
+            .find("pub fn radix_exclusive_sum_agent")
+            .map(|offset| u64_scan_begin + offset)
+            .expect("the bin-scan agent must follow its helpers");
+        let u64_scan = &source[u64_scan_begin..u64_scan_end];
+        assert!(u64_scan.contains("for_each_warp_scan_offset!"));
+        assert!(
+            u64_scan.contains("let mut cached = [MaybeUninit::<u64>::uninit(); SEGMENT_LENGTH]")
+        );
+        assert!(!u64_scan.contains("while offset < 32"));
+        assert!(!u64_scan.contains("let mut cached = [0u64; SEGMENT_LENGTH]"));
+    }
+
+    #[test]
     fn warp_specializations_read_the_lane_register_instead_of_rederiving_it() {
         let source = include_str!("ordering_backend.rs");
         let backend = source
@@ -4450,8 +4565,10 @@ mod tests {
             "let tile_items = num_items - tile_base",
             "let digit_mask = (1u32 << num_bits) - 1",
             "bins.get(bin_offset..bin_offset + RADIX_DIGITS)",
-            "input.get(warp_group_base..warp_group_base + 32usize * ITEMS)",
-            ".get(source_index)",
+            "FullWarpStripedInput::<K, ITEMS>::new",
+            "PartialWarpStripedInput::<K, ITEMS>::new",
+            ".map_or(item, sentinel, to_ordered)",
+            "partial_values.load_into(item, &mut values[item])",
         ] {
             assert!(
                 agent.contains(required),
@@ -4551,10 +4668,10 @@ mod tests {
         for required in [
             "const THREADS: usize",
             "const MAX_PASSES: usize",
-            "let num_passes = (end_bit - begin_bit).div_ceil(8) as usize",
+            "let num_passes = (bit_range.end - bit_range.start).div_ceil(8) as usize",
             "let index = tile_offset + thread_index + item * THREADS",
             "if index < keys.len()",
-            "while current_bit < end_bit",
+            "let current_bit = bit_range.start + pass as u32 * 8",
             "let digit_mask = (1u32 << num_bits) - 1",
             "for_each_thread_item!(ITEMS, item",
         ] {
@@ -4564,13 +4681,16 @@ mod tests {
             );
         }
         assert_eq!(
-            histogram.matches("while pass < num_passes").count(),
-            2,
-            "initialization and global accumulation traverse runtime pass state"
+            histogram
+                .matches("for_each_histogram_pass!(MAX_PASSES, num_passes, pass")
+                .count(),
+            3,
+            "initialization, accumulation, and publication must preserve CUB's fully-unrolled pass traversal"
         );
         assert!(
-            !histogram.contains("for_each_radix_pass"),
-            "the pinned histogram pass traversal is runtime agent state, not TMP expansion"
+            !histogram.contains("while pass < num_passes")
+                && !histogram.contains("while current_bit < end_bit"),
+            "CUB marks every histogram pass loop fully unrolled; a rolled loop would hide a performance mismatch"
         );
         assert!(
             !histogram.contains("blockDim_x"),

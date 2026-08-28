@@ -175,10 +175,11 @@ impl ImplementationAudit {
 
     fn observe_radix_name(&mut self, name: &str) {
         self.saw_radix_init |= name == "device_radix_sort_init";
-        self.saw_radix_histogram |= name == "device_radix_sort_histogram";
+        self.saw_radix_histogram |=
+            name == "device_radix_sort_histogram_4" || name == "device_radix_sort_histogram_8";
         self.saw_radix_exclusive_sum |= name == "device_radix_sort_exclusive_sum";
-        self.saw_radix_onesweep |=
-            name == "device_radix_sort_onesweep_keys" || name == "device_radix_sort_onesweep_pairs";
+        self.saw_radix_onesweep |= name.starts_with("device_radix_sort_onesweep_keys_")
+            || name.starts_with("device_radix_sort_onesweep_pairs_");
     }
 
     fn reject(&mut self, tokens: impl quote::ToTokens, message: &str) {
@@ -215,7 +216,9 @@ fn is_trusted_cub_lowering(path: &Path) -> bool {
                 && private == "__private"
                 && matches!(
                     operation.as_str(),
-                    "__device_kernels" | "__device_transform_repeat_in_place"
+                    "__device_kernels"
+                        | "__device_transform_repeat_in_place"
+                        | "static_block_shared_memory"
                 )
     )
 }

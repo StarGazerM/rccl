@@ -487,7 +487,156 @@ fn primitive_radix(key_type: &syn::Type) -> syn::Result<PrimitiveRadix> {
     Ok(PrimitiveRadix { bits, kind })
 }
 
+fn radix_onesweep_keys_kernel(shared_bytes: usize) -> proc_macro2::TokenStream {
+    let kernel = format_ident!("device_radix_sort_onesweep_keys_{shared_bytes}");
+    let storage = format_ident!("__RCCL_RADIX_ONESWEEP_KEYS_{shared_bytes}");
+    let union_bytes = shared_bytes - 256 * core::mem::size_of::<u64>();
+    quote! {
+        #[kernel]
+        #[launch_bounds(384)]
+        #[launch_contract(domain = 1, coordinates = u32, block = (384, 1, 1))]
+        pub fn #kernel<
+            K,
+            B,
+            DefaultKey,
+            ToOrdered,
+            FromOrdered,
+            Digit,
+            const ITEMS: usize,
+        >(
+            lookback: DisjointSlice<i32>,
+            counter: DisjointSlice<i32>,
+            bins: &[u64],
+            input: &[K],
+            output: DisjointSlice<K>,
+            bin_offset: Uniform<usize>,
+            counter_offset: Uniform<usize>,
+            current_bit: Uniform<u32>,
+            num_bits: Uniform<u32>,
+            default_key: DefaultKey,
+            to_ordered: ToOrdered,
+            from_ordered: FromOrdered,
+            digit: Digit,
+        ) where
+            K: Copy,
+            B: Copy,
+            DefaultKey: Fn() -> B + Copy,
+            ToOrdered: Fn(K) -> B + Copy,
+            FromOrdered: Fn(B) -> K + Copy,
+            Digit: Fn(B, u32, u32) -> u32 + Copy,
+        {
+            let shared_memory = ::rccl_cub::__private::static_block_shared_memory!(
+                #storage,
+                #shared_bytes,
+                16usize
+            );
+            ::rccl_cub::__private::radix_onesweep_keys_agent::<
+                K,
+                B,
+                DefaultKey,
+                ToOrdered,
+                FromOrdered,
+                Digit,
+                384,
+                ITEMS,
+                #union_bytes,
+            >(
+                (lookback, counter, bins),
+                (input, output),
+                (
+                    bin_offset.get(),
+                    counter_offset.get(),
+                    current_bit.get(),
+                    num_bits.get(),
+                ),
+                (default_key, to_ordered, from_ordered, digit),
+                shared_memory,
+            );
+        }
+    }
+}
+
+fn radix_onesweep_pairs_kernel(shared_bytes: usize) -> proc_macro2::TokenStream {
+    let kernel = format_ident!("device_radix_sort_onesweep_pairs_{shared_bytes}");
+    let storage = format_ident!("__RCCL_RADIX_ONESWEEP_PAIRS_{shared_bytes}");
+    let union_bytes = shared_bytes - 256 * core::mem::size_of::<u64>();
+    quote! {
+        #[kernel]
+        #[launch_bounds(384)]
+        #[launch_contract(domain = 1, coordinates = u32, block = (384, 1, 1))]
+        pub fn #kernel<
+            K,
+            V,
+            B,
+            DefaultKey,
+            ToOrdered,
+            FromOrdered,
+            Digit,
+            const ITEMS: usize,
+        >(
+            lookback: DisjointSlice<i32>,
+            counter: DisjointSlice<i32>,
+            bins: &[u64],
+            input_keys: &[K],
+            input_values: &[V],
+            output_keys: DisjointSlice<K>,
+            output_values: DisjointSlice<V>,
+            bin_offset: Uniform<usize>,
+            counter_offset: Uniform<usize>,
+            current_bit: Uniform<u32>,
+            num_bits: Uniform<u32>,
+            default_key: DefaultKey,
+            to_ordered: ToOrdered,
+            from_ordered: FromOrdered,
+            digit: Digit,
+        ) where
+            K: Copy,
+            V: Copy,
+            B: Copy,
+            DefaultKey: Fn() -> B + Copy,
+            ToOrdered: Fn(K) -> B + Copy,
+            FromOrdered: Fn(B) -> K + Copy,
+            Digit: Fn(B, u32, u32) -> u32 + Copy,
+        {
+            let shared_memory = ::rccl_cub::__private::static_block_shared_memory!(
+                #storage,
+                #shared_bytes,
+                16usize
+            );
+            ::rccl_cub::__private::radix_onesweep_pairs_agent::<
+                K,
+                V,
+                B,
+                DefaultKey,
+                ToOrdered,
+                FromOrdered,
+                Digit,
+                384,
+                ITEMS,
+                #union_bytes,
+            >(
+                (lookback, counter, bins),
+                (input_keys, input_values, output_keys, output_values),
+                (
+                    bin_offset.get(),
+                    counter_offset.get(),
+                    current_bit.get(),
+                    num_bits.get(),
+                ),
+                (default_key, to_ordered, from_ordered, digit),
+                shared_memory,
+            );
+        }
+    }
+}
+
 fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenStream> {
+    let radix_onesweep_keys = [34_304usize, 32_768usize]
+        .into_iter()
+        .map(radix_onesweep_keys_kernel);
+    let radix_onesweep_pairs = [28_160usize, 26_624usize, 32_768usize]
+        .into_iter()
+        .map(radix_onesweep_pairs_kernel);
     audit::generated_rust(quote! {
         #[doc(hidden)]
         use ::rccl_cub::__private::cuda_core;
@@ -1192,13 +1341,7 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
 
             #[kernel(launch_context = launch_context)]
             #[launch_bounds(256, 1)]
-            #[launch_contract(
-                domain = 1,
-                coordinates = u32,
-                block = (256, 1, 1),
-                dynamic_shared_range = (33856, 33856),
-                dynamic_shared_alignment = 32,
-            )]
+            #[launch_contract(domain = 1, coordinates = u32, block = (256, 1, 1))]
             pub fn device_radix_sort_single_tile_keys<
                 K,
                 B,
@@ -1207,7 +1350,6 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                 FromOrdered,
                 RankDigit,
                 const ITEMS: usize,
-                const SHARED_BYTES: usize,
                 const DESCENDING: bool,
             >(
                 input: &[K],
@@ -1226,6 +1368,11 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                 FromOrdered: Fn(B) -> K + Copy,
                 RankDigit: Fn(B, u32, u32) -> u32 + Copy,
             {
+                let shared_memory = ::rccl_cub::__private::static_block_shared_memory!(
+                    __RCCL_RADIX_SINGLE_TILE_KEYS,
+                    33_856usize,
+                    32usize
+                );
                 ::rccl_cub::__private::radix_single_tile_keys_agent::<
                     K,
                     B,
@@ -1235,7 +1382,6 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                     RankDigit,
                     256,
                     ITEMS,
-                    SHARED_BYTES,
                     DESCENDING,
                 >(
                     input,
@@ -1243,18 +1389,13 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                     begin_bit.get()..end_bit.get(),
                     (default_ordered, to_ordered, from_ordered, rank_digit),
                     launch_context,
+                    shared_memory,
                 );
             }
 
             #[kernel(launch_context = launch_context)]
             #[launch_bounds(256, 1)]
-            #[launch_contract(
-                domain = 1,
-                coordinates = u32,
-                block = (256, 1, 1),
-                dynamic_shared_range = (33856, 33856),
-                dynamic_shared_alignment = 32,
-            )]
+            #[launch_contract(domain = 1, coordinates = u32, block = (256, 1, 1))]
             pub fn device_radix_sort_single_tile_pairs<
                 K,
                 V,
@@ -1264,7 +1405,6 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                 FromOrdered,
                 RankDigit,
                 const ITEMS: usize,
-                const SHARED_BYTES: usize,
                 const DESCENDING: bool,
             >(
                 input_keys: &[K],
@@ -1286,6 +1426,11 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                 FromOrdered: Fn(B) -> K + Copy,
                 RankDigit: Fn(B, u32, u32) -> u32 + Copy,
             {
+                let shared_memory = ::rccl_cub::__private::static_block_shared_memory!(
+                    __RCCL_RADIX_SINGLE_TILE_PAIRS,
+                    33_856usize,
+                    32usize
+                );
                 ::rccl_cub::__private::radix_single_tile_pairs_agent::<
                     K,
                     V,
@@ -1296,7 +1441,6 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                     RankDigit,
                     256,
                     ITEMS,
-                    SHARED_BYTES,
                     DESCENDING,
                 >(
                     (input_keys, input_values),
@@ -1304,26 +1448,20 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                     begin_bit.get()..end_bit.get(),
                     (default_ordered, to_ordered, from_ordered, rank_digit),
                     launch_context,
+                    shared_memory,
                 );
             }
 
             #[kernel]
             #[launch_bounds(128)]
-            #[launch_contract(
-                domain = 1,
-                coordinates = u32,
-                block = (128, 1, 1),
-                dynamic_shared_range = (4096, 8192),
-                dynamic_shared_alignment = 16,
-            )]
-            pub fn device_radix_sort_histogram<
+            #[launch_contract(domain = 1, coordinates = u32, block = (128, 1, 1))]
+            pub fn device_radix_sort_histogram_4<
                 K,
                 B,
                 DefaultKey,
                 ToOrdered,
                 Digit,
                 const ITEMS: usize,
-                const MAX_PASSES: usize,
             >(
                 keys: &[K],
                 begin_bit: u32,
@@ -1339,6 +1477,11 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                 ToOrdered: Fn(K) -> B + Copy,
                 Digit: Fn(B, u32, u32) -> u32 + Copy,
             {
+                let shared_memory = ::rccl_cub::__private::static_block_shared_memory!(
+                    __RCCL_RADIX_HISTOGRAM_4,
+                    4_096usize,
+                    16usize
+                );
                 ::rccl_cub::__private::radix_histogram_agent::<
                     K,
                     B,
@@ -1347,156 +1490,89 @@ fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenSt
                     Digit,
                     128,
                     ITEMS,
-                    MAX_PASSES,
-                >(keys, begin_bit, end_bit, default_key, to_ordered, digit, bins);
+                    4usize,
+                >(
+                    keys,
+                    begin_bit..end_bit,
+                    default_key,
+                    to_ordered,
+                    digit,
+                    bins,
+                    shared_memory,
+                );
+            }
+
+            #[kernel]
+            #[launch_bounds(128)]
+            #[launch_contract(domain = 1, coordinates = u32, block = (128, 1, 1))]
+            pub fn device_radix_sort_histogram_8<
+                K,
+                B,
+                DefaultKey,
+                ToOrdered,
+                Digit,
+                const ITEMS: usize,
+            >(
+                keys: &[K],
+                begin_bit: u32,
+                end_bit: u32,
+                default_key: DefaultKey,
+                to_ordered: ToOrdered,
+                digit: Digit,
+                bins: DisjointSlice<u64>,
+            ) where
+                K: Copy,
+                B: Copy,
+                DefaultKey: Fn() -> B + Copy,
+                ToOrdered: Fn(K) -> B + Copy,
+                Digit: Fn(B, u32, u32) -> u32 + Copy,
+            {
+                let shared_memory = ::rccl_cub::__private::static_block_shared_memory!(
+                    __RCCL_RADIX_HISTOGRAM_8,
+                    8_192usize,
+                    16usize
+                );
+                ::rccl_cub::__private::radix_histogram_agent::<
+                    K,
+                    B,
+                    DefaultKey,
+                    ToOrdered,
+                    Digit,
+                    128,
+                    ITEMS,
+                    8usize,
+                >(
+                    keys,
+                    begin_bit..end_bit,
+                    default_key,
+                    to_ordered,
+                    digit,
+                    bins,
+                    shared_memory,
+                );
             }
 
             #[kernel(launch_context = launch_context)]
             #[launch_bounds(256)]
-            #[launch_contract(
-                domain = 1,
-                coordinates = u32,
-                block = (256, 1, 1),
-                dynamic_shared_range = (2336, 2336),
-                dynamic_shared_alignment = 16,
-            )]
+            #[launch_contract(domain = 1, coordinates = u32, block = (256, 1, 1))]
             pub fn device_radix_sort_exclusive_sum<const PASSES: usize>(
                 bins: DisjointSlice<u64>,
             ) {
+                let shared_memory = ::rccl_cub::__private::static_block_shared_memory!(
+                    __RCCL_RADIX_EXCLUSIVE_SUM,
+                    2_336usize,
+                    16usize
+                );
                 let bin_thread = thread::index_1d_u32(launch_context);
-                ::rccl_cub::__private::radix_exclusive_sum_agent::<PASSES>(bins, bin_thread);
-            }
-
-            #[kernel]
-            #[launch_bounds(384)]
-            #[launch_contract(
-                domain = 1,
-                coordinates = u32,
-                block = (384, 1, 1),
-                dynamic_shared_range = (0, 101376),
-                dynamic_shared_alignment = 16,
-            )]
-            pub fn device_radix_sort_onesweep_keys<
-                K,
-                B,
-                DefaultKey,
-                ToOrdered,
-                FromOrdered,
-                Digit,
-                const ITEMS: usize,
-                const UNION_BYTES: usize,
-            >(
-                lookback: DisjointSlice<i32>,
-                counter: DisjointSlice<i32>,
-                bins: &[u64],
-                input: &[K],
-                output: DisjointSlice<K>,
-                bin_offset: Uniform<usize>,
-                counter_offset: Uniform<usize>,
-                current_bit: Uniform<u32>,
-                num_bits: Uniform<u32>,
-                default_key: DefaultKey,
-                to_ordered: ToOrdered,
-                from_ordered: FromOrdered,
-                mut digit: Digit,
-            ) where
-                K: Copy,
-                B: Copy,
-                DefaultKey: Fn() -> B + Copy,
-                ToOrdered: Fn(K) -> B + Copy,
-                FromOrdered: Fn(B) -> K + Copy,
-                Digit: FnMut(B, u32, u32) -> u32 + Copy,
-            {
-                ::rccl_cub::__private::radix_onesweep_keys_agent::<
-                    K,
-                    B,
-                    DefaultKey,
-                    ToOrdered,
-                    FromOrdered,
-                    Digit,
-                    384,
-                    ITEMS,
-                    UNION_BYTES,
-                >(
-                    (lookback, counter, bins),
-                    (input, output),
-                    (
-                        bin_offset.get(),
-                        counter_offset.get(),
-                        current_bit.get(),
-                        num_bits.get(),
-                    ),
-                    (default_key, to_ordered, from_ordered, digit),
+                ::rccl_cub::__private::radix_exclusive_sum_agent::<PASSES>(
+                    bins,
+                    bin_thread,
+                    shared_memory,
                 );
             }
 
-            #[kernel]
-            #[launch_bounds(384)]
-            #[launch_contract(
-                domain = 1,
-                coordinates = u32,
-                block = (384, 1, 1),
-                dynamic_shared_range = (0, 101376),
-                dynamic_shared_alignment = 16,
-            )]
-            pub fn device_radix_sort_onesweep_pairs<
-                K,
-                V,
-                B,
-                DefaultKey,
-                ToOrdered,
-                FromOrdered,
-                Digit,
-                const ITEMS: usize,
-                const UNION_BYTES: usize,
-            >(
-                lookback: DisjointSlice<i32>,
-                counter: DisjointSlice<i32>,
-                bins: &[u64],
-                input_keys: &[K],
-                input_values: &[V],
-                output_keys: DisjointSlice<K>,
-                output_values: DisjointSlice<V>,
-                bin_offset: Uniform<usize>,
-                counter_offset: Uniform<usize>,
-                current_bit: Uniform<u32>,
-                num_bits: Uniform<u32>,
-                default_key: DefaultKey,
-                to_ordered: ToOrdered,
-                from_ordered: FromOrdered,
-                mut digit: Digit,
-            ) where
-                K: Copy,
-                V: Copy,
-                B: Copy,
-                DefaultKey: Fn() -> B + Copy,
-                ToOrdered: Fn(K) -> B + Copy,
-                FromOrdered: Fn(B) -> K + Copy,
-                Digit: FnMut(B, u32, u32) -> u32 + Copy,
-            {
-                ::rccl_cub::__private::radix_onesweep_pairs_agent::<
-                    K,
-                    V,
-                    B,
-                    DefaultKey,
-                    ToOrdered,
-                    FromOrdered,
-                    Digit,
-                    384,
-                    ITEMS,
-                    UNION_BYTES,
-                >(
-                    (lookback, counter, bins),
-                    (input_keys, input_values, output_keys, output_values),
-                    (
-                        bin_offset.get(),
-                        counter_offset.get(),
-                        current_bit.get(),
-                        num_bits.get(),
-                    ),
-                    (default_key, to_ordered, from_ordered, digit),
-                );
-            }
+            #(#radix_onesweep_keys)*
+            #(#radix_onesweep_pairs)*
 
             #[kernel(launch_context = launch_context)]
             #[launch_bounds(256)]
@@ -3152,17 +3228,26 @@ fn expand_device_radix_sort_keys_buffer_order(
     let lookback = call.lookback;
     let counters = call.counters;
     let max_passes = primitive.bits.div_ceil(8) as usize;
+    let histogram_kernel = format_ident!("device_radix_sort_histogram_{max_passes}");
+    let prepare_histogram = format_ident!("prepare_device_radix_sort_histogram_{max_passes}_for");
     let key_bits = primitive.bits;
     let histogram_items = 16usize;
     let bit_size = (primitive.bits / 8) as usize;
     let (single_threads, single_items) = reg_bound_policy(256, 19, bit_size);
     let single_tile_items = single_threads * single_items;
-    let single_shared_bytes = 33_856usize;
     let (onesweep_threads, onesweep_items) = reg_bound_policy(384, 21, bit_size);
     let tile_items = onesweep_threads * onesweep_items;
-    let histogram_shared_bytes = max_passes * 256usize * core::mem::size_of::<u32>();
     let union_bytes = tile_items * bit_size;
     let shared_bytes = union_bytes + 256usize * core::mem::size_of::<u64>();
+    if ![34_304usize, 32_768usize].contains(&shared_bytes) {
+        return Err(syn::Error::new_spanned(
+            &key_type,
+            "the selected radix key policy has no exact generated static shared capability",
+        ));
+    }
+    let onesweep_kernel = format_ident!("device_radix_sort_onesweep_keys_{shared_bytes}");
+    let prepare_onesweep =
+        format_ident!("prepare_device_radix_sort_onesweep_keys_{shared_bytes}_for");
     let portion_size = ((1usize << 28) - 1) / tile_items * tile_items;
     audit::generated_algorithm_expression(
         audit::Algorithm::RadixSort,
@@ -3211,7 +3296,7 @@ fn expand_device_radix_sort_keys_buffer_order(
                         ::rccl_cub::__private::cuda_core::LaunchConfig1D::new(
                             1,
                             #single_threads as u32,
-                            #single_shared_bytes as u32,
+                            0,
                         );
                     let __rccl_single = __rccl_execution
                         .module()
@@ -3223,7 +3308,6 @@ fn expand_device_radix_sort_keys_buffer_order(
                             _,
                             _,
                             #single_items,
-                            #single_shared_bytes,
                             #descending,
                         >(
                             &__rccl_single_key_witness,
@@ -3248,7 +3332,6 @@ fn expand_device_radix_sort_keys_buffer_order(
                                 _,
                                 _,
                                 #single_items,
-                                #single_shared_bytes,
                                 #descending,
                             >(
                                 __rccl_execution.stream(),
@@ -3328,18 +3411,17 @@ fn expand_device_radix_sort_keys_buffer_order(
                     ::rccl_cub::__private::cuda_core::LaunchConfig1D::new(
                         1,
                         128,
-                        #histogram_shared_bytes as u32,
+                        0,
                     );
                 let __rccl_histogram_probe = __rccl_execution
                     .module()
-                    .prepare_device_radix_sort_histogram_for::<
+                    .#prepare_histogram::<
                         #key_type,
                         #bit_type,
                         _,
                         _,
                         _,
                         #histogram_items,
-                        #max_passes,
                     >(
                         &__rccl_key_witness,
                         &__rccl_bit_witness,
@@ -3351,7 +3433,7 @@ fn expand_device_radix_sort_keys_buffer_order(
                     .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
                 let __rccl_histogram_blocks_per_sm = __rccl_histogram_probe
                     .function()
-                    .max_active_blocks_per_multiprocessor(128, #histogram_shared_bytes as u32)
+                    .max_active_blocks_per_multiprocessor(128, 0)
                     .map_err(::rccl_cub::DeviceAlgorithmError::Driver)?;
                 let __rccl_multiprocessors = __rccl_execution
                     .stream()
@@ -3362,18 +3444,17 @@ fn expand_device_radix_sort_keys_buffer_order(
                     ::rccl_cub::__private::cuda_core::LaunchConfig1D::new(
                         __rccl_histogram_blocks_per_sm * __rccl_multiprocessors,
                         128,
-                        #histogram_shared_bytes as u32,
+                        0,
                     );
                 let __rccl_histogram = __rccl_execution
                     .module()
-                    .prepare_device_radix_sort_histogram_for::<
+                    .#prepare_histogram::<
                         #key_type,
                         #bit_type,
                         _,
                         _,
                         _,
                         #histogram_items,
-                        #max_passes,
                     >(
                         &__rccl_key_witness,
                         &__rccl_bit_witness,
@@ -3385,14 +3466,13 @@ fn expand_device_radix_sort_keys_buffer_order(
                     .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
                 __rccl_execution
                     .module()
-                    .device_radix_sort_histogram::<
+                    .#histogram_kernel::<
                         #key_type,
                         #bit_type,
                         _,
                         _,
                         _,
                         #histogram_items,
-                        #max_passes,
                     >(
                         __rccl_execution.stream(),
                         &__rccl_histogram,
@@ -3410,7 +3490,7 @@ fn expand_device_radix_sort_keys_buffer_order(
                     ::rccl_cub::__private::cuda_core::LaunchConfig1D::new(
                         __rccl_passes as u32,
                         256,
-                        2336,
+                        0,
                     );
                 let __rccl_scan = __rccl_execution
                     .module()
@@ -3429,11 +3509,11 @@ fn expand_device_radix_sort_keys_buffer_order(
                     ::rccl_cub::__private::cuda_core::LaunchConfig1D::new(
                         __rccl_blocks as u32,
                         #onesweep_threads as u32,
-                        #shared_bytes as u32,
+                        0,
                     );
                 let __rccl_onesweep = __rccl_execution
                     .module()
-                    .prepare_device_radix_sort_onesweep_keys_for::<
+                    .#prepare_onesweep::<
                         #key_type,
                         #bit_type,
                         _,
@@ -3441,7 +3521,6 @@ fn expand_device_radix_sort_keys_buffer_order(
                         _,
                         _,
                         #onesweep_items,
-                        #union_bytes,
                     >(
                         &__rccl_key_witness,
                         &__rccl_bit_witness,
@@ -3468,7 +3547,7 @@ fn expand_device_radix_sort_keys_buffer_order(
                             __rccl_buffers.current_and_alternate_mut();
                         __rccl_execution
                             .module()
-                            .device_radix_sort_onesweep_keys::<
+                            .#onesweep_kernel::<
                                 #key_type,
                                 #bit_type,
                                 _,
@@ -3476,7 +3555,6 @@ fn expand_device_radix_sort_keys_buffer_order(
                                 _,
                                 _,
                                 #onesweep_items,
-                                #union_bytes,
                             >(
                                 __rccl_execution.stream(),
                                 &__rccl_onesweep,
@@ -3658,18 +3736,27 @@ fn expand_device_radix_sort_pairs_buffer_order(
     let lookback = call.lookback;
     let counters = call.counters;
     let max_passes = primitive.bits.div_ceil(8) as usize;
+    let histogram_kernel = format_ident!("device_radix_sort_histogram_{max_passes}");
+    let prepare_histogram = format_ident!("prepare_device_radix_sort_histogram_{max_passes}_for");
     let key_bits = primitive.bits;
     let histogram_items = 16usize;
     let nominal_items = if key_size == 4 { 17 } else { 21 };
     let (single_threads, single_items) = reg_bound_policy(256, 19, key_size.max(value_size));
     let single_tile_items = single_threads * single_items;
-    let single_shared_bytes = 33_856usize;
     let (onesweep_threads, onesweep_items) =
         reg_bound_policy(384, nominal_items, key_size.max(value_size));
     let tile_items = onesweep_threads * onesweep_items;
-    let histogram_shared_bytes = max_passes * 256usize * core::mem::size_of::<u32>();
     let union_bytes = tile_items * key_size.max(value_size);
     let shared_bytes = union_bytes + 256usize * core::mem::size_of::<u64>();
+    if ![28_160usize, 26_624usize, 32_768usize].contains(&shared_bytes) {
+        return Err(syn::Error::new_spanned(
+            &key_type,
+            "the selected radix pair policy has no exact generated static shared capability",
+        ));
+    }
+    let onesweep_kernel = format_ident!("device_radix_sort_onesweep_pairs_{shared_bytes}");
+    let prepare_onesweep =
+        format_ident!("prepare_device_radix_sort_onesweep_pairs_{shared_bytes}_for");
     let portion_size = ((1usize << 28) - 1) / tile_items * tile_items;
     audit::generated_algorithm_expression(
         audit::Algorithm::RadixSort,
@@ -3720,7 +3807,7 @@ fn expand_device_radix_sort_pairs_buffer_order(
                         ::rccl_cub::__private::cuda_core::LaunchConfig1D::new(
                             1,
                             #single_threads as u32,
-                            #single_shared_bytes as u32,
+                            0,
                         );
                     let __rccl_single = __rccl_execution
                         .module()
@@ -3733,7 +3820,6 @@ fn expand_device_radix_sort_pairs_buffer_order(
                             _,
                             _,
                             #single_items,
-                            #single_shared_bytes,
                             #descending,
                         >(
                             &__rccl_single_key_witness,
@@ -3762,7 +3848,6 @@ fn expand_device_radix_sort_pairs_buffer_order(
                                 _,
                                 _,
                                 #single_items,
-                                #single_shared_bytes,
                                 #descending,
                             >(
                                 __rccl_execution.stream(),
@@ -3845,18 +3930,17 @@ fn expand_device_radix_sort_pairs_buffer_order(
                     ::rccl_cub::__private::cuda_core::LaunchConfig1D::new(
                         1,
                         128,
-                        #histogram_shared_bytes as u32,
+                        0,
                     );
                 let __rccl_histogram_probe = __rccl_execution
                     .module()
-                    .prepare_device_radix_sort_histogram_for::<
+                    .#prepare_histogram::<
                         #key_type,
                         #bit_type,
                         _,
                         _,
                         _,
                         #histogram_items,
-                        #max_passes,
                     >(
                         &__rccl_key_witness,
                         &__rccl_bit_witness,
@@ -3868,7 +3952,7 @@ fn expand_device_radix_sort_pairs_buffer_order(
                     .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
                 let __rccl_histogram_blocks_per_sm = __rccl_histogram_probe
                     .function()
-                    .max_active_blocks_per_multiprocessor(128, #histogram_shared_bytes as u32)
+                    .max_active_blocks_per_multiprocessor(128, 0)
                     .map_err(::rccl_cub::DeviceAlgorithmError::Driver)?;
                 let __rccl_multiprocessors = __rccl_execution
                     .stream()
@@ -3879,18 +3963,17 @@ fn expand_device_radix_sort_pairs_buffer_order(
                     ::rccl_cub::__private::cuda_core::LaunchConfig1D::new(
                         __rccl_histogram_blocks_per_sm * __rccl_multiprocessors,
                         128,
-                        #histogram_shared_bytes as u32,
+                        0,
                     );
                 let __rccl_histogram = __rccl_execution
                     .module()
-                    .prepare_device_radix_sort_histogram_for::<
+                    .#prepare_histogram::<
                         #key_type,
                         #bit_type,
                         _,
                         _,
                         _,
                         #histogram_items,
-                        #max_passes,
                     >(
                         &__rccl_key_witness,
                         &__rccl_bit_witness,
@@ -3902,14 +3985,13 @@ fn expand_device_radix_sort_pairs_buffer_order(
                     .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
                 __rccl_execution
                     .module()
-                    .device_radix_sort_histogram::<
+                    .#histogram_kernel::<
                         #key_type,
                         #bit_type,
                         _,
                         _,
                         _,
                         #histogram_items,
-                        #max_passes,
                     >(
                         __rccl_execution.stream(),
                         &__rccl_histogram,
@@ -3927,7 +4009,7 @@ fn expand_device_radix_sort_pairs_buffer_order(
                     ::rccl_cub::__private::cuda_core::LaunchConfig1D::new(
                         __rccl_passes as u32,
                         256,
-                        2336,
+                        0,
                     );
                 let __rccl_scan = __rccl_execution
                     .module()
@@ -3946,11 +4028,11 @@ fn expand_device_radix_sort_pairs_buffer_order(
                     ::rccl_cub::__private::cuda_core::LaunchConfig1D::new(
                         __rccl_blocks as u32,
                         #onesweep_threads as u32,
-                        #shared_bytes as u32,
+                        0,
                     );
                 let __rccl_onesweep = __rccl_execution
                     .module()
-                    .prepare_device_radix_sort_onesweep_pairs_for::<
+                    .#prepare_onesweep::<
                         #key_type,
                         #value_type,
                         #bit_type,
@@ -3959,7 +4041,6 @@ fn expand_device_radix_sort_pairs_buffer_order(
                         _,
                         _,
                         #onesweep_items,
-                        #union_bytes,
                     >(
                         &__rccl_key_witness,
                         &__rccl_value_witness,
@@ -3989,7 +4070,7 @@ fn expand_device_radix_sort_pairs_buffer_order(
                         let (__rccl_output_keys, __rccl_output_values) = __rccl_output;
                         __rccl_execution
                             .module()
-                            .device_radix_sort_onesweep_pairs::<
+                            .#onesweep_kernel::<
                                 #key_type,
                                 #value_type,
                                 #bit_type,
@@ -3998,7 +4079,6 @@ fn expand_device_radix_sort_pairs_buffer_order(
                                 _,
                                 _,
                                 #onesweep_items,
-                                #union_bytes,
                             >(
                                 __rccl_execution.stream(),
                                 &__rccl_onesweep,
@@ -4478,9 +4558,14 @@ mod tests {
             "both single-tile entries must retain CUB's one-block launch bound"
         );
         assert_eq!(
-            kernels.matches("dynamic_shared_alignment = 32").count(),
+            kernels.matches("33_856usize , 32usize").count(),
             2,
-            "both single-tile entries must retain BlockScan's 32-byte alignment"
+            "both single-tile entries must materialize BlockScan's exact static extent and alignment"
+        );
+        assert_eq!(
+            kernels.matches("static_block_shared_memory !").count(),
+            10,
+            "every single-tile, histogram, exclusive-sum, and exact one-sweep specialization must materialize CUB's static shared union through the audited Rust capability"
         );
         assert!(!kernels.contains("sentinel : Uniform < B >"));
 
@@ -4526,22 +4611,24 @@ mod tests {
         assert!(operation.contains("prepare_device_radix_sort_onesweep_keys"));
         assert!(operation.contains("prepare_device_radix_sort_single_tile_keys"));
         assert!(operation.contains(
-            "prepare_device_radix_sort_histogram_for :: < i32 , u32 , _ , _ , _ , 16usize , 4usize , >"
+            "prepare_device_radix_sort_histogram_4_for :: < i32 , u32 , _ , _ , _ , 16usize , >"
         ));
+        assert!(
+            operation
+                .contains("device_radix_sort_histogram_4 :: < i32 , u32 , _ , _ , _ , 16usize , >")
+        );
         assert!(operation.contains(
-            "device_radix_sort_histogram :: < i32 , u32 , _ , _ , _ , 16usize , 4usize , >"
-        ));
-        assert!(operation.contains(
-            "prepare_device_radix_sort_onesweep_keys_for :: < i32 , u32 , _ , _ , _ , _ , 21usize"
+            "prepare_device_radix_sort_onesweep_keys_34304_for :: < i32 , u32 , _ , _ , _ , _ , 21usize"
         ));
         assert!(operation.contains("let __rccl_single_rank_digit ="));
         assert!(!operation.contains("let __rccl_rank_digit ="));
         assert!(operation.contains("radix_rank_digit_u32"));
         assert!(!operation.contains("| __rccl_ordered"));
         assert!(operation.contains("LaunchConfig1D :: new (__rccl_passes as u32 , 256 , 0"));
-        assert!(operation.contains("128 , 4096usize as u32"));
+        assert!(operation.contains("max_active_blocks_per_multiprocessor (128 , 0"));
         assert!(
-            !operation.contains("device_radix_sort_histogram :: < i32 , u32 , _ , _ , 21usize")
+            !operation
+                .contains("device_radix_sort_histogram_4 :: < i32 , u32 , _ , _ , _ , 21usize")
         );
         assert_eq!(operation.matches("zero_radix_lookback").count(), 1);
         assert!(operation.contains("core :: mem :: swap (__rccl_keys , __rccl_scratch_keys)"));
@@ -4556,7 +4643,7 @@ mod tests {
         );
         assert_eq!(
             operation
-                .matches("device_radix_sort_onesweep_keys ::")
+                .matches("device_radix_sort_onesweep_keys_34304 ::")
                 .count(),
             1,
             "one affine split borrow must replace duplicated selector branches"
@@ -4597,7 +4684,7 @@ mod tests {
         assert!(operation.contains("current_and_alternate_mut"));
         assert_eq!(
             operation
-                .matches("device_radix_sort_onesweep_keys ::")
+                .matches("device_radix_sort_onesweep_keys_34304 ::")
                 .count(),
             1
         );
@@ -4664,18 +4751,19 @@ mod tests {
             .expect("the pinned 64-bit Policy800 graph must lower")
             .to_string();
         assert!(operation.contains(
-            "prepare_device_radix_sort_onesweep_keys_for :: < u64 , u64 , _ , _ , _ , _ , 10usize"
+            "prepare_device_radix_sort_onesweep_keys_32768_for :: < u64 , u64 , _ , _ , _ , _ , 10usize"
         ));
         assert!(operation.contains("let __rccl_blocks = __rccl_len . div_ceil (3840usize)"));
         assert!(operation.contains("if __rccl_len <= 2304usize"));
         assert!(operation.contains(
-            "prepare_device_radix_sort_single_tile_keys_for :: < u64 , u64 , _ , _ , _ , _ , 9usize , 33856usize"
+            "prepare_device_radix_sort_single_tile_keys_for :: < u64 , u64 , _ , _ , _ , _ , 9usize , false"
         ));
         assert!(operation.contains("while __rccl_pass < __rccl_passes"));
         assert!(
             operation.contains("LaunchConfig1D :: new (__rccl_blocks as u32 , 384usize as u32")
         );
-        assert!(operation.contains("128 , 8192usize as u32"));
+        assert!(operation.contains("prepare_device_radix_sort_histogram_8_for"));
+        assert!(operation.contains("max_active_blocks_per_multiprocessor (128 , 0"));
         assert!(!operation.contains("compute_capability"));
 
         let workspace_call: call::DeviceRadixSortWorkspaceCall =
@@ -4706,17 +4794,18 @@ mod tests {
         assert!(operation.contains("prepare_device_radix_sort_histogram"));
         assert!(operation.contains("prepare_device_radix_sort_exclusive_sum"));
         assert!(operation.contains(
-            "prepare_device_radix_sort_onesweep_pairs_for :: < f32 , i32 , u32 , _ , _ , _ , _ , 17usize , 26112usize"
+            "prepare_device_radix_sort_onesweep_pairs_28160_for :: < f32 , i32 , u32 , _ , _ , _ , _ , 17usize"
         ));
         assert!(operation.contains("let __rccl_blocks = __rccl_len . div_ceil (6528usize)"));
-        assert!(operation.contains("28160usize as u32"));
+        assert!(operation.contains("__rccl_blocks as u32 , 384usize as u32 , 0"));
+        assert!(!operation.contains("28160usize as u32"));
         assert!(operation.contains("radix_float_digit_masked_u32"));
         assert!(operation.contains("radix_float_rank_digit_u32"));
         assert!(!operation.contains("let __rccl_rank_digit ="));
         assert!(!operation.contains("| __rccl_ordered"));
         assert_eq!(
             operation
-                .matches("device_radix_sort_onesweep_pairs ::")
+                .matches("device_radix_sort_onesweep_pairs_28160 ::")
                 .count(),
             1
         );
@@ -4739,6 +4828,45 @@ mod tests {
     }
 
     #[test]
+    fn radix_pairs_select_each_exact_policy800_static_union() {
+        let u32_u64 = expand_device_radix_sort_pairs(syn::parse_quote! {
+            ::<u32, u64, sm_89>(
+                &exec,
+                &mut keys,
+                &mut values,
+                &mut scratch_keys,
+                &mut scratch_values,
+                &mut bins,
+                &mut lookback,
+                &mut counters
+            )
+        })
+        .expect("the pinned u32/u64 pair case must select its exact static union")
+        .to_string();
+        assert!(u32_u64.contains("prepare_device_radix_sort_onesweep_pairs_26624_for"));
+        assert!(u32_u64.contains("device_radix_sort_onesweep_pairs_26624 ::"));
+        assert!(u32_u64.contains("div_ceil (3072usize)"));
+
+        let u64_u64 = expand_device_radix_sort_pairs(syn::parse_quote! {
+            ::<u64, u64, sm_89>(
+                &exec,
+                &mut keys,
+                &mut values,
+                &mut scratch_keys,
+                &mut scratch_values,
+                &mut bins,
+                &mut lookback,
+                &mut counters
+            )
+        })
+        .expect("a supported 64-bit key/value pair must not be rejected by a 32-bit extent")
+        .to_string();
+        assert!(u64_u64.contains("prepare_device_radix_sort_onesweep_pairs_32768_for"));
+        assert!(u64_u64.contains("device_radix_sort_onesweep_pairs_32768 ::"));
+        assert!(u64_u64.contains("div_ceil (3840usize)"));
+    }
+
+    #[test]
     fn radix_pair_buffer_has_one_structural_selector_per_pinned_route() {
         let operation = expand_device_radix_sort_pairs_buffer(syn::parse_quote! {
             ::<u32, i32, sm_89>(
@@ -4758,7 +4886,7 @@ mod tests {
         assert!(operation.contains("let (__rccl_output_keys , __rccl_output_values)"));
         assert_eq!(
             operation
-                .matches("device_radix_sort_onesweep_pairs ::")
+                .matches("device_radix_sort_onesweep_pairs_28160 ::")
                 .count(),
             1
         );

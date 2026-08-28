@@ -30,22 +30,22 @@ the public borrowed `DoubleBuffer` forms directly.
 
 | Implemented ordering intersection | RCCL / CCCL | Gate result |
 |---|---:|---:|
-| CUB DeviceMerge keys | 1.000000 | pass |
-| CUB DeviceMerge pairs | 0.999043 | pass |
-| CUB DeviceMergeSort keys | 0.991762 | pass |
-| CUB DeviceMergeSort pairs | 0.998429 | pass |
-| CUB DeviceRadixSort keys | 1.057996 | **fail** |
-| CUB DeviceRadixSort pairs | 1.011468 | **fail** |
-| CUB DeviceRadixSort keys `DoubleBuffer` 0..24 | 1.082687 | **fail** |
-| CUB DeviceRadixSort pairs `DoubleBuffer` 0..24 | 1.018789 | **fail** |
-| CUB DeviceRadixSort keys, exact Policy800 single tile | 1.021850 | **fail** |
-| CUB DeviceRadixSort pairs, exact Policy800 single tile | 1.009212 | **fail** |
-| Thrust merge | 1.000394 | pass |
-| Thrust merge-by-key | 0.999692 | pass |
-| Thrust sort | 1.030604 | **fail** |
-| Thrust sort-by-key | 0.989220 | pass |
+| CUB DeviceMerge keys | 1.000370 | pass |
+| CUB DeviceMerge pairs | 1.001921 | **fail** |
+| CUB DeviceMergeSort keys | 0.994915 | pass |
+| CUB DeviceMergeSort pairs | 1.000805 | pass |
+| CUB DeviceRadixSort keys | 1.062280 | **fail** |
+| CUB DeviceRadixSort pairs | 1.011583 | **fail** |
+| CUB DeviceRadixSort keys `DoubleBuffer` 0..24 | 1.090674 | **fail** |
+| CUB DeviceRadixSort pairs `DoubleBuffer` 0..24 | 0.998927 | pass |
+| CUB DeviceRadixSort keys, exact Policy800 single tile | 1.020335 | **fail** |
+| CUB DeviceRadixSort pairs, exact Policy800 single tile | 1.009601 | **fail** |
+| Thrust merge | 1.000000 | pass |
+| Thrust merge-by-key | 1.000000 | pass |
+| Thrust sort | 1.030226 | **fail** |
+| Thrust sort-by-key | 0.992026 | pass |
 
-Eight of fourteen ordering paths are inside the 1.001 measurement-equivalence
+Seven of fourteen ordering paths are inside the 1.001 measurement-equivalence
 band in this run. Some repeated-run ratios move across the boundary even when
 the normalized cuda-oxide kernel instructions are unchanged, but the gate
 does not classify that observation as a pass or widen its band. The key-only
@@ -65,11 +65,13 @@ buffer.
 The full-range and 0..24 operations now select the same named primitive Rust
 function items. Before that change, identical zero-capture closure expressions
 at different call sites had distinct Rust types and produced duplicate
-cuda-oxide kernel specializations. The mixed benchmark now has one histogram,
-one keys one-sweep, and one pairs one-sweep specialization for its common u32
-policy. Round-trip, descending, every valid digit-window shape, and floating
-signed-zero tests prevent that structural deduplication from masking changed
-semantics.
+cuda-oxide kernel specializations. The proc macro emits exact static one-sweep
+entries for the two supported key extents (34,304 and 32,768 bytes) and the
+three pair extents (28,160, 26,624, and 32,768 bytes); it then selects the
+entry from macro-visible key/value layouts. There is no maximum-sized runtime
+fallback. Round-trip, descending, every valid digit-window shape, wide-payload
+and wide-key pair probes, and floating signed-zero tests prevent that
+structural specialization from masking changed semantics.
 
 The WarpReduce operation macro selects the same hardware integer-add
 collective as pinned CUB. Four independent reductions per loaded value keep
@@ -93,10 +95,22 @@ parity is exact: both benchmarks validate every output element after timing.
 The Rust kernel follows pinned CUB's Policy800 topology: 384 threads, 21 keys
 per thread, warp-private histograms, early counts, raking-memoize scan,
 eight-ballot `MatchAny`, decoupled lookback, short-circuiting, and direct
-scatter. Its current Rust-qualified SM89 one-sweep key kernel uses 99 registers
-and 34,304 bytes of dynamic shared storage with no spills; the pair kernel uses
-80 registers and 28,160 bytes. Pinned CCCL uses 75 and 65 registers
-respectively with the same extents in static shared storage. A historical
+scatter. The shared unions are now static on both sides. The exact SM89 launch
+resource comparison for the common u32 specializations is:
+
+| Policy800 kernel | Rust registers | CUB registers | Rust static shared | CUB static shared |
+|---|---:|---:|---:|---:|
+| init | 16 | 16 | 0 | 0 |
+| histogram | 40 | 38 | 4,096 B | 4,096 B |
+| exclusive sum | 31 | 27 | 2,336 B | 2,336 B |
+| one-sweep keys | 99 | 75 | 34,304 B | 34,304 B |
+| one-sweep pairs | 80 | 65 | 28,160 B | 28,160 B |
+| single-tile keys | 113 | 111 | 33,856 B | 33,856 B |
+| single-tile pairs | 132 | 128 | 33,856 B | 33,856 B |
+
+The key one-sweep kernel is limited by both registers and shared memory to one
+CTA per SM (25% theoretical occupancy). The pair kernel admits two CTAs per SM
+(50%). Both have zero dynamic shared bytes and no spills. A historical
 77-register Rust kernel was an incomplete raw-pointer implementation: it
 predated the exact full/partial graph and the reviewed Rust ownership boundary,
 so it is not a valid performance target to restore.
@@ -121,6 +135,14 @@ handwritten assembly, raw pointer views, async/`Arc` launch plumbing, deleting
 the short-circuit, and relaxing the ratio are all rejected: they change the
 pinned algorithm, the Rust safety boundary, or the test rather than repairing
 the implementation.
+
+The final partial-tile load is now represented by a borrowed
+`PartialWarpStripedInput` capability that narrows the valid prefix once and
+keeps the activity predicate in 32-bit coordinates. This removes repeated
+slice/`Option` reconstruction from the algorithm and reduces the intermediate
+PTX address machinery, but ptxas still reports 99 registers and the measured
+key radix time remains about 0.616 ms. It is retained as the Rust-qualified
+source mapping, not counted as a performance fix.
 
 ## Policy800 single-tile backend boundary
 

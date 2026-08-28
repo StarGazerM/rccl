@@ -11,7 +11,7 @@ use core::{
     mem::{MaybeUninit, align_of, size_of},
 };
 use cuda_device::{
-    DisjointSlice, DynamicSharedArray, LinearTiles,
+    DisjointSlice, DynamicSharedArray, LinearTiles, SharedArray,
     atomic::{AtomicOrdering, BlockAtomicI32, BlockAtomicU32, DeviceAtomicI32, DeviceAtomicU64},
     fence,
     thread::{self, __internal, LaunchContextRef},
@@ -88,6 +88,9 @@ pub struct AlignedBlockSharedMemory<const ALIGN: usize> {
 /// alignment.
 pub type BlockSharedMemory = AlignedBlockSharedMemory<16>;
 
+#[doc(hidden)]
+pub use cuda_device::SharedArray as __StaticSharedArray;
+
 impl<const ALIGN: usize> AlignedBlockSharedMemory<ALIGN> {
     /// Bind the macro-declared dynamic shared extent for this kernel block.
     #[inline(always)]
@@ -98,6 +101,26 @@ impl<const ALIGN: usize> AlignedBlockSharedMemory<ALIGN> {
         Self {
             base: DynamicSharedArray::<u8, ALIGN>::get_raw(),
             bytes,
+            _not_send_or_sync: PhantomData,
+        }
+    }
+
+    /// Bind a proc-macro-sized static shared allocation to the same safe
+    /// region vocabulary used by dynamic collectives.
+    ///
+    /// # Safety
+    ///
+    /// `shared` must name a `static mut SharedArray<u8, N, ALIGN>` in the
+    /// currently executing CUDA kernel. The exported declaration macro is the
+    /// only RCCL caller and constructs exactly that form.
+    #[doc(hidden)]
+    #[inline(always)]
+    pub unsafe fn from_static_raw<const N: usize>(shared: *mut SharedArray<u8, N, ALIGN>) -> Self {
+        Self {
+            // SAFETY: upheld by the caller; this reviewed boundary turns the
+            // cuda-oxide static into an affine block-scoped capability.
+            base: unsafe { SharedArray::as_raw_mut_ptr(shared) },
+            bytes: N,
             _not_send_or_sync: PhantomData,
         }
     }
@@ -229,6 +252,22 @@ impl<const ALIGN: usize> AlignedBlockSharedMemory<ALIGN> {
             head_padding: head_padding as u32,
         }
     }
+}
+
+/// Declare macro-selected static shared storage and return its affine block
+/// capability without exposing `static mut`, raw pointers, or `unsafe` to a
+/// generated CUB kernel.
+#[macro_export]
+macro_rules! static_block_shared_memory {
+    ($name:ident, $bytes:expr, $align:expr) => {{
+        static mut $name: $crate::device::__StaticSharedArray<u8, { $bytes }, { $align }> =
+            $crate::device::__StaticSharedArray::UNINIT;
+        // SAFETY: the macro creates the exact cuda-oxide static required by
+        // `from_static_raw`; callers receive only the safe affine capability.
+        unsafe {
+            $crate::device::AlignedBlockSharedMemory::<{ $align }>::from_static_raw(&raw mut $name)
+        }
+    }};
 }
 
 /// Proof produced by one checked asynchronous global-to-shared copy.
@@ -738,6 +777,143 @@ pub struct WarpStripedBlockInput<'a, T, const THREADS: usize, const ITEMS: usize
     thread_index: u32,
 }
 
+/// Hardware-proven lane coordinate for the currently executing warp.
+///
+/// Keeping the `0..32` invariant in a type lets affine warp capabilities use
+/// CUDA's lane register without rechecking a fact guaranteed by the device
+/// execution model on every load path.
+#[derive(Clone, Copy)]
+pub struct WarpLane(u32);
+
+impl WarpLane {
+    #[inline(always)]
+    pub fn current() -> Self {
+        Self(cuda_device::warp::lane_id())
+    }
+
+    #[inline(always)]
+    pub fn new(index: u32) -> Option<Self> {
+        (index < 32).then_some(Self(index))
+    }
+
+    #[inline(always)]
+    pub fn index(self) -> u32 {
+        self.0
+    }
+}
+
+/// Read-only proof for a complete warp-striped tile whose logical block is
+/// selected by algorithm state rather than CUDA's physical `blockIdx.x`.
+///
+/// One-sweep radix sort assigns tiles with a device counter. The constructor
+/// validates that dynamic tile once; subsequent item reads use the same
+/// compile-time bijection as CUB's full-tile `LoadDirectWarpStriped` without
+/// recovering a pointer in the algorithm crate.
+pub struct FullWarpStripedInput<'a, T, const ITEMS: usize> {
+    first: &'a T,
+    lane: WarpLane,
+}
+
+/// Read-only proof for the valid prefix of a partial warp-striped tile.
+///
+/// CUB guards each register load with one 32-bit logical-coordinate check.
+/// This capability validates and narrows the borrowed global range once, then
+/// preserves that exact predicate without rebuilding a slice/`Option` chain
+/// for every fully unrolled item.
+pub struct PartialWarpStripedInput<'a, T, const ITEMS: usize> {
+    tile: &'a [T],
+    lane: WarpLane,
+    valid_items: u32,
+}
+
+impl<'a, T: Copy, const ITEMS: usize> FullWarpStripedInput<'a, T, ITEMS> {
+    #[inline(always)]
+    pub fn new(warp_group: &'a [T], lane: WarpLane) -> Self {
+        if ITEMS == 0 || ITEMS > usize::MAX / 32 {
+            cuda_device::debug::trap();
+        }
+        let warp_items = 32 * ITEMS;
+        if warp_group.len() != warp_items {
+            cuda_device::debug::trap();
+        }
+        let Some(first) = warp_group.first() else {
+            cuda_device::debug::trap();
+        };
+        Self { first, lane }
+    }
+
+    #[inline(always)]
+    pub fn read(&self, item: usize) -> T {
+        if item >= ITEMS {
+            cuda_device::debug::trap();
+        }
+        let local = self.lane.index() as usize + item * 32;
+        // SAFETY: `new` proved that `first` begins a borrowed 32 * ITEMS
+        // allocation, lane is below 32, and item is below ITEMS. Keeping the
+        // affine capability as a reference avoids carrying a redundant slice
+        // extent through every fully-unrolled register load.
+        unsafe { core::ptr::from_ref(self.first).add(local).read() }
+    }
+}
+
+impl<'a, T: Copy, const ITEMS: usize> PartialWarpStripedInput<'a, T, ITEMS> {
+    #[inline(always)]
+    pub fn new(input: &'a [T], warp_group_base: usize, lane: WarpLane) -> Self {
+        if ITEMS == 0 || ITEMS > u32::MAX as usize / 32 {
+            cuda_device::debug::trap();
+        }
+        let empty = &input[..0];
+        let tail = input.get(warp_group_base..).unwrap_or(empty);
+        let valid_items = tail.len().min(32 * ITEMS);
+        Self {
+            tile: &tail[..valid_items],
+            lane,
+            valid_items: valid_items as u32,
+        }
+    }
+
+    #[inline(always)]
+    pub fn read_or(&self, item: usize, default: T) -> T {
+        if item >= ITEMS {
+            cuda_device::debug::trap();
+        }
+        let local = self.lane.index() + item as u32 * 32;
+        if local >= self.valid_items {
+            return default;
+        }
+        // SAFETY: the constructor narrowed `tile` to `valid_items`, and the
+        // preceding predicate proves this warp-striped coordinate is inside it.
+        unsafe { *self.tile.get_unchecked(local as usize) }
+    }
+
+    #[inline(always)]
+    pub fn map_or<U>(&self, item: usize, default: U, map: impl FnOnce(T) -> U) -> U {
+        if item >= ITEMS {
+            cuda_device::debug::trap();
+        }
+        let local = self.lane.index() + item as u32 * 32;
+        if local >= self.valid_items {
+            return default;
+        }
+        // SAFETY: the constructor and activity predicate prove the load; the
+        // mapping then performs the algorithm's bit-order conversion.
+        map(unsafe { *self.tile.get_unchecked(local as usize) })
+    }
+
+    #[inline(always)]
+    pub fn load_into(&self, item: usize, output: &mut MaybeUninit<T>) {
+        if item >= ITEMS {
+            cuda_device::debug::trap();
+        }
+        let local = self.lane.index() + item as u32 * 32;
+        if local < self.valid_items {
+            // SAFETY: the activity predicate is the same range proof as
+            // `read_or`; invalid CUB value registers remain uninitialized.
+            output.write(unsafe { *self.tile.get_unchecked(local as usize) });
+        }
+    }
+}
+
 impl<'a, T: Copy, const THREADS: usize, const ITEMS: usize>
     WarpStripedBlockInput<'a, T, THREADS, ITEMS>
 {
@@ -1039,7 +1215,12 @@ pub fn warp_striped_pair_into_write<
 
 #[cfg(test)]
 mod tests {
-    use super::{MergePathSearch, warp_striped_local};
+    use core::mem::MaybeUninit;
+
+    use super::{
+        FullWarpStripedInput, MergePathSearch, PartialWarpStripedInput, WarpLane,
+        warp_striped_local,
+    };
 
     const fn block_striped_local<const THREADS: usize, const ITEMS: usize>(
         thread_index: u32,
@@ -1100,6 +1281,45 @@ mod tests {
         assert_eq!(warp_striped_local::<256, 0>(0, 0), None);
         assert_eq!(warp_striped_local::<256, 17>(256, 0), None);
         assert_eq!(warp_striped_local::<256, 17>(0, 17), None);
+    }
+
+    #[test]
+    fn dynamic_full_tile_capability_reads_the_counter_selected_tile() {
+        const THREADS: usize = 64;
+        const ITEMS: usize = 3;
+        let values = (0..(THREADS * ITEMS * 2) as u32).collect::<Vec<_>>();
+        let tile_base = THREADS * ITEMS;
+        for thread_index in 0..THREADS as u32 {
+            let warp = thread_index / 32;
+            let lane = thread_index % 32;
+            let warp_group_base = tile_base + warp as usize * 32 * ITEMS;
+            let warp_group = &values[warp_group_base..warp_group_base + 32 * ITEMS];
+            let lane = WarpLane::new(lane).expect("test coordinate must name a warp lane");
+            let input = FullWarpStripedInput::<u32, ITEMS>::new(warp_group, lane);
+            for item in 0..ITEMS {
+                let local = warp_striped_local::<THREADS, ITEMS>(thread_index, item)
+                    .expect("validated full-tile coordinate must exist");
+                assert_eq!(input.read(item), values[tile_base + local]);
+            }
+        }
+    }
+
+    #[test]
+    fn partial_warp_tile_uses_one_valid_prefix_for_keys_and_values() {
+        const ITEMS: usize = 3;
+        let values = (0..53u32).collect::<Vec<_>>();
+        let lane = WarpLane::new(17).expect("test coordinate must name a warp lane");
+        let input = PartialWarpStripedInput::<u32, ITEMS>::new(&values, 0, lane);
+        assert_eq!(input.read_or(0, u32::MAX), 17);
+        assert_eq!(input.read_or(1, u32::MAX), 49);
+        assert_eq!(input.read_or(2, u32::MAX), u32::MAX);
+        assert_eq!(input.map_or(1, 0, |value| value + 1), 50);
+
+        let late_warp = PartialWarpStripedInput::<u32, ITEMS>::new(&values, 96, lane);
+        assert_eq!(late_warp.read_or(0, u32::MAX), u32::MAX);
+        let mut slot = MaybeUninit::new(7u32);
+        late_warp.load_into(0, &mut slot);
+        assert_eq!(super::initialized_value(&slot), 7);
     }
 
     #[test]

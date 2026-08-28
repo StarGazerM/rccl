@@ -123,6 +123,103 @@ fn main() -> Result<(), Box<dyn Error>> {
             .collect::<Vec<_>>()
     );
 
+    // Pinned Catch2's `value_types` includes `uint64_t`; its larger payload
+    // selects a distinct Policy800 `RegBoundScaling` result and static union.
+    // Keep the same duplicate-heavy keys so an unstable or mismatched payload
+    // permutation cannot pass as a correct key-only result.
+    let wide_values = (0..keys.len())
+        .map(|index| index as u64)
+        .collect::<Vec<_>>();
+    let mut wide_reference = keys
+        .iter()
+        .copied()
+        .zip(wide_values.iter().copied())
+        .collect::<Vec<_>>();
+    wide_reference.sort_by_key(|&(key, _)| key);
+    let wide_workspace =
+        rccl_cub::device_radix_sort_pairs_workspace!(::<u32, u64, sm_89>(keys.len()));
+    let mut wide_keys = DeviceBuffer::from_host(&stream, &keys)?;
+    let mut wide_values = DeviceBuffer::from_host(&stream, &wide_values)?;
+    let mut wide_scratch_keys = DeviceBuffer::<u32>::zeroed(&stream, wide_workspace.scratch_keys)?;
+    let mut wide_scratch_values =
+        DeviceBuffer::<u64>::zeroed(&stream, wide_workspace.scratch_values)?;
+    let mut wide_bins = DeviceBuffer::<u64>::zeroed(&stream, wide_workspace.bins)?;
+    let mut wide_lookback = DeviceBuffer::<i32>::zeroed(&stream, wide_workspace.lookback)?;
+    let mut wide_counters = DeviceBuffer::<i32>::zeroed(&stream, wide_workspace.counters)?;
+    rccl_cub::device_radix_sort_pairs!(::<u32, u64, sm_89>(
+        &exec,
+        &mut wide_keys,
+        &mut wide_values,
+        &mut wide_scratch_keys,
+        &mut wide_scratch_values,
+        &mut wide_bins,
+        &mut wide_lookback,
+        &mut wide_counters,
+    ))?;
+    assert_eq!(
+        wide_keys.to_host_vec(&stream)?,
+        wide_reference
+            .iter()
+            .map(|&(key, _)| key)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        wide_values.to_host_vec(&stream)?,
+        wide_reference
+            .iter()
+            .map(|&(_, value)| value)
+            .collect::<Vec<_>>()
+    );
+
+    // The public primitive pair subset also accepts the 64-bit key types from
+    // pinned Catch2's key grid. This crosses the multi-tile route and prevents
+    // the 32-bit pair union from silently becoming a fallback for that policy.
+    let wide_keys_input = keys.iter().map(|&key| key as u64).collect::<Vec<_>>();
+    let wide_key_values = (0..keys.len())
+        .map(|index| index as u64)
+        .collect::<Vec<_>>();
+    let mut wide_key_reference = wide_keys_input
+        .iter()
+        .copied()
+        .zip(wide_key_values.iter().copied())
+        .collect::<Vec<_>>();
+    wide_key_reference.sort_by_key(|&(key, _)| key);
+    let wide_key_workspace =
+        rccl_cub::device_radix_sort_pairs_workspace!(::<u64, u64, sm_89>(keys.len()));
+    let mut wide_pair_keys = DeviceBuffer::from_host(&stream, &wide_keys_input)?;
+    let mut wide_pair_values = DeviceBuffer::from_host(&stream, &wide_key_values)?;
+    let mut wide_pair_scratch_keys =
+        DeviceBuffer::<u64>::zeroed(&stream, wide_key_workspace.scratch_keys)?;
+    let mut wide_pair_scratch_values =
+        DeviceBuffer::<u64>::zeroed(&stream, wide_key_workspace.scratch_values)?;
+    let mut wide_pair_bins = DeviceBuffer::<u64>::zeroed(&stream, wide_key_workspace.bins)?;
+    let mut wide_pair_lookback = DeviceBuffer::<i32>::zeroed(&stream, wide_key_workspace.lookback)?;
+    let mut wide_pair_counters = DeviceBuffer::<i32>::zeroed(&stream, wide_key_workspace.counters)?;
+    rccl_cub::device_radix_sort_pairs!(::<u64, u64, sm_89>(
+        &exec,
+        &mut wide_pair_keys,
+        &mut wide_pair_values,
+        &mut wide_pair_scratch_keys,
+        &mut wide_pair_scratch_values,
+        &mut wide_pair_bins,
+        &mut wide_pair_lookback,
+        &mut wide_pair_counters,
+    ))?;
+    assert_eq!(
+        wide_pair_keys.to_host_vec(&stream)?,
+        wide_key_reference
+            .iter()
+            .map(|&(key, _)| key)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        wide_pair_values.to_host_vec(&stream)?,
+        wide_key_reference
+            .iter()
+            .map(|&(_, value)| value)
+            .collect::<Vec<_>>()
+    );
+
     // Pinned CUB's shipped pair example is f32/i32. This fixed case includes
     // both signed zeros and validates keys by bits so float equality cannot
     // mask a key twiddle or pair-permutation error.

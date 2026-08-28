@@ -113,8 +113,8 @@ used to hide that missing TMP input.
   failing, so result parity cannot be misreported as CCCL performance parity.
   The direct bit-window and Policy800 single-tile additions bring the gate to
   fourteen paths. Its latest median-of-medians run still fails, including
-  key-only radix at 1.057996x, bit-window keys at 1.082687x, single-tile keys
-  at 1.021850x, and Thrust sort at 1.030604x; the gate still exits nonzero with
+  key-only radix at 1.062280x, bit-window keys at 1.090674x, single-tile keys
+  at 1.020335x, and Thrust sort at 1.030226x; the gate still exits nonzero with
   `implementation gap is not masked`. The complete ratios and backend-boundary
   diagnosis are recorded in
   `reviews/current-implemented-performance.md`.
@@ -157,17 +157,34 @@ lane from `threadIdx.x`, computes one pass digit mask for the named
 `ShiftDigitExtractor` equivalent, keeps key and rank register arrays
 uninitialized until their fully unrolled writes, and uses the exact guarded
 `bin = threadIdx.x` coordinate rather than clamping inactive threads to bin
-255. The operation macros end `DoubleBuffer` borrows with lexical scopes; a
-forced `drop` on a non-`Drop` carrier is source-rejected. Generated CUDA entry
-points may carry only the exact `clippy::too_many_arguments` ABI annotation,
-and the macro safety audit rejects broader lint suppression such as
-`clippy::all`.
+255. Full and partial warp-striped input capabilities consume a borrowed slice
+and the checked lane coordinate: the partial form narrows the final valid
+prefix once and preserves CUB's per-register activity predicate without
+exposing a pointer view in the algorithm. Macro-generated entry variants own
+the exact CUB static union extents:
+34,304/32,768 bytes for supported key policies and
+28,160/26,624/32,768 bytes for supported pair policies. Macro-visible layouts
+select the entry; neither a runtime type registry nor a maximum-sized fallback
+exists. Histogram and exclusive-sum storage are likewise static at 4,096 or
+8,192 bytes and 2,336 bytes. The operation macros end `DoubleBuffer` borrows
+with lexical scopes; a forced `drop` on a non-`Drop` carrier is
+source-rejected. Generated CUDA entry points may carry only the exact
+`clippy::too_many_arguments` ABI annotation, and the macro safety audit rejects
+broader lint suppression such as `clippy::all`.
 
 Two further code-shape experiments were measured and removed: constructing
 the register key array with `core::array::from_fn`, and narrowing the uniform
 bin/counter offsets from `usize` to `u32`. Each increased the key one-sweep
 kernel from 99 to 101 registers while leaving the pair kernel at 80, so neither
 is allowed back as a result-only cleanup.
+
+Nsight launch-resource checks keep the remaining performance failure precise.
+The common u32 Rust/CUB one-sweep key specializations use 99/75 registers with
+the same 34,304-byte static union, limiting Rust to one CTA per SM. Pair
+specializations use 80/65 registers with the same 28,160-byte static union and
+both admit two CTAs per SM. The strict performance gate still exits nonzero;
+static storage specialization is not reported as performance parity merely
+because all result probes pass.
 
 ## Remaining upstream product
 

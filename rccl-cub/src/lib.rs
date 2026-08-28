@@ -188,6 +188,7 @@ pub mod __private {
     pub use cuda_host;
     #[doc(hidden)]
     pub use rccl_cub_macros::{__device_kernels, __device_transform_repeat_in_place};
+    pub use rccl_memory::static_block_shared_memory;
     /// Normalize cuda-oxide and RCCL allocator buffers for CUB's required
     /// stream-ordered lookback memset. Implemented only for the signed
     /// 32-bit protocol word, so byte-zeroing cannot create an invalid value.
