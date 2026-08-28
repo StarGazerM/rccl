@@ -1,81 +1,15 @@
-use cuda_core::{CudaContext, CudaStream, DeviceBuffer, DeviceCopy};
-use rccl_memory::{CudaMemoryResource, DeviceAllocator, MemoryError};
+use cuda_core::{CudaContext, CudaStream};
+use rccl_memory::{BorrowedCudaMemoryResource, DeviceAllocator, MemoryError};
 use std::{error::Error, fmt};
 
-/// Allocates the concrete temporary buffers accepted by cuda-oxide's checked
-/// synchronous kernel launch surface.
-///
-/// This is a runtime allocation capability, not an algorithm policy or a TMP
-/// selection point. The current cuda-oxide launch API accepts its own owning
-/// `DeviceBuffer` for synchronous slice arguments, so only the matching direct
-/// CUDA resource implements the explicit-resource form.
-pub trait TemporaryAllocator {
-    #[doc(hidden)]
-    fn usable_on(&self, stream: &CudaStream) -> bool;
-
-    #[doc(hidden)]
-    fn temporary<T: DeviceCopy>(
-        &self,
-        stream: &CudaStream,
-        len: usize,
-    ) -> Result<DeviceBuffer<T>, MemoryError>;
-}
-
-impl TemporaryAllocator for CudaMemoryResource {
-    fn usable_on(&self, stream: &CudaStream) -> bool {
-        self.context().as_ref() == stream.context().as_ref()
-    }
-
-    fn temporary<T: DeviceCopy>(
-        &self,
-        stream: &CudaStream,
-        len: usize,
-    ) -> Result<DeviceBuffer<T>, MemoryError> {
-        DeviceBuffer::zeroed(stream, len).map_err(MemoryError::Driver)
-    }
-}
-
-impl<T: TemporaryAllocator + ?Sized> TemporaryAllocator for &T {
-    fn usable_on(&self, stream: &CudaStream) -> bool {
-        (**self).usable_on(stream)
-    }
-
-    fn temporary<U: DeviceCopy>(
-        &self,
-        stream: &CudaStream,
-        len: usize,
-    ) -> Result<DeviceBuffer<U>, MemoryError> {
-        (**self).temporary(stream, len)
-    }
-}
-
-/// The allocation behavior of ordinary `cuda::par`.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct DefaultTemporaryAllocator;
-
-impl TemporaryAllocator for DefaultTemporaryAllocator {
-    fn usable_on(&self, _stream: &CudaStream) -> bool {
-        true
-    }
-
-    fn temporary<T: DeviceCopy>(
-        &self,
-        stream: &CudaStream,
-        len: usize,
-    ) -> Result<DeviceBuffer<T>, MemoryError> {
-        DeviceBuffer::zeroed(stream, len).map_err(MemoryError::Driver)
-    }
-}
-
 /// A synchronous Thrust execution policy borrowing one stream and program.
-#[derive(Clone, Copy)]
-pub struct Execution<'stream, 'program, A: TemporaryAllocator, M> {
+pub struct Execution<'stream, 'program, A: DeviceAllocator, M> {
     stream: &'stream CudaStream,
     allocator: A,
     module: &'program M,
 }
 
-impl<A: TemporaryAllocator, M> Execution<'_, '_, A, M> {
+impl<A: DeviceAllocator, M> Execution<'_, '_, A, M> {
     pub fn stream(&self) -> &CudaStream {
         self.stream
     }
@@ -85,13 +19,25 @@ impl<A: TemporaryAllocator, M> Execution<'_, '_, A, M> {
     }
 
     #[doc(hidden)]
-    pub fn temporary<T: DeviceCopy>(&self, len: usize) -> Result<DeviceBuffer<T>, MemoryError> {
-        self.allocator.temporary(self.stream, len)
-    }
-
-    #[doc(hidden)]
     pub fn module(&self) -> &M {
         self.module
+    }
+
+    /// Apply the completion point required by synchronous Thrust `par`.
+    ///
+    /// Each lowering places this call at the same temporary-array lifetime
+    /// boundary as pinned Thrust: merge and merge-sort synchronize before
+    /// releasing storage, while radix sort releases its inner temporary array
+    /// before the enclosing smart-sort synchronization.
+    #[doc(hidden)]
+    pub fn __synchronize(
+        &self,
+        result: Result<(), crate::DeviceAlgorithmError>,
+    ) -> Result<(), crate::DeviceAlgorithmError> {
+        result?;
+        self.stream
+            .synchronize()
+            .map_err(crate::DeviceAlgorithmError::Driver)
     }
 }
 
@@ -111,12 +57,15 @@ impl<'context, M> Program<'context, M> {
     pub fn par<'stream, 'program>(
         &'program self,
         stream: &'stream CudaStream,
-    ) -> Result<Execution<'stream, 'program, DefaultTemporaryAllocator, M>, ExecutionError> {
-        self.par_with(stream, DefaultTemporaryAllocator)
+    ) -> Result<Execution<'stream, 'program, BorrowedCudaMemoryResource<'stream>, M>, ExecutionError>
+    {
+        let allocator =
+            BorrowedCudaMemoryResource::new(stream.context()).map_err(ExecutionError)?;
+        self.par_with(stream, allocator)
     }
 
     /// Construct a synchronous CUDA execution policy using a caller resource.
-    pub fn par_in<'stream, 'program, 'allocator, A: TemporaryAllocator + ?Sized>(
+    pub fn par_in<'stream, 'program, 'allocator, A: DeviceAllocator + ?Sized>(
         &'program self,
         stream: &'stream CudaStream,
         allocator: &'allocator A,
@@ -124,12 +73,14 @@ impl<'context, M> Program<'context, M> {
         self.par_with(stream, allocator)
     }
 
-    fn par_with<'stream, 'program, A: TemporaryAllocator>(
+    fn par_with<'stream, 'program, A: DeviceAllocator>(
         &'program self,
         stream: &'stream CudaStream,
         allocator: A,
     ) -> Result<Execution<'stream, 'program, A, M>, ExecutionError> {
-        if self.context != stream.context().as_ref() || !allocator.usable_on(stream) {
+        if self.context != stream.context().as_ref()
+            || allocator.context().as_ref() != stream.context().as_ref()
+        {
             return Err(ExecutionError(MemoryError::ContextMismatch));
         }
         Ok(Execution {

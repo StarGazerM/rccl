@@ -1,0 +1,23 @@
+[package]
+name = "cuda-host"
+version = "0.2.1"
+edition = "2024"
+authors = ["Nihal Pasham <nihalp@nvidia.com>"]
+license = "Apache-2.0"
+repository = "https://github.com/NVlabs/cuda-oxide.git"
+description = "Host-side utilities for CUDA kernel development"
+readme = "README.md"
+
+[dependencies]
+half = "2.7"
+sha2 = "0.10"
+thiserror = "2"
+cuda-macros = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "6bc513bbcdda781b13a328cf692df86f2215acf9", features = ["host"] }
+cuda-core = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "6bc513bbcdda781b13a328cf692df86f2215acf9" }
+cuda-artifact-finalizer = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "6bc513bbcdda781b13a328cf692df86f2215acf9" }
+ptx-parse = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "6bc513bbcdda781b13a328cf692df86f2215acf9" }
+cuda-async = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "6bc513bbcdda781b13a328cf692df86f2215acf9", optional = true }
+
+[features]
+default = []
+async = ["dep:cuda-async", "cuda-macros/async"]

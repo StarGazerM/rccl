@@ -5,7 +5,7 @@
 //! `rccl-cub-macros`; support vocabulary does not.
 
 use cuda_core::{DeviceBuffer, DeviceCopy};
-use rccl_memory::DeviceAllocator;
+use rccl_memory::{DeviceAllocator, TemporaryValue};
 
 mod ordering_backend;
 
@@ -39,160 +39,134 @@ pub use rccl_cub_macros::{
     device_stable_merge_sort_pairs, program, warp_reduce, warp_reduce_items,
 };
 
-/// Opaque temporary storage for one direct DeviceMerge operation.
-pub struct DeviceMergeWorkspace {
-    partitions: DeviceBuffer<usize>,
+/// Normalize an owned direct buffer and a borrowed aliased temporary region to
+/// the same mutable range surface.
+#[doc(hidden)]
+pub trait WorkspaceBuffer<T: DeviceCopy> {
+    type Range;
+
+    fn range_mut(&mut self) -> &mut Self::Range;
 }
 
-impl DeviceMergeWorkspace {
+impl<T: DeviceCopy> WorkspaceBuffer<T> for DeviceBuffer<T> {
+    type Range = DeviceBuffer<T>;
+
+    fn range_mut(&mut self) -> &mut Self::Range {
+        self
+    }
+}
+
+impl<'stream, T: TemporaryValue> WorkspaceBuffer<T>
+    for &mut rccl_memory::TemporaryRegion<'stream, T>
+{
+    type Range = rccl_memory::TemporaryRegion<'stream, T>;
+
+    fn range_mut(&mut self) -> &mut Self::Range {
+        self
+    }
+}
+
+/// Opaque temporary storage for one direct DeviceMerge operation.
+pub struct DeviceMergeWorkspace<P = DeviceBuffer<usize>> {
+    partitions: P,
+}
+
+impl<P: WorkspaceBuffer<usize>> DeviceMergeWorkspace<P> {
     #[doc(hidden)]
-    pub fn __from_partitions(partitions: DeviceBuffer<usize>) -> Self {
+    pub fn __from_partitions(partitions: P) -> Self {
         Self { partitions }
     }
 
     #[doc(hidden)]
-    pub fn __partitions_mut(&mut self) -> &mut DeviceBuffer<usize> {
-        &mut self.partitions
+    pub fn __partitions_mut(&mut self) -> &mut P::Range {
+        self.partitions.range_mut()
     }
 }
 
 /// Opaque temporary storage for direct key-only DeviceMergeSort operations.
-pub struct DeviceMergeSortKeysWorkspace<K: DeviceCopy> {
-    scratch_keys: DeviceBuffer<K>,
-    partitions: DeviceBuffer<usize>,
+pub struct DeviceMergeSortKeysWorkspace<K: DeviceCopy, S = DeviceBuffer<K>, P = DeviceBuffer<usize>>
+{
+    scratch_keys: S,
+    partitions: P,
+    key: core::marker::PhantomData<fn() -> K>,
 }
 
-impl<K: DeviceCopy> DeviceMergeSortKeysWorkspace<K> {
+impl<K: DeviceCopy, S: WorkspaceBuffer<K>, P: WorkspaceBuffer<usize>>
+    DeviceMergeSortKeysWorkspace<K, S, P>
+{
     #[doc(hidden)]
-    pub fn __from_parts(scratch_keys: DeviceBuffer<K>, partitions: DeviceBuffer<usize>) -> Self {
+    pub fn __from_parts(scratch_keys: S, partitions: P) -> Self {
         Self {
             scratch_keys,
             partitions,
+            key: core::marker::PhantomData,
         }
     }
 
     #[doc(hidden)]
-    pub fn __parts_mut(&mut self) -> (&mut DeviceBuffer<K>, &mut DeviceBuffer<usize>) {
-        (&mut self.scratch_keys, &mut self.partitions)
+    pub fn __parts_mut(&mut self) -> (&mut S::Range, &mut P::Range) {
+        (self.scratch_keys.range_mut(), self.partitions.range_mut())
     }
 }
 
 /// Opaque temporary storage for direct key/value DeviceMergeSort operations.
-pub struct DeviceMergeSortPairsWorkspace<K: DeviceCopy, V: DeviceCopy> {
-    scratch_keys: DeviceBuffer<K>,
-    scratch_values: DeviceBuffer<V>,
-    partitions: DeviceBuffer<usize>,
+pub struct DeviceMergeSortPairsWorkspace<
+    K: DeviceCopy,
+    V: DeviceCopy,
+    S = DeviceBuffer<K>,
+    U = DeviceBuffer<V>,
+    P = DeviceBuffer<usize>,
+> {
+    scratch_keys: S,
+    scratch_values: U,
+    partitions: P,
+    types: core::marker::PhantomData<fn() -> (K, V)>,
 }
 
-impl<K: DeviceCopy, V: DeviceCopy> DeviceMergeSortPairsWorkspace<K, V> {
+impl<
+    K: DeviceCopy,
+    V: DeviceCopy,
+    S: WorkspaceBuffer<K>,
+    U: WorkspaceBuffer<V>,
+    P: WorkspaceBuffer<usize>,
+> DeviceMergeSortPairsWorkspace<K, V, S, U, P>
+{
     #[doc(hidden)]
-    pub fn __from_parts(
-        scratch_keys: DeviceBuffer<K>,
-        scratch_values: DeviceBuffer<V>,
-        partitions: DeviceBuffer<usize>,
-    ) -> Self {
+    pub fn __from_parts(scratch_keys: S, scratch_values: U, partitions: P) -> Self {
         Self {
             scratch_keys,
             scratch_values,
             partitions,
+            types: core::marker::PhantomData,
         }
     }
 
     #[doc(hidden)]
-    pub fn __parts_mut(
-        &mut self,
-    ) -> (
-        &mut DeviceBuffer<K>,
-        &mut DeviceBuffer<V>,
-        &mut DeviceBuffer<usize>,
-    ) {
+    pub fn __parts_mut(&mut self) -> (&mut S::Range, &mut U::Range, &mut P::Range) {
         (
-            &mut self.scratch_keys,
-            &mut self.scratch_values,
-            &mut self.partitions,
-        )
-    }
-}
-
-/// Opaque temporary storage for direct key-only DeviceRadixSort operations.
-pub struct DeviceRadixSortKeysWorkspace<K: DeviceCopy> {
-    scratch_keys: DeviceBuffer<K>,
-    controls: DeviceRadixSortBufferWorkspace,
-}
-
-impl<K: DeviceCopy> DeviceRadixSortKeysWorkspace<K> {
-    #[doc(hidden)]
-    pub fn __from_parts(
-        scratch_keys: DeviceBuffer<K>,
-        bins: DeviceBuffer<u64>,
-        lookback: DeviceBuffer<i32>,
-        counters: DeviceBuffer<i32>,
-    ) -> Self {
-        Self {
-            scratch_keys,
-            controls: DeviceRadixSortBufferWorkspace::__from_parts(bins, lookback, counters),
-        }
-    }
-
-    #[doc(hidden)]
-    pub fn __parts_mut(&mut self) -> (&mut DeviceBuffer<K>, &mut DeviceRadixSortBufferWorkspace) {
-        (&mut self.scratch_keys, &mut self.controls)
-    }
-}
-
-/// Opaque temporary storage for direct key/value DeviceRadixSort operations.
-pub struct DeviceRadixSortPairsWorkspace<K: DeviceCopy, V: DeviceCopy> {
-    scratch_keys: DeviceBuffer<K>,
-    scratch_values: DeviceBuffer<V>,
-    controls: DeviceRadixSortBufferWorkspace,
-}
-
-impl<K: DeviceCopy, V: DeviceCopy> DeviceRadixSortPairsWorkspace<K, V> {
-    #[doc(hidden)]
-    pub fn __from_parts(
-        scratch_keys: DeviceBuffer<K>,
-        scratch_values: DeviceBuffer<V>,
-        bins: DeviceBuffer<u64>,
-        lookback: DeviceBuffer<i32>,
-        counters: DeviceBuffer<i32>,
-    ) -> Self {
-        Self {
-            scratch_keys,
-            scratch_values,
-            controls: DeviceRadixSortBufferWorkspace::__from_parts(bins, lookback, counters),
-        }
-    }
-
-    #[doc(hidden)]
-    pub fn __parts_mut(
-        &mut self,
-    ) -> (
-        &mut DeviceBuffer<K>,
-        &mut DeviceBuffer<V>,
-        &mut DeviceRadixSortBufferWorkspace,
-    ) {
-        (
-            &mut self.scratch_keys,
-            &mut self.scratch_values,
-            &mut self.controls,
+            self.scratch_keys.range_mut(),
+            self.scratch_values.range_mut(),
+            self.partitions.range_mut(),
         )
     }
 }
 
 /// Opaque CUB-owned state used with caller-owned radix double buffers.
-pub struct DeviceRadixSortBufferWorkspace {
-    bins: DeviceBuffer<u64>,
-    lookback: DeviceBuffer<i32>,
-    counters: DeviceBuffer<i32>,
+pub struct DeviceRadixSortBufferWorkspace<
+    B = DeviceBuffer<u64>,
+    L = DeviceBuffer<i32>,
+    C = DeviceBuffer<i32>,
+> {
+    bins: B,
+    lookback: L,
+    counters: C,
 }
 
-impl DeviceRadixSortBufferWorkspace {
+impl<B: WorkspaceBuffer<u64>, L: WorkspaceBuffer<i32>, C: WorkspaceBuffer<i32>>
+    DeviceRadixSortBufferWorkspace<B, L, C>
+{
     #[doc(hidden)]
-    pub fn __from_parts(
-        bins: DeviceBuffer<u64>,
-        lookback: DeviceBuffer<i32>,
-        counters: DeviceBuffer<i32>,
-    ) -> Self {
+    pub fn __from_parts(bins: B, lookback: L, counters: C) -> Self {
         Self {
             bins,
             lookback,
@@ -201,14 +175,106 @@ impl DeviceRadixSortBufferWorkspace {
     }
 
     #[doc(hidden)]
+    pub fn __parts_mut(&mut self) -> (&mut B::Range, &mut L::Range, &mut C::Range) {
+        (
+            self.bins.range_mut(),
+            self.lookback.range_mut(),
+            self.counters.range_mut(),
+        )
+    }
+}
+
+/// Opaque temporary storage for direct key-only DeviceRadixSort operations.
+pub struct DeviceRadixSortKeysWorkspace<
+    K: DeviceCopy,
+    S = DeviceBuffer<K>,
+    B = DeviceBuffer<u64>,
+    L = DeviceBuffer<i32>,
+    C = DeviceBuffer<i32>,
+> {
+    scratch_keys: S,
+    controls: DeviceRadixSortBufferWorkspace<B, L, C>,
+    key: core::marker::PhantomData<fn() -> K>,
+}
+
+impl<
+    K: DeviceCopy,
+    S: WorkspaceBuffer<K>,
+    B: WorkspaceBuffer<u64>,
+    L: WorkspaceBuffer<i32>,
+    C: WorkspaceBuffer<i32>,
+> DeviceRadixSortKeysWorkspace<K, S, B, L, C>
+{
+    #[doc(hidden)]
+    pub fn __from_parts(scratch_keys: S, bins: B, lookback: L, counters: C) -> Self {
+        Self {
+            scratch_keys,
+            controls: DeviceRadixSortBufferWorkspace::__from_parts(bins, lookback, counters),
+            key: core::marker::PhantomData,
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn __parts_mut(&mut self) -> (&mut S::Range, &mut DeviceRadixSortBufferWorkspace<B, L, C>) {
+        (self.scratch_keys.range_mut(), &mut self.controls)
+    }
+}
+
+/// Opaque temporary storage for direct key/value DeviceRadixSort operations.
+pub struct DeviceRadixSortPairsWorkspace<
+    K: DeviceCopy,
+    V: DeviceCopy,
+    S = DeviceBuffer<K>,
+    U = DeviceBuffer<V>,
+    B = DeviceBuffer<u64>,
+    L = DeviceBuffer<i32>,
+    C = DeviceBuffer<i32>,
+> {
+    scratch_keys: S,
+    scratch_values: U,
+    controls: DeviceRadixSortBufferWorkspace<B, L, C>,
+    types: core::marker::PhantomData<fn() -> (K, V)>,
+}
+
+impl<
+    K: DeviceCopy,
+    V: DeviceCopy,
+    S: WorkspaceBuffer<K>,
+    U: WorkspaceBuffer<V>,
+    B: WorkspaceBuffer<u64>,
+    L: WorkspaceBuffer<i32>,
+    C: WorkspaceBuffer<i32>,
+> DeviceRadixSortPairsWorkspace<K, V, S, U, B, L, C>
+{
+    #[doc(hidden)]
+    pub fn __from_parts(
+        scratch_keys: S,
+        scratch_values: U,
+        bins: B,
+        lookback: L,
+        counters: C,
+    ) -> Self {
+        Self {
+            scratch_keys,
+            scratch_values,
+            controls: DeviceRadixSortBufferWorkspace::__from_parts(bins, lookback, counters),
+            types: core::marker::PhantomData,
+        }
+    }
+
+    #[doc(hidden)]
     pub fn __parts_mut(
         &mut self,
     ) -> (
-        &mut DeviceBuffer<u64>,
-        &mut DeviceBuffer<i32>,
-        &mut DeviceBuffer<i32>,
+        &mut S::Range,
+        &mut U::Range,
+        &mut DeviceRadixSortBufferWorkspace<B, L, C>,
     ) {
-        (&mut self.bins, &mut self.lookback, &mut self.counters)
+        (
+            self.scratch_keys.range_mut(),
+            self.scratch_values.range_mut(),
+            &mut self.controls,
+        )
     }
 }
 
@@ -381,7 +447,7 @@ pub mod __private {
         __device_radix_sort_pairs_workspace_counts, __device_radix_sort_workspace_counts,
         __device_transform_repeat_in_place,
     };
-    pub use rccl_memory::static_block_shared_memory;
+    pub use rccl_memory::{copy_device_range, static_block_shared_memory};
     /// Normalize cuda-oxide and RCCL allocator buffers for CUB's required
     /// stream-ordered lookback memset. Implemented only for the signed
     /// 32-bit protocol word, so byte-zeroing cannot create an invalid value.
@@ -403,6 +469,18 @@ pub mod __private {
     }
 
     impl<A: rccl_memory::DeviceAllocator> ZeroRadixLookback for rccl_memory::DeviceBuffer<'_, i32, A> {
+        fn zero_radix_lookback(
+            &mut self,
+            stream: &cuda_core::CudaStream,
+        ) -> Result<(), crate::DeviceAlgorithmError> {
+            rccl_memory::ContiguousDeviceRange::ensure_usable_on(self, stream)
+                .map_err(crate::DeviceAlgorithmError::Memory)?;
+            self.zero_async()
+                .map_err(crate::DeviceAlgorithmError::Memory)
+        }
+    }
+
+    impl ZeroRadixLookback for rccl_memory::TemporaryRegion<'_, i32> {
         fn zero_radix_lookback(
             &mut self,
             stream: &cuda_core::CudaStream,
@@ -538,18 +616,35 @@ where
 {
 }
 
+impl<T: TemporaryValue> DeviceRange for rccl_memory::TemporaryRegion<'_, T> {
+    fn len(&self) -> usize {
+        self.len()
+    }
+}
+
+impl<T: TemporaryValue> ReadRange for rccl_memory::TemporaryRegion<'_, T> {
+    type Item = T;
+}
+
+impl<T: TemporaryValue> WriteRange for rccl_memory::TemporaryRegion<'_, T> {
+    type Item = T;
+}
+
+impl<T: TemporaryValue> RandomAccessRange for rccl_memory::TemporaryRegion<'_, T> {}
+impl<T: TemporaryValue> ContiguousRange for rccl_memory::TemporaryRegion<'_, T> {}
+
 /// Two same-shaped ranges used by ping-pong algorithms.
 ///
 /// Passing two mutable borrows makes exclusivity a normal Rust property.
-pub struct DoubleBuffer<R> {
-    first: R,
-    second: R,
+pub struct DoubleBuffer<First, Second = First> {
+    first: First,
+    second: Second,
     current_is_first: bool,
     len: usize,
 }
 
-impl<R: DeviceRange> DoubleBuffer<R> {
-    pub fn new(first: R, second: R) -> Option<Self> {
+impl<First: DeviceRange, Second: DeviceRange> DoubleBuffer<First, Second> {
+    pub fn new(first: First, second: Second) -> Option<Self> {
         let len = first.len();
         (second.len() == len).then_some(Self {
             first,
@@ -560,12 +655,19 @@ impl<R: DeviceRange> DoubleBuffer<R> {
     }
 }
 
-impl<K: DeviceRange, V: DeviceRange> DoubleBuffer<(K, V)> {
+impl<FirstKey, FirstValue, SecondKey, SecondValue>
+    DoubleBuffer<(FirstKey, FirstValue), (SecondKey, SecondValue)>
+where
+    FirstKey: DeviceRange,
+    FirstValue: DeviceRange,
+    SecondKey: DeviceRange,
+    SecondValue: DeviceRange,
+{
     /// Construct one selector over paired key/value ranges.
     ///
     /// A single selector makes key/value synchronization structural rather
     /// than a convention between independently mutable selector integers.
-    pub fn paired(first: (K, V), second: (K, V)) -> Option<Self> {
+    pub fn paired(first: (FirstKey, FirstValue), second: (SecondKey, SecondValue)) -> Option<Self> {
         let len = first.0.len();
         (first.1.len() == len && second.0.len() == len && second.1.len() == len).then_some(Self {
             first,
@@ -576,7 +678,7 @@ impl<K: DeviceRange, V: DeviceRange> DoubleBuffer<(K, V)> {
     }
 }
 
-impl<R> DoubleBuffer<R> {
+impl<First, Second> DoubleBuffer<First, Second> {
     pub fn len(&self) -> usize {
         self.len
     }
@@ -585,19 +687,38 @@ impl<R> DoubleBuffer<R> {
         self.len == 0
     }
 
+    pub fn current_is_first(&self) -> bool {
+        self.current_is_first
+    }
+
+    pub fn first(&self) -> &First {
+        &self.first
+    }
+
+    pub fn second(&self) -> &Second {
+        &self.second
+    }
+
+    pub fn first_and_second_mut(&mut self) -> (&mut First, &mut Second) {
+        (&mut self.first, &mut self.second)
+    }
+
+    pub fn swap(&mut self) {
+        self.current_is_first = !self.current_is_first;
+    }
+
+    pub fn into_parts(self) -> (First, Second) {
+        (self.first, self.second)
+    }
+}
+
+impl<R> DoubleBuffer<R, R> {
     pub fn current(&self) -> &R {
         if self.current_is_first {
             &self.first
         } else {
             &self.second
         }
-    }
-
-    /// Report which owned Rust range currently contains the result.
-    ///
-    /// This is ordinary runtime ping-pong state, not type or policy metadata.
-    pub fn current_is_first(&self) -> bool {
-        self.current_is_first
     }
 
     pub fn current_mut(&mut self) -> &mut R {
@@ -628,14 +749,6 @@ impl<R> DoubleBuffer<R> {
         } else {
             (&mut self.second, &mut self.first)
         }
-    }
-
-    pub fn swap(&mut self) {
-        self.current_is_first = !self.current_is_first;
-    }
-
-    pub fn into_parts(self) -> (R, R) {
-        (self.first, self.second)
     }
 }
 
@@ -698,7 +811,7 @@ mod tests {
         buffers.swap();
         assert_eq!(DeviceRange::len(buffers.alternate_mut()), 3);
         let _parts = buffers.into_parts();
-        assert!(DoubleBuffer::new(TestRange::<i32>::new(1), TestRange::new(2)).is_none());
+        assert!(DoubleBuffer::new(TestRange::<i32>::new(1), TestRange::<i32>::new(2)).is_none());
     }
 
     #[test]

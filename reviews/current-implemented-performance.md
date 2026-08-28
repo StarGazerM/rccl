@@ -3,7 +3,7 @@
 Date: 2026-08-28
 
 Reference: CCCL `571f2fc3bc53cd710e306ad43d58995c1fe4219f`  
-Backend: pinned cuda-oxide `b22efa99e8383e2a349c4a3af60d8aa083973890`  
+Backend: pinned cuda-oxide `6bc513bbcdda781b13a328cf692df86f2215acf9`
 Runtime device: SM89
 
 `scripts/test-current-performance-parity.sh` builds the Rust programs through
@@ -14,15 +14,14 @@ synchronization, and full result oracle.
 
 | Implemented intersection | RCCL minimum median | CCCL minimum median | RCCL / CCCL | Gate result |
 |---|---:|---:|---:|---:|
-| CUB 32-lane `i32` WarpReduce sum, four independent reductions per value | 0.017361 ms | 0.017347 ms | 1.000807 | pass, limit 1.001 |
-| Thrust binary in-place transform plus constant range | 0.013937 ms | 0.017060 ms | 0.816940 | pass, limit 1.001 |
+| CUB 32-lane `i32` WarpReduce sum, four independent reductions per value | 0.017817 ms | 0.017801 ms | 1.000899 | pass, limit 1.001 |
+| Thrust binary in-place transform plus constant range | 0.013955 ms | 0.017350 ms | 0.804323 | pass, limit 1.001 |
 
-The current full baseline gate passes both rows. The immediately preceding
+The current full latest-oxide baseline gate passes both rows. An earlier
 standalone repetition measured WarpReduce at 1.001152 and exited before the
 transform assertion. The gate did not round that result, widen its band, or
-retry it into a pass; the table records the later complete default-gate run.
-This run-to-run boundary crossing is retained as measurement evidence, not
-used to relax the strict limit.
+retry it into a pass; this run-to-run boundary crossing remains measurement
+evidence, not a reason to relax the strict limit.
 
 The same strict gate now measures every implemented ordering path. The table
 records the median of five independently measured per-process medians for
@@ -32,28 +31,29 @@ the public borrowed `DoubleBuffer` forms directly.
 | Implemented ordering intersection | RCCL / CCCL | Gate result |
 |---|---:|---:|
 | CUB DeviceMerge keys | 1.000000 | pass |
-| CUB DeviceMerge pairs | 1.000000 | pass |
-| CUB DeviceMergeSort keys | 0.980017 | pass |
-| CUB DeviceMergeSort pairs | 1.002522 | **fail** |
-| CUB DeviceRadixSort keys | 1.064799 | **fail** |
-| CUB DeviceRadixSort pairs | 1.003838 | **fail** |
-| CUB DeviceRadixSort keys `DoubleBuffer` 0..24 | 1.083551 | **fail** |
-| CUB DeviceRadixSort pairs `DoubleBuffer` 0..24 | 1.018411 | **fail** |
-| CUB DeviceRadixSort keys, exact Policy800 single tile | 1.049953 | **fail** |
-| CUB DeviceRadixSort pairs, exact Policy800 single tile | 1.026096 | **fail** |
-| Thrust merge | 1.318052 | **fail** |
-| Thrust merge-by-key | 1.106523 | **fail** |
-| Thrust sort | 1.263096 | **fail** |
-| Thrust sort-by-key | 1.249919 | **fail** |
+| CUB DeviceMerge pairs | 0.998876 | pass |
+| CUB DeviceMergeSort keys | 0.980481 | pass |
+| CUB DeviceMergeSort pairs | 1.002974 | **fail** |
+| CUB DeviceRadixSort keys | 1.066641 | **fail** |
+| CUB DeviceRadixSort pairs | 1.001422 | **fail** |
+| CUB DeviceRadixSort keys `DoubleBuffer` 0..24 | 1.198025 | **fail** |
+| CUB DeviceRadixSort pairs `DoubleBuffer` 0..24 | 1.033191 | **fail** |
+| CUB DeviceRadixSort keys, exact Policy800 single tile | 1.049754 | **fail** |
+| CUB DeviceRadixSort pairs, exact Policy800 single tile | 1.025851 | **fail** |
+| Thrust merge | 1.005731 | **fail** |
+| Thrust merge-by-key | 0.999934 | pass |
+| Thrust sort | 0.919659 | pass |
+| Thrust sort-by-key | 0.754599 | pass |
 
-Three of the ten direct-CUB paths are inside the 1.001
-measurement-equivalence band in this run. The four Thrust ratios are current:
-the rewritten benchmark times temporary allocation inside each RCCL operation,
-as pinned Thrust does through its policy. The large difference is therefore
-visible rather than removed from the timed call. Some repeated-run ratios move
-across the boundary even when the normalized cuda-oxide kernel instructions
-are unchanged, but the gate does not classify that observation as a pass or
-widen its band. Thrust still preserves its required `par` synchronization.
+Three of the ten direct-CUB paths and three of the four Thrust paths are inside
+the 1.001 no-regression band in this run. The Thrust benchmark includes the same
+temporary allocation, destruction, and synchronous `par` completion points as
+the pinned implementation; allocation work was not moved outside the event
+interval. Some repeated-run ratios move across the boundary even when the
+normalized cuda-oxide kernel instructions are unchanged, but the gate does
+not retry failures, classify that observation as a pass, or widen its band.
+The aggregate gate remains red on the seven direct-CUB and one Thrust rows shown
+above.
 
 The two single-tile rows each batch 512 sequential public API calls between
 CUDA events and divide by 512. This makes the roughly 20-microsecond route
@@ -92,24 +92,38 @@ These are measured equivalence/no-regression claims, not a claim that two
 independent event samples have bit-identical elapsed-time values. Result
 parity is exact: both benchmarks validate every output element after timing.
 
-## Known unresolved Thrust temporary-storage gap (`THRUST-TEMP-01`)
+## Repaired Thrust temporary-storage boundary (`THRUST-TEMP-01`)
 
-Status: `backend-blocked`, open, and not an accepted performance or allocator
-difference. The corrected Thrust API now acquires all CUB scratch through
-`Execution`, but cuda-oxide's checked synchronous slice launch methods accept
-its concrete `DeviceBuffer<T>`. The safe owning constructor available to RCCL
-zeroes that buffer, whereas pinned Thrust obtains an uninitialized
-`temporary_array<uint8_t>` from its execution policy and initializes only CUB
-protocol state that requires it.
+Status: closed. The synchronous cuda-oxide launcher now accepts safe
+`KernelSliceArg` implementations, so the Thrust proc macros allocate one
+uninitialized byte transaction and split it into private typed regions with
+the same 128/256-byte rounding as pinned Thrust and CUB. Only CUB protocol
+state that requires zeroing is cleared. The generated algorithm code contains
+no raw pointer, `unsafe`, `Arc`, type erasure, or caller-visible scratch.
 
-Consequently, the rewritten RCCL benchmark includes extra scratch memsets and
-currently supports only the direct CUDA temporary resource. The current
-Thrust ratios measure that end-to-end difference and fail; they cannot be
-called kernel-performance parity until this boundary is repaired. The required fix is a safe
-checked synchronous cuda-oxide launch capability for allocator-owned and
-write-first uninitialized buffers—not caller-visible scratch, generated
-unsafe/raw pointers, a runtime type registry, or a benchmark that excludes
-work performed by pinned Thrust.
+The default synchronous `par` policy uses the pinned `cudaMalloc`/`cudaFree`
+temporary-buffer route; the policy owns a one-byte affine CUDA-runtime anchor
+because RCCL user buffers are initialized through cuda-oxide's driver API,
+whereas the pinned CCCL process already has live runtime allocations. Nsight
+showed that omitting this anchor repeatedly rebuilt the runtime's small-
+allocation arena: Thrust merge measured about 0.91 ms instead of about
+0.36 ms even though its two CUB kernels were unchanged. `par_in` remains a
+direct caller-selected `DeviceAllocator` contract and adds no hidden cache or
+compatibility dispatch.
+
+The ordering benchmark now also follows the pinned fixtures instead of
+masking allocator behavior: it reuses one sort destination, restores it by
+device copy outside the measured interval, reuses one event pair, and scopes
+the merge and ordering data sets like their two separate CCCL executables.
+The example asserts one algorithm allocation, one peak live allocation, zero
+outstanding allocations, and the exact sorted result.
+
+Closing the storage bug does not waive the strict performance gate. After the
+anti-masking review removed three Rust-only merge warmups, the default
+five-process median-of-medians run measured merge at 1.005731 and
+merge-by-key at 0.999934. Merge remains a failing row; earlier default and
+focused runs moved both merge forms across the 1.001 boundary. That timing
+tail is kept as open measurement evidence rather than retried into a pass.
 
 ## Known unresolved radix compiler-performance gap (`ORDER-PERF-01`)
 
@@ -177,7 +191,7 @@ byte-identical PTX for the complete key one-sweep entry, Nsight still reported
 in the same 0.616--0.617 ms band. The idiomatic Rust `if` expression therefore
 remains; a source-spelling assertion cannot manufacture a backend improvement.
 
-Source inspection at pinned cuda-oxide `b22efa99e838` isolates the dominant
+Source inspection first performed at cuda-oxide `b22efa99e838` isolates the dominant
 miss after the correctly lowered typed `llvm.nvvm.vote.ballot.sync` call. LLVM
 22 canonicalizes the conditional complement to a ballot result XOR a
 sign-extended inverse predicate; NVPTX then emits duplicated predicate
@@ -185,6 +199,10 @@ extraction plus `selp`/`xor`. Pinned CUB keeps the ballot predicate live and
 uses a same-register `@!p not`. LLVM `-O1`, the default `-O2`, and `-O3` each
 produced the same 99-register, zero-stack key kernel. Omitting the LLVM middle
 end produced 2,064 bytes of stack per thread and is not a performance fix.
+The current `6bc513bbcdda` pin adds macro span/debug preservation and an
+unrelated scalar conversion; it does not alter this ballot/NVPTX lowering,
+and the unchanged latest-oxide performance gate still measures 1.066641 for
+the full-range key route.
 
 Closure requires a compiler-side semantic/code-generation repair followed by
 the unchanged result, permutation, stability, PTX/SASS shape, register,

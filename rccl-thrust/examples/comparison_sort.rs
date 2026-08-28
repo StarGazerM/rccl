@@ -3,6 +3,7 @@
 //! from the natural-order radix route.
 
 use cuda_core::{CudaContext, DeviceBuffer};
+use rccl_thrust::memory::{BorrowedCudaMemoryResource, TrackingMemoryResource};
 use std::error::Error;
 
 fn shuffled_unique(count: usize) -> Vec<u32> {
@@ -78,6 +79,26 @@ fn main() -> Result<(), Box<dyn Error>> {
         .collect::<Vec<_>>();
     assert_eq!(actual, expected);
 
-    println!("pinned Thrust comparison sort routes: PASS");
+    // The pinned Thrust implementation makes one temporary-array allocation
+    // per ordering call. Keep that transaction observable without exposing
+    // its CUB regions in the public algorithm API.
+    let tracked = TrackingMemoryResource::new(BorrowedCudaMemoryResource::new(stream.context())?);
+    let tracked_exec = thrust.par_in(&stream, &tracked)?;
+    let mut tracked_keys = DeviceBuffer::from_host(&stream, &input)?;
+    rccl_thrust::sort_by!(::<u32>(
+        &tracked_exec,
+        &mut tracked_keys,
+        |left: &u32, right: &u32| right.cmp(left),
+    ))?;
+    assert_eq!(
+        tracked_keys.to_host_vec(&stream)?,
+        (0..input.len() as u32).rev().collect::<Vec<_>>()
+    );
+    let storage = tracked.stats();
+    assert_eq!(storage.total_allocations, 1);
+    assert_eq!(storage.peak_allocations, 1);
+    assert_eq!(storage.outstanding_allocations, 0);
+
+    println!("pinned Thrust comparison sort routes and one-allocation storage: PASS");
     Ok(())
 }

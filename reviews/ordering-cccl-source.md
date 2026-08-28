@@ -154,9 +154,12 @@ neither the benchmarked operation nor its comparator receives a module.
   failing, so result parity cannot be misreported as CCCL performance parity.
   The direct bit-window and Policy800 single-tile additions bring the gate to
   fourteen paths. Its latest median-of-medians run still fails, including
-  key-only radix at 1.064799x, bit-window keys at 1.083551x, single-tile keys
-  at 1.049953x, and current internal-storage Thrust sort at 1.263096x; the
-  combined gate still exits nonzero with
+  key-only radix at 1.066641x, bit-window keys at 1.198025x, and single-tile
+  keys at 1.049754x. The repaired one-allocation Thrust routes now measure
+  merge at 1.005731x, merge-by-key at 0.999934x, sort at 0.919659x, and
+  sort-by-key at 0.754599x. Merge remains outside the unchanged band after
+  removing Rust-only warmups. The combined gate exits
+  nonzero with
   `implementation gap is not masked`. The complete ratios and backend-boundary
   diagnosis are recorded in
   `reviews/current-implemented-performance.md`.

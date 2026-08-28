@@ -24,21 +24,34 @@ struct Timing {
     end_to_end_ms: f64,
 }
 
-fn timed(
+fn timed<State>(
     stream: &CudaStream,
+    warmups: usize,
     iterations: usize,
-    mut operation: impl FnMut() -> Result<(), rccl_thrust::DeviceAlgorithmError>,
+    state: &mut State,
+    mut prepare: impl FnMut(&mut State) -> Result<(), rccl_thrust::DeviceAlgorithmError>,
+    mut operation: impl FnMut(&mut State) -> Result<(), rccl_thrust::DeviceAlgorithmError>,
 ) -> Result<Timing, Box<dyn Error>> {
-    operation()?;
-    operation()?;
-    operation()?;
+    for _ in 0..warmups {
+        prepare(state)?;
+        operation(state)?;
+    }
     let mut gpu_samples = Vec::with_capacity(iterations);
     let mut end_to_end_samples = Vec::with_capacity(iterations);
+    // Reuse the event pair exactly as the pinned CCCL benchmarks do. Creating
+    // and destroying events per sample perturbs a following synchronous
+    // temporary allocation even though the kernel graph is unchanged.
+    let start = stream.context().new_event(Some(0))?;
+    let end = stream.context().new_event(Some(0))?;
     for _ in 0..iterations {
+        // Pinned CCCL restores sort input and synchronizes before recording
+        // the start event. Keeping preparation here prevents a result-only
+        // benchmark from hiding allocation-pressure or reset-work mismatch.
+        prepare(state)?;
         let wall_start = Instant::now();
-        let start = stream.record_event(Some(0))?;
-        operation()?;
-        let end = stream.record_event(Some(0))?;
+        start.record(stream)?;
+        operation(state)?;
+        end.record(stream)?;
         end.synchronize()?;
         end_to_end_samples.push(wall_start.elapsed().as_secs_f64() * 1_000.0);
         gpu_samples.push(start.elapsed_ms(&end)? as f64);
@@ -69,109 +82,146 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let context = CudaContext::new(0)?;
+    // cuda-oxide's `new_stream` is explicitly non-blocking, whereas the
+    // pinned reference uses cudaStreamCreate's blocking stream. With no other
+    // streams active, the legacy default stream supplies the same blocking
+    // ordering contract for this benchmark.
     let stream = context.default_stream();
     let thrust = rccl_thrust::thrust_program!(&context)?;
     let exec = thrust.par(&stream)?;
 
-    let first_host = (0..count)
-        .map(|index| (index * 2) as u32)
-        .collect::<Vec<_>>();
-    let second_host = (0..count)
-        .map(|index| (index * 2 + 1) as u32)
-        .collect::<Vec<_>>();
-    let first = DeviceBuffer::from_host(&stream, &first_host)?;
-    let second = DeviceBuffer::from_host(&stream, &second_host)?;
-    let mut merged = DeviceBuffer::<u32>::zeroed(&stream, count * 2)?;
-    let merge_timing = timed(&stream, iterations, || {
-        rccl_thrust::merge!(::<u32>(
-            &exec,
-            &first,
-            &second,
-            &mut merged,
-        ))
-    })?;
-    let merged_host = merged.to_host_vec(&stream)?;
-    assert!(
-        merged_host
-            .iter()
-            .copied()
-            .enumerate()
-            .all(|(index, value)| value == index as u32)
-    );
+    // The pinned parity suite has separate merge and ordering executables.
+    // Scope their allocations independently so one reference's live buffers
+    // cannot perturb the other's temporary-allocation measurements.
+    let (merge_timing, pair_merge_timing) = {
+        let first_host = (0..count)
+            .map(|index| (index * 2) as u32)
+            .collect::<Vec<_>>();
+        let second_host = (0..count)
+            .map(|index| (index * 2 + 1) as u32)
+            .collect::<Vec<_>>();
+        let first = DeviceBuffer::from_host(&stream, &first_host)?;
+        let second = DeviceBuffer::from_host(&stream, &second_host)?;
+        let mut merged = DeviceBuffer::<u32>::zeroed(&stream, count * 2)?;
+        let merge_timing = timed(
+            &stream,
+            0,
+            iterations,
+            &mut (),
+            |_| Ok(()),
+            |_| {
+                rccl_thrust::merge!(::<u32>(
+                    &exec,
+                    &first,
+                    &second,
+                    &mut merged,
+                ))
+            },
+        )?;
+        let merged_host = merged.to_host_vec(&stream)?;
+        assert!(
+            merged_host
+                .iter()
+                .copied()
+                .enumerate()
+                .all(|(index, value)| value == index as u32)
+        );
 
-    let first_values_host = (0..count)
-        .map(|index| (index * 2) as u64)
-        .collect::<Vec<_>>();
-    let second_values_host = (0..count)
-        .map(|index| (index * 2 + 1) as u64)
-        .collect::<Vec<_>>();
-    let first_values = DeviceBuffer::from_host(&stream, &first_values_host)?;
-    let second_values = DeviceBuffer::from_host(&stream, &second_values_host)?;
-    let mut merged_pair_keys = DeviceBuffer::<u32>::zeroed(&stream, count * 2)?;
-    let mut merged_pair_values = DeviceBuffer::<u64>::zeroed(&stream, count * 2)?;
-    let pair_merge_timing = timed(&stream, iterations, || {
-        rccl_thrust::merge_by_key!(::<u32, u64>(
-            &exec,
-            &first,
-            &first_values,
-            &second,
-            &second_values,
-            &mut merged_pair_keys,
-            &mut merged_pair_values,
-        ))
-    })?;
-    assert!(
-        merged_pair_values
-            .to_host_vec(&stream)?
-            .into_iter()
-            .enumerate()
-            .all(|(index, value)| value == index as u64)
-    );
+        let first_values_host = (0..count)
+            .map(|index| (index * 2) as u64)
+            .collect::<Vec<_>>();
+        let second_values_host = (0..count)
+            .map(|index| (index * 2 + 1) as u64)
+            .collect::<Vec<_>>();
+        let first_values = DeviceBuffer::from_host(&stream, &first_values_host)?;
+        let second_values = DeviceBuffer::from_host(&stream, &second_values_host)?;
+        let mut merged_pair_keys = DeviceBuffer::<u32>::zeroed(&stream, count * 2)?;
+        let mut merged_pair_values = DeviceBuffer::<u64>::zeroed(&stream, count * 2)?;
+        let pair_merge_timing = timed(
+            &stream,
+            0,
+            iterations,
+            &mut (),
+            |_| Ok(()),
+            |_| {
+                rccl_thrust::merge_by_key!(::<u32, u64>(
+                    &exec,
+                    &first,
+                    &first_values,
+                    &second,
+                    &second_values,
+                    &mut merged_pair_keys,
+                    &mut merged_pair_values,
+                ))
+            },
+        )?;
+        assert!(
+            merged_pair_values
+                .to_host_vec(&stream)?
+                .into_iter()
+                .enumerate()
+                .all(|(index, value)| value == index as u64)
+        );
+        (merge_timing, pair_merge_timing)
+    };
 
-    let sort_input_host = random_u32(count);
-    let mut sort_expected = sort_input_host.clone();
-    sort_expected.sort_unstable();
-    let mut sort_inputs = (0..(iterations + 3))
-        .map(|_| DeviceBuffer::from_host(&stream, &sort_input_host))
-        .collect::<Result<Vec<_>, _>>()?;
-    stream.synchronize()?;
-    let mut sort_index = 0usize;
-    let sort_timing = timed(&stream, iterations, || {
-        let result = rccl_thrust::sort!(::<u32>(
-            &exec,
-            &mut sort_inputs[sort_index],
-        ));
-        sort_index += 1;
-        result
-    })?;
-    let sorted_host = sort_inputs.last().unwrap().to_host_vec(&stream)?;
-    assert_eq!(sorted_host, sort_expected);
+    let (sort_timing, pair_sort_timing) = {
+        let sort_input_host = random_u32(count);
+        let mut sort_expected = sort_input_host.clone();
+        sort_expected.sort_unstable();
+        let sort_source = DeviceBuffer::from_host(&stream, &sort_input_host)?;
+        let mut sort_input = DeviceBuffer::from_host(&stream, &sort_input_host)?;
+        let sort_timing = timed(
+            &stream,
+            3,
+            iterations,
+            &mut sort_input,
+            |target| {
+                rccl_thrust::memory::copy_device_range::<u32, _, _>(&sort_source, target, &stream)
+                    .map_err(rccl_thrust::DeviceAlgorithmError::Memory)?;
+                stream
+                    .synchronize()
+                    .map_err(rccl_thrust::DeviceAlgorithmError::Driver)
+            },
+            |target| rccl_thrust::sort!(::<u32>(&exec, target)),
+        )?;
+        let sorted_host = sort_input.to_host_vec(&stream)?;
+        assert_eq!(sorted_host, sort_expected);
 
-    let mut pair_sort_keys = (0..(iterations + 3))
-        .map(|_| DeviceBuffer::from_host(&stream, &sort_input_host))
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut pair_sort_values = (0..(iterations + 3))
-        .map(|_| DeviceBuffer::from_host(&stream, &sort_input_host))
-        .collect::<Result<Vec<_>, _>>()?;
-    stream.synchronize()?;
-    let mut pair_sort_index = 0usize;
-    let pair_sort_timing = timed(&stream, iterations, || {
-        let result = rccl_thrust::sort_by_key!(::<u32, u32>(
-            &exec,
-            &mut pair_sort_keys[pair_sort_index],
-            &mut pair_sort_values[pair_sort_index],
-        ));
-        pair_sort_index += 1;
-        result
-    })?;
-    assert_eq!(
-        pair_sort_keys.last().unwrap().to_host_vec(&stream)?,
-        sort_expected
-    );
-    assert_eq!(
-        pair_sort_values.last().unwrap().to_host_vec(&stream)?,
-        sort_expected
-    );
+        let pair_sort_source_keys = DeviceBuffer::from_host(&stream, &sort_input_host)?;
+        let pair_sort_source_values = DeviceBuffer::from_host(&stream, &sort_input_host)?;
+        let mut pair_sort = (
+            DeviceBuffer::from_host(&stream, &sort_input_host)?,
+            DeviceBuffer::from_host(&stream, &sort_input_host)?,
+        );
+        let pair_sort_timing = timed(
+            &stream,
+            3,
+            iterations,
+            &mut pair_sort,
+            |(keys, values)| {
+                rccl_thrust::memory::copy_device_range::<u32, _, _>(
+                    &pair_sort_source_keys,
+                    keys,
+                    &stream,
+                )
+                .map_err(rccl_thrust::DeviceAlgorithmError::Memory)?;
+                rccl_thrust::memory::copy_device_range::<u32, _, _>(
+                    &pair_sort_source_values,
+                    values,
+                    &stream,
+                )
+                .map_err(rccl_thrust::DeviceAlgorithmError::Memory)?;
+                stream
+                    .synchronize()
+                    .map_err(rccl_thrust::DeviceAlgorithmError::Driver)
+            },
+            |(keys, values)| rccl_thrust::sort_by_key!(::<u32, u32>(&exec, keys, values)),
+        )?;
+        assert_eq!(pair_sort.0.to_host_vec(&stream)?, sort_expected);
+        assert_eq!(pair_sort.1.to_host_vec(&stream)?, sort_expected);
+        (sort_timing, pair_sort_timing)
+    };
 
     println!(
         "RCCL_THRUST_ORDERING items={count} \

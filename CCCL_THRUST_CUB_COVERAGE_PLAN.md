@@ -450,7 +450,20 @@ cannot be used to promote a `partial` row to `implemented`.
 | Gap | Affected public rows | Current evidence | Required closure |
 |---|---|---|---|
 | `ORDER-PERF-01`: ballot/complement NVPTX code generation | CUB Policy800 one-sweep `device_radix_sort` keys/pairs and every Thrust sort form that lowers through it | the pinned eight-ballot `MatchAny<8>` topology is present, but cuda-oxide/LLVM 22 lowers each Rust ballot plus conditional complement through duplicated predicate extraction and `selp`/`xor` rather than CUB's same-predicate predicated `not`; SM89 one-sweep keys use 99 registers versus CUB's 75 and pairs use 80 versus 65, with identical static shared sizes and zero spills | repair the cuda-oxide/LLVM compiler boundary without RCCL inline PTX, JIT, PTX post-processing, a different radix algorithm, unsafe/raw-pointer escape hatches, or relaxed tests; then retain exact result/permutation/stability checks and pass the unchanged PTX/SASS, register, occupancy, and equal-work large-input gates |
-| `THRUST-TEMP-01`: checked synchronous temporary-buffer ABI | every implemented Thrust sort and merge form | the public API now correctly hides CUB storage and allocates it through `Execution`, but current cuda-oxide synchronous slice launchers require `cuda_core::DeviceBuffer<T>` and its safe owning constructor zeroes the allocation; pinned Thrust policy storage is an uninitialized `temporary_array<uint8_t>`, so the extra scratch memsets and the restriction to the direct CUDA resource are not performance/allocator parity | add a safe checked cuda-oxide synchronous launch capability for allocator-owned read/write buffers, including write-first uninitialized storage; initialize only CUB protocol state that requires zero and pass the unchanged equal-work allocation-inclusive Thrust gate without raw pointers, generated unsafe, runtime type erasure, or caller scratch operands |
+| `THRUST-PAR-PERF-02`: synchronous policy timing tail | Thrust merge and merge-by-key | after the one-allocation repair and removal of Rust-only merge warmups, the latest-oxide five-round gate measures 1.005731 and 0.999934; direct CUB merge is 1.000000/0.998876, all results and sanitizers pass, and earlier runs moved both Thrust rows across 1.001 | retain the exact allocation and synchronization graph, isolate the remaining host/runtime-policy interval without adding warmups, caching, caller scratch, or a threshold exception, and pass the unchanged five-round gate |
+
+`THRUST-TEMP-01` is closed. The pinned cuda-oxide host/macro crates are patched
+at their safe synchronous launch boundary so `KernelSliceArg` implementations,
+not only concrete `cuda_core::DeviceBuffer`s, can supply checked slices. Each
+Thrust lowering now creates one affine, uninitialized `TemporaryWorkspaceN`,
+splits it into private typed regions with CUB's 128/256-byte rounding, and
+borrows those regions into the unchanged CUB operation. The generated code has
+no allocation clearing, raw pointer, `unsafe`, `Arc`, type erasure, or caller
+scratch operand. `par` follows pinned synchronous Thrust's CUDA-runtime
+temporary-buffer policy; `par_in` accepts any `DeviceAllocator`. Macro tests
+check one transaction and exact release/synchronization order, and the GPU
+example checks one allocation, one peak live allocation, zero leaks, and exact
+result.
 
 Rust-source spelling is not an open action for `ORDER-PERF-01`: a mutable
 conditional form emitted byte-identical PTX, LLVM `-O1`, `-O2`, and `-O3` all

@@ -3841,31 +3841,44 @@ fn expand_device_radix_sort_keys_buffer_order(
                         )
                         .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
                     let __rccl_single_result = {
-                        let (__rccl_input, __rccl_output) =
-                            __rccl_buffers.current_and_alternate_mut();
-                        __rccl_execution
-                            .module()
-                            .device_radix_sort_single_tile_keys::<
-                                #key_type,
-                                #bit_type,
-                                _,
-                                _,
-                                _,
-                                _,
-                                #single_items,
-                                #descending,
-                            >(
-                                __rccl_execution.stream(),
-                                &__rccl_single,
-                                &**__rccl_input,
-                                &mut **__rccl_output,
-                                __rccl_begin_bit,
-                                __rccl_end_bit,
-                                __rccl_single_default_ordered,
-                                __rccl_single_to_ordered,
-                                __rccl_single_from_ordered,
-                                __rccl_single_rank_digit,
-                            )
+                        let __rccl_current_is_first = __rccl_buffers.current_is_first();
+                        let (__rccl_first, __rccl_second) =
+                            __rccl_buffers.first_and_second_mut();
+                        if __rccl_current_is_first {
+                            __rccl_execution
+                                .module()
+                                .device_radix_sort_single_tile_keys::<
+                                    #key_type, #bit_type, _, _, _, _, #single_items, #descending,
+                                >(
+                                    __rccl_execution.stream(),
+                                    &__rccl_single,
+                                    &**__rccl_first,
+                                    &mut **__rccl_second,
+                                    __rccl_begin_bit,
+                                    __rccl_end_bit,
+                                    __rccl_single_default_ordered,
+                                    __rccl_single_to_ordered,
+                                    __rccl_single_from_ordered,
+                                    __rccl_single_rank_digit,
+                                )
+                        } else {
+                            __rccl_execution
+                                .module()
+                                .device_radix_sort_single_tile_keys::<
+                                    #key_type, #bit_type, _, _, _, _, #single_items, #descending,
+                                >(
+                                    __rccl_execution.stream(),
+                                    &__rccl_single,
+                                    &**__rccl_second,
+                                    &mut **__rccl_first,
+                                    __rccl_begin_bit,
+                                    __rccl_end_bit,
+                                    __rccl_single_default_ordered,
+                                    __rccl_single_to_ordered,
+                                    __rccl_single_from_ordered,
+                                    __rccl_single_rank_digit,
+                                )
+                        }
                     };
                     __rccl_single_result
                         .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
@@ -3997,7 +4010,7 @@ fn expand_device_radix_sort_keys_buffer_order(
                     >(
                         __rccl_execution.stream(),
                         &__rccl_histogram,
-                        &**__rccl_buffers.current(),
+                        &**__rccl_buffers.first(),
                         __rccl_begin_bit,
                         __rccl_end_bit,
                         __rccl_default_key,
@@ -4064,35 +4077,54 @@ fn expand_device_radix_sort_keys_buffer_order(
                     let __rccl_num_bits =
                         (__rccl_end_bit - __rccl_current_bit).min(8u32);
                     let __rccl_pass_result = {
-                        let (__rccl_input, __rccl_output) =
-                            __rccl_buffers.current_and_alternate_mut();
-                        __rccl_execution
-                            .module()
-                            .#onesweep_kernel::<
-                                #key_type,
-                                #bit_type,
-                                _,
-                                _,
-                                _,
-                                _,
-                                #onesweep_items,
-                            >(
-                                __rccl_execution.stream(),
-                                &__rccl_onesweep,
-                                &mut *__rccl_lookback,
-                                &mut *__rccl_counters,
-                                &*__rccl_bins,
-                                &**__rccl_input,
-                                &mut **__rccl_output,
-                                __rccl_bin_offset,
-                                __rccl_pass,
-                                __rccl_current_bit,
-                                __rccl_num_bits,
-                                __rccl_default_key,
-                                __rccl_to_ordered,
-                                __rccl_from_ordered,
-                                __rccl_digit,
-                            )
+                        let __rccl_current_is_first = __rccl_buffers.current_is_first();
+                        let (__rccl_first, __rccl_second) =
+                            __rccl_buffers.first_and_second_mut();
+                        if __rccl_current_is_first {
+                            __rccl_execution
+                                .module()
+                                .#onesweep_kernel::<
+                                    #key_type, #bit_type, _, _, _, _, #onesweep_items,
+                                >(
+                                    __rccl_execution.stream(),
+                                    &__rccl_onesweep,
+                                    &mut *__rccl_lookback,
+                                    &mut *__rccl_counters,
+                                    &*__rccl_bins,
+                                    &**__rccl_first,
+                                    &mut **__rccl_second,
+                                    __rccl_bin_offset,
+                                    __rccl_pass,
+                                    __rccl_current_bit,
+                                    __rccl_num_bits,
+                                    __rccl_default_key,
+                                    __rccl_to_ordered,
+                                    __rccl_from_ordered,
+                                    __rccl_digit,
+                                )
+                        } else {
+                            __rccl_execution
+                                .module()
+                                .#onesweep_kernel::<
+                                    #key_type, #bit_type, _, _, _, _, #onesweep_items,
+                                >(
+                                    __rccl_execution.stream(),
+                                    &__rccl_onesweep,
+                                    &mut *__rccl_lookback,
+                                    &mut *__rccl_counters,
+                                    &*__rccl_bins,
+                                    &**__rccl_second,
+                                    &mut **__rccl_first,
+                                    __rccl_bin_offset,
+                                    __rccl_pass,
+                                    __rccl_current_bit,
+                                    __rccl_num_bits,
+                                    __rccl_default_key,
+                                    __rccl_to_ordered,
+                                    __rccl_from_ordered,
+                                    __rccl_digit,
+                                )
+                        }
                     };
                     __rccl_pass_result
                         .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
@@ -4119,7 +4151,7 @@ fn expand_device_radix_sort_keys_via_buffer(
     } = call;
     let operation = expand_device_radix_sort_keys_buffer_order(
         call::DeviceRadixSortKeysBufferCall {
-            key_type,
+            key_type: key_type.clone(),
             execution: syn::parse_quote!(__rccl_execution),
             buffers: syn::parse_quote!(&mut __rccl_buffers),
             bit_range: syn::parse_quote!(0u32..#key_bits),
@@ -4153,7 +4185,12 @@ fn expand_device_radix_sort_keys_via_buffer(
                 };
                 __rccl_result?;
                 if !__rccl_current_is_first {
-                    ::core::mem::swap(__rccl_keys, __rccl_scratch_keys);
+                    ::rccl_cub::__private::copy_device_range::<#key_type, _, _>(
+                        &*__rccl_scratch_keys,
+                        &mut *__rccl_keys,
+                        __rccl_execution.stream(),
+                    )
+                    .map_err(::rccl_cub::DeviceAlgorithmError::Memory)?;
                 }
                 ::core::result::Result::Ok(())
             })()
@@ -4315,36 +4352,52 @@ fn expand_device_radix_sort_pairs_buffer_order(
                         )
                         .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
                     let __rccl_single_result = {
-                        let (__rccl_input, __rccl_output) =
-                            __rccl_buffers.current_and_alternate_mut();
-                        let (__rccl_input_keys, __rccl_input_values) = __rccl_input;
-                        let (__rccl_output_keys, __rccl_output_values) = __rccl_output;
-                        __rccl_execution
-                            .module()
-                            .device_radix_sort_single_tile_pairs::<
-                                #key_type,
-                                #value_type,
-                                #bit_type,
-                                _,
-                                _,
-                                _,
-                                _,
-                                #single_items,
-                                #descending,
-                            >(
-                                __rccl_execution.stream(),
-                                &__rccl_single,
-                                &**__rccl_input_keys,
-                                &**__rccl_input_values,
-                                &mut **__rccl_output_keys,
-                                &mut **__rccl_output_values,
-                                __rccl_begin_bit,
-                                __rccl_end_bit,
-                                __rccl_single_default_ordered,
-                                __rccl_single_to_ordered,
-                                __rccl_single_from_ordered,
-                                __rccl_single_rank_digit,
-                            )
+                        let __rccl_current_is_first = __rccl_buffers.current_is_first();
+                        let (__rccl_first, __rccl_second) =
+                            __rccl_buffers.first_and_second_mut();
+                        let (__rccl_first_keys, __rccl_first_values) = __rccl_first;
+                        let (__rccl_second_keys, __rccl_second_values) = __rccl_second;
+                        if __rccl_current_is_first {
+                            __rccl_execution
+                                .module()
+                                .device_radix_sort_single_tile_pairs::<
+                                    #key_type, #value_type, #bit_type, _, _, _, _, #single_items,
+                                    #descending,
+                                >(
+                                    __rccl_execution.stream(),
+                                    &__rccl_single,
+                                    &**__rccl_first_keys,
+                                    &**__rccl_first_values,
+                                    &mut **__rccl_second_keys,
+                                    &mut **__rccl_second_values,
+                                    __rccl_begin_bit,
+                                    __rccl_end_bit,
+                                    __rccl_single_default_ordered,
+                                    __rccl_single_to_ordered,
+                                    __rccl_single_from_ordered,
+                                    __rccl_single_rank_digit,
+                                )
+                        } else {
+                            __rccl_execution
+                                .module()
+                                .device_radix_sort_single_tile_pairs::<
+                                    #key_type, #value_type, #bit_type, _, _, _, _, #single_items,
+                                    #descending,
+                                >(
+                                    __rccl_execution.stream(),
+                                    &__rccl_single,
+                                    &**__rccl_second_keys,
+                                    &**__rccl_second_values,
+                                    &mut **__rccl_first_keys,
+                                    &mut **__rccl_first_values,
+                                    __rccl_begin_bit,
+                                    __rccl_end_bit,
+                                    __rccl_single_default_ordered,
+                                    __rccl_single_to_ordered,
+                                    __rccl_single_from_ordered,
+                                    __rccl_single_rank_digit,
+                                )
+                        }
                     };
                     __rccl_single_result
                         .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
@@ -4477,7 +4530,7 @@ fn expand_device_radix_sort_pairs_buffer_order(
                     >(
                         __rccl_execution.stream(),
                         &__rccl_histogram,
-                        &**&__rccl_buffers.current().0,
+                        &**&__rccl_buffers.first().0,
                         __rccl_begin_bit,
                         __rccl_end_bit,
                         __rccl_default_key,
@@ -4546,40 +4599,60 @@ fn expand_device_radix_sort_pairs_buffer_order(
                     let __rccl_num_bits =
                         (__rccl_end_bit - __rccl_current_bit).min(8u32);
                     let __rccl_pass_result = {
-                        let (__rccl_input, __rccl_output) =
-                            __rccl_buffers.current_and_alternate_mut();
-                        let (__rccl_input_keys, __rccl_input_values) = __rccl_input;
-                        let (__rccl_output_keys, __rccl_output_values) = __rccl_output;
-                        __rccl_execution
-                            .module()
-                            .#onesweep_kernel::<
-                                #key_type,
-                                #value_type,
-                                #bit_type,
-                                _,
-                                _,
-                                _,
-                                _,
-                                #onesweep_items,
-                            >(
-                                __rccl_execution.stream(),
-                                &__rccl_onesweep,
-                                &mut *__rccl_lookback,
-                                &mut *__rccl_counters,
-                                &*__rccl_bins,
-                                &**__rccl_input_keys,
-                                &**__rccl_input_values,
-                                &mut **__rccl_output_keys,
-                                &mut **__rccl_output_values,
-                                __rccl_bin_offset,
-                                __rccl_pass,
-                                __rccl_current_bit,
-                                __rccl_num_bits,
-                                __rccl_default_key,
-                                __rccl_to_ordered,
-                                __rccl_from_ordered,
-                                __rccl_digit,
-                            )
+                        let __rccl_current_is_first = __rccl_buffers.current_is_first();
+                        let (__rccl_first, __rccl_second) =
+                            __rccl_buffers.first_and_second_mut();
+                        let (__rccl_first_keys, __rccl_first_values) = __rccl_first;
+                        let (__rccl_second_keys, __rccl_second_values) = __rccl_second;
+                        if __rccl_current_is_first {
+                            __rccl_execution
+                                .module()
+                                .#onesweep_kernel::<
+                                    #key_type, #value_type, #bit_type, _, _, _, _, #onesweep_items,
+                                >(
+                                    __rccl_execution.stream(),
+                                    &__rccl_onesweep,
+                                    &mut *__rccl_lookback,
+                                    &mut *__rccl_counters,
+                                    &*__rccl_bins,
+                                    &**__rccl_first_keys,
+                                    &**__rccl_first_values,
+                                    &mut **__rccl_second_keys,
+                                    &mut **__rccl_second_values,
+                                    __rccl_bin_offset,
+                                    __rccl_pass,
+                                    __rccl_current_bit,
+                                    __rccl_num_bits,
+                                    __rccl_default_key,
+                                    __rccl_to_ordered,
+                                    __rccl_from_ordered,
+                                    __rccl_digit,
+                                )
+                        } else {
+                            __rccl_execution
+                                .module()
+                                .#onesweep_kernel::<
+                                    #key_type, #value_type, #bit_type, _, _, _, _, #onesweep_items,
+                                >(
+                                    __rccl_execution.stream(),
+                                    &__rccl_onesweep,
+                                    &mut *__rccl_lookback,
+                                    &mut *__rccl_counters,
+                                    &*__rccl_bins,
+                                    &**__rccl_second_keys,
+                                    &**__rccl_second_values,
+                                    &mut **__rccl_first_keys,
+                                    &mut **__rccl_first_values,
+                                    __rccl_bin_offset,
+                                    __rccl_pass,
+                                    __rccl_current_bit,
+                                    __rccl_num_bits,
+                                    __rccl_default_key,
+                                    __rccl_to_ordered,
+                                    __rccl_from_ordered,
+                                    __rccl_digit,
+                                )
+                        }
                     };
                     __rccl_pass_result
                         .map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
@@ -4608,8 +4681,8 @@ fn expand_device_radix_sort_pairs_via_buffer(
     } = call;
     let operation = expand_device_radix_sort_pairs_buffer_order(
         call::DeviceRadixSortPairsBufferCall {
-            key_type,
-            value_type,
+            key_type: key_type.clone(),
+            value_type: value_type.clone(),
             execution: syn::parse_quote!(__rccl_execution),
             buffers: syn::parse_quote!(&mut __rccl_buffers),
             bit_range: syn::parse_quote!(0u32..#key_bits),
@@ -4659,8 +4732,18 @@ fn expand_device_radix_sort_pairs_via_buffer(
                 };
                 __rccl_result?;
                 if !__rccl_current_is_first {
-                    ::core::mem::swap(__rccl_keys, __rccl_scratch_keys);
-                    ::core::mem::swap(__rccl_values, __rccl_scratch_values);
+                    ::rccl_cub::__private::copy_device_range::<#key_type, _, _>(
+                        &*__rccl_scratch_keys,
+                        &mut *__rccl_keys,
+                        __rccl_execution.stream(),
+                    )
+                    .map_err(::rccl_cub::DeviceAlgorithmError::Memory)?;
+                    ::rccl_cub::__private::copy_device_range::<#value_type, _, _>(
+                        &*__rccl_scratch_values,
+                        &mut *__rccl_values,
+                        __rccl_execution.stream(),
+                    )
+                    .map_err(::rccl_cub::DeviceAlgorithmError::Memory)?;
                 }
                 ::core::result::Result::Ok(())
             })()
@@ -5116,7 +5199,8 @@ mod tests {
                 .contains("device_radix_sort_histogram_4 :: < i32 , u32 , _ , _ , _ , 21usize")
         );
         assert_eq!(operation.matches("zero_radix_lookback").count(), 1);
-        assert!(operation.contains("core :: mem :: swap (__rccl_keys , __rccl_scratch_keys)"));
+        assert!(operation.contains("copy_device_range :: < i32 , _ , _ >"));
+        assert!(!operation.contains("core :: mem :: swap"));
         assert!(!operation.contains("core :: mem :: drop (__rccl_buffers)"));
         assert!(operation.contains("let (__rccl_result , __rccl_current_is_first) ="));
         assert!(operation.contains("while __rccl_pass < __rccl_passes"));
@@ -5130,11 +5214,11 @@ mod tests {
             operation
                 .matches("device_radix_sort_onesweep_keys_34304 ::")
                 .count(),
-            1,
-            "one affine split borrow must replace duplicated selector branches"
+            2,
+            "heterogeneous Rust ranges require one typed launch branch per selector state"
         );
         assert!(operation.contains("DoubleBuffer :: new"));
-        assert!(operation.contains("current_and_alternate_mut"));
+        assert!(operation.contains("first_and_second_mut"));
         assert!(operation.contains("__rccl_buffers . swap"));
         assert!(!operation.contains("if (__rccl_pass & 1usize) == 0"));
         assert!(!operation.contains("device_merge_sort"));
@@ -5164,18 +5248,18 @@ mod tests {
         assert!(operation.contains("__rccl_passes as u32"));
         assert!(operation.contains("__rccl_begin_bit , __rccl_end_bit"));
         assert!(operation.contains("min (8u32)"));
-        assert!(operation.contains("current_and_alternate_mut"));
+        assert!(operation.contains("first_and_second_mut"));
         assert_eq!(
             operation
                 .matches("device_radix_sort_onesweep_keys_34304 ::")
                 .count(),
-            1
+            2
         );
         assert_eq!(
             operation
                 .matches("device_radix_sort_single_tile_keys ::")
                 .count(),
-            1
+            2
         );
         assert_eq!(operation.matches("__rccl_buffers . swap").count(), 2);
         let single_begin = operation
@@ -5306,10 +5390,11 @@ mod tests {
             operation
                 .matches("device_radix_sort_onesweep_pairs_28160 ::")
                 .count(),
-            1
+            2
         );
         assert!(operation.contains("DoubleBuffer :: paired"));
-        assert!(operation.contains("current_and_alternate_mut"));
+        assert!(operation.contains("first_and_second_mut"));
+        assert_eq!(operation.matches("copy_device_range").count(), 2);
         assert!(!operation.contains("core :: mem :: drop (__rccl_buffers)"));
         assert!(operation.contains("let (__rccl_result , __rccl_current_is_first) ="));
         assert!(!operation.contains("device_merge_sort"));
@@ -5370,20 +5455,20 @@ mod tests {
         .expect("the paired DoubleBuffer graph must lower")
         .to_string();
 
-        assert!(operation.contains("current_and_alternate_mut"));
-        assert!(operation.contains("let (__rccl_input_keys , __rccl_input_values)"));
-        assert!(operation.contains("let (__rccl_output_keys , __rccl_output_values)"));
+        assert!(operation.contains("first_and_second_mut"));
+        assert!(operation.contains("let (__rccl_first_keys , __rccl_first_values)"));
+        assert!(operation.contains("let (__rccl_second_keys , __rccl_second_values)"));
         assert_eq!(
             operation
                 .matches("device_radix_sort_onesweep_pairs_28160 ::")
                 .count(),
-            1
+            2
         );
         assert_eq!(
             operation
                 .matches("device_radix_sort_single_tile_pairs ::")
                 .count(),
-            1
+            2
         );
         assert_eq!(operation.matches("__rccl_buffers . swap").count(), 2);
         let single_begin = operation

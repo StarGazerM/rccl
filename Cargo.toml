@@ -13,6 +13,7 @@ members = [
     "rccl-thrust",
     "rccl-thrust-macros",
 ]
+exclude = ["vendor/cuda-host", "vendor/cuda-macros"]
 
 [dependencies]
 rccl-cub = { path = "rccl-cub" }
@@ -21,3 +22,11 @@ rccl-thrust = { path = "rccl-thrust" }
 [profile.release]
 codegen-units = 1
 lto = "thin"
+
+# Pinned cuda-oxide currently accepts arbitrary safe slice arguments only on
+# its async launcher surface. RCCL uses the same KernelSliceArg contract for
+# synchronous launches so one CUB temporary allocation can expose disjoint,
+# typed regions without manufacturing DeviceBuffer owners.
+[patch."https://github.com/NVlabs/cuda-oxide.git"]
+cuda-host = { path = "vendor/cuda-host" }
+cuda-macros = { path = "vendor/cuda-macros" }

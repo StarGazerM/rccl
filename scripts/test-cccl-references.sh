@@ -49,6 +49,7 @@ mapfile -t reference_sources < <(
 )
 expected_reference_sources=(
   "$task_root/benchmarks/merge-reference.cu"
+  "$task_root/benchmarks/ordering-reference.cu"
   "$task_root/benchmarks/thrust-transform-constant-reference.cu"
   "$task_root/benchmarks/warp-merge-sort-reference.cu"
   "$task_root/benchmarks/warp-reduce-reference.cu"
@@ -70,6 +71,7 @@ for source in "${reference_sources[@]}"; do
 done
 
 "$reference_build_dir/merge-reference" 65536 1
+"$reference_build_dir/ordering-reference" 65536 1
 "$reference_build_dir/thrust-transform-constant-reference"
 "$reference_build_dir/warp-reduce-reference"
 "$reference_build_dir/warp-merge-sort-reference" 262144 1
