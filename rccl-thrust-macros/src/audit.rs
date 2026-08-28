@@ -64,14 +64,19 @@ fn is_trusted_cub_lowering(path: &Path) -> bool {
                 && matches!(
                     operation.as_str(),
                     "device_merge_keys"
+                        | "device_merge_keys_partition_count"
                         | "device_merge_pairs"
+                        | "device_merge_pairs_partition_count"
                         | "device_merge_sort_keys"
+                        | "device_merge_sort_partition_count"
                         | "device_stable_merge_sort_keys"
                         | "device_merge_sort_pairs"
                         | "device_stable_merge_sort_pairs"
                         | "device_radix_sort_keys"
                         | "device_radix_sort_keys_descending"
+                        | "device_radix_sort_workspace"
                         | "device_radix_sort_pairs"
+                        | "device_radix_sort_pairs_workspace"
                         | "device_radix_sort_pairs_descending"
                 )
         }

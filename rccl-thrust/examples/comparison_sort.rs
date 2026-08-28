@@ -29,20 +29,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     let exec = rccl_thrust::cuda::par(&stream, &allocator, &module)?;
 
     let input = shuffled_unique(10_003);
-    let partition_count =
-        rccl_thrust::device_merge_sort_partition_count!(::<u32, sm_89>(input.len()))?;
-    let mut scratch_keys = DeviceBuffer::<u32>::zeroed(&stream, input.len())?;
-    let mut scratch_values = DeviceBuffer::<u32>::zeroed(&stream, input.len())?;
-    let mut partitions = DeviceBuffer::<usize>::zeroed(&stream, partition_count)?;
 
     // Pinned Thrust comparator sort: descending order is selected by the Rust
-    // closure, while CUB schedule selection stays macro-time.
+    // closure. Its CUB schedule and temporary storage stay implementation
+    // details of the macro and execution policy.
     let mut descending = DeviceBuffer::from_host(&stream, &input)?;
     rccl_thrust::sort_by!(::<u32, sm_89>(
         &exec,
         &mut descending,
-        &mut scratch_keys,
-        &mut partitions,
         |left: &u32, right: &u32| right.cmp(left),
     ))?;
     assert_eq!(
@@ -57,9 +51,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         &exec,
         &mut pair_keys,
         &mut pair_values,
-        &mut scratch_keys,
-        &mut scratch_values,
-        &mut partitions,
         |left: &u32, right: &u32| right.cmp(left),
     ))?;
     let descending_expected = (0..input.len() as u32).rev().collect::<Vec<_>>();
@@ -83,9 +74,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         &exec,
         &mut stable_keys,
         &mut stable_values,
-        &mut scratch_keys,
-        &mut scratch_values,
-        &mut partitions,
         |left: &u32, right: &u32| left.cmp(right),
     ))?;
     let actual = stable_keys

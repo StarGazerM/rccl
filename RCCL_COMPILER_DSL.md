@@ -65,6 +65,13 @@ transform!(
 )?;
 ```
 
+Thrust call shapes expose only semantic operands. Radix scratch, merge-sort
+ping-pong buffers, bins, lookback state, counters, and partition arrays are not
+public Thrust arguments. Their layout formulas are selected by the proc macro;
+their runtime extents come from the borrowed ranges; and the generated Rust
+acquires the concrete temporary buffers through `Execution`. Direct CUB keeps
+its separate caller-storage contract.
+
 `warp_reduce!`, the shown finite-constant `transform!` intersection, and the
 primitive numeric sort/merge slice are implemented and exported. Natural
 integer/`f32`/`f64` sort lowers through CUB radix sort; custom ordering lowers

@@ -87,17 +87,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let first = DeviceBuffer::from_host(&stream, &first_host)?;
     let second = DeviceBuffer::from_host(&stream, &second_host)?;
     let mut merged = DeviceBuffer::<u32>::zeroed(&stream, count * 2)?;
-    let partition_count = rccl_cub::device_merge_keys_partition_count!(::<u32, sm_89>(
-        first.len(),
-        second.len(),
-    ))?;
-    let mut merge_partitions = DeviceBuffer::<usize>::zeroed(&stream, partition_count)?;
     let merge_timing = timed(&stream, iterations, || {
         rccl_thrust::merge!(::<u32, sm_89>(
             &exec,
             &first,
             &second,
-            &mut merge_partitions,
             &mut merged,
         ))
     })?;
@@ -120,11 +114,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     let second_values = DeviceBuffer::from_host(&stream, &second_values_host)?;
     let mut merged_pair_keys = DeviceBuffer::<u32>::zeroed(&stream, count * 2)?;
     let mut merged_pair_values = DeviceBuffer::<u64>::zeroed(&stream, count * 2)?;
-    let pair_partition_count = rccl_cub::device_merge_pairs_partition_count!(::<u32, u64, sm_89>(
-        first.len(),
-        second.len(),
-    ))?;
-    let mut pair_partitions = DeviceBuffer::<usize>::zeroed(&stream, pair_partition_count)?;
     let pair_merge_timing = timed(&stream, iterations, || {
         rccl_thrust::merge_by_key!(::<u32, u64, sm_89>(
             &exec,
@@ -132,7 +121,6 @@ fn main() -> Result<(), Box<dyn Error>> {
             &first_values,
             &second,
             &second_values,
-            &mut pair_partitions,
             &mut merged_pair_keys,
             &mut merged_pair_values,
         ))
@@ -151,21 +139,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut sort_inputs = (0..(iterations + 3))
         .map(|_| DeviceBuffer::from_host(&stream, &sort_input_host))
         .collect::<Result<Vec<_>, _>>()?;
-    let sort_workspace = rccl_cub::device_radix_sort_workspace!(::<u32, sm_89>(count));
-    let mut sort_scratch = DeviceBuffer::<u32>::zeroed(&stream, sort_workspace.scratch_keys)?;
-    let mut sort_bins = DeviceBuffer::<u64>::zeroed(&stream, sort_workspace.bins)?;
-    let mut sort_lookback = DeviceBuffer::<i32>::zeroed(&stream, sort_workspace.lookback)?;
-    let mut sort_counters = DeviceBuffer::<i32>::zeroed(&stream, sort_workspace.counters)?;
     stream.synchronize()?;
     let mut sort_index = 0usize;
     let sort_timing = timed(&stream, iterations, || {
         let result = rccl_thrust::sort!(::<u32, sm_89>(
             &exec,
             &mut sort_inputs[sort_index],
-            &mut sort_scratch,
-            &mut sort_bins,
-            &mut sort_lookback,
-            &mut sort_counters,
         ));
         sort_index += 1;
         result
@@ -179,17 +158,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut pair_sort_values = (0..(iterations + 3))
         .map(|_| DeviceBuffer::from_host(&stream, &sort_input_host))
         .collect::<Result<Vec<_>, _>>()?;
-    let pair_sort_workspace =
-        rccl_cub::device_radix_sort_pairs_workspace!(::<u32, u32, sm_89>(count));
-    let mut pair_sort_scratch_keys =
-        DeviceBuffer::<u32>::zeroed(&stream, pair_sort_workspace.scratch_keys)?;
-    let mut pair_sort_scratch_values =
-        DeviceBuffer::<u32>::zeroed(&stream, pair_sort_workspace.scratch_values)?;
-    let mut pair_sort_bins = DeviceBuffer::<u64>::zeroed(&stream, pair_sort_workspace.bins)?;
-    let mut pair_sort_lookback =
-        DeviceBuffer::<i32>::zeroed(&stream, pair_sort_workspace.lookback)?;
-    let mut pair_sort_counters =
-        DeviceBuffer::<i32>::zeroed(&stream, pair_sort_workspace.counters)?;
     stream.synchronize()?;
     let mut pair_sort_index = 0usize;
     let pair_sort_timing = timed(&stream, iterations, || {
@@ -197,11 +165,6 @@ fn main() -> Result<(), Box<dyn Error>> {
             &exec,
             &mut pair_sort_keys[pair_sort_index],
             &mut pair_sort_values[pair_sort_index],
-            &mut pair_sort_scratch_keys,
-            &mut pair_sort_scratch_values,
-            &mut pair_sort_bins,
-            &mut pair_sort_lookback,
-            &mut pair_sort_counters,
         ));
         pair_sort_index += 1;
         result

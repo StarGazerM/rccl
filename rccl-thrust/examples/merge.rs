@@ -17,17 +17,11 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let first = DeviceBuffer::from_host(&stream, &[0_i32, 2, 4])?;
     let second = DeviceBuffer::from_host(&stream, &[0_i32, 3, 3, 4])?;
-    let partition_count = rccl_cub::device_merge_keys_partition_count!(::<i32, sm_89>(
-        first.len(),
-        second.len(),
-    ))?;
-    let mut partitions = DeviceBuffer::<usize>::zeroed(&stream, partition_count)?;
     let mut merged = DeviceBuffer::<i32>::zeroed(&stream, 7)?;
     rccl_thrust::merge!(::<i32, sm_89>(
         &exec,
         &first,
         &second,
-        &mut partitions,
         &mut merged,
     ))?;
     assert_eq!(merged.to_host_vec(&stream)?, [0, 0, 2, 3, 3, 4, 4]);
@@ -39,7 +33,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         &exec,
         &descending_first,
         &descending_second,
-        &mut partitions,
         &mut descending_output,
         |left: &i32, right: &i32| right.cmp(left),
     ))?;
@@ -50,11 +43,6 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let first_values = DeviceBuffer::from_host(&stream, &[13_i32, 7, 42])?;
     let second_values = DeviceBuffer::from_host(&stream, &[42_i32, 42, 7, 13])?;
-    let pair_partition_count = rccl_cub::device_merge_pairs_partition_count!(::<i32, i32, sm_89>(
-        first.len(),
-        second.len(),
-    ))?;
-    let mut pair_partitions = DeviceBuffer::<usize>::zeroed(&stream, pair_partition_count)?;
     let mut output_keys = DeviceBuffer::<i32>::zeroed(&stream, 7)?;
     let mut output_values = DeviceBuffer::<i32>::zeroed(&stream, 7)?;
     rccl_thrust::merge_by_key!(::<i32, i32, sm_89>(
@@ -63,7 +51,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         &first_values,
         &second,
         &second_values,
-        &mut pair_partitions,
         &mut output_keys,
         &mut output_values,
     ))?;
@@ -83,7 +70,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         &descending_first_values,
         &descending_second,
         &descending_second_values,
-        &mut pair_partitions,
         &mut descending_output_keys,
         &mut descending_output_values,
         |left: &i32, right: &i32| right.cmp(left),

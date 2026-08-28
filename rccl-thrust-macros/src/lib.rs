@@ -147,27 +147,37 @@ fn expand_sort(call: call::SortCall) -> syn::Result<proc_macro2::TokenStream> {
     let target = call.target;
     let execution = call.execution;
     let range = call.range;
-    let scratch_keys = call.scratch_keys;
-    let bins = call.bins;
-    let lookback = call.lookback;
-    let counters = call.counters;
     synchronous_cub(
         execution,
-        quote! {{
+        quote! {(|| -> ::core::result::Result<
+            (),
+            ::rccl_thrust::DeviceAlgorithmError,
+        > {
             let __rccl_range = #range;
-            let __rccl_scratch_keys = #scratch_keys;
-            let __rccl_bins = #bins;
-            let __rccl_lookback = #lookback;
-            let __rccl_counters = #counters;
+            let __rccl_len = ::rccl_thrust::DeviceRange::len(&*__rccl_range);
+            let __rccl_workspace =
+                ::rccl_cub::device_radix_sort_workspace!(::<#key_type, #target>(__rccl_len));
+            let mut __rccl_scratch_keys =
+                __rccl_execution.temporary::<#key_type>(__rccl_workspace.scratch_keys)
+                .map_err(::rccl_thrust::DeviceAlgorithmError::Memory)?;
+            let mut __rccl_bins =
+                __rccl_execution.temporary::<u64>(__rccl_workspace.bins)
+                .map_err(::rccl_thrust::DeviceAlgorithmError::Memory)?;
+            let mut __rccl_lookback =
+                __rccl_execution.temporary::<i32>(__rccl_workspace.lookback)
+                .map_err(::rccl_thrust::DeviceAlgorithmError::Memory)?;
+            let mut __rccl_counters =
+                __rccl_execution.temporary::<i32>(__rccl_workspace.counters)
+                .map_err(::rccl_thrust::DeviceAlgorithmError::Memory)?;
             ::rccl_cub::device_radix_sort_keys!(::<#key_type, #target>(
                 __rccl_execution,
                 __rccl_range,
-                __rccl_scratch_keys,
-                __rccl_bins,
-                __rccl_lookback,
-                __rccl_counters,
+                &mut __rccl_scratch_keys,
+                &mut __rccl_bins,
+                &mut __rccl_lookback,
+                &mut __rccl_counters,
             ))
-        }},
+        })()},
     )
 }
 
@@ -176,24 +186,34 @@ fn expand_sort_by(call: call::SortByCall) -> syn::Result<proc_macro2::TokenStrea
     let target = call.target;
     let execution = call.execution;
     let range = call.range;
-    let scratch_keys = call.scratch_keys;
-    let partitions = call.partitions;
     let compare = call.compare;
     synchronous_cub(
         execution,
-        quote! {{
+        quote! {(|| -> ::core::result::Result<
+            (),
+            ::rccl_thrust::DeviceAlgorithmError,
+        > {
             let __rccl_range = #range;
-            let __rccl_scratch_keys = #scratch_keys;
-            let __rccl_partitions = #partitions;
             let __rccl_compare = #compare;
+            let __rccl_len = ::rccl_thrust::DeviceRange::len(&*__rccl_range);
+            let __rccl_partition_count =
+                ::rccl_cub::device_merge_sort_partition_count!(::<#key_type, #target>(
+                    __rccl_len
+                ))?;
+            let mut __rccl_scratch_keys =
+                __rccl_execution.temporary::<#key_type>(__rccl_len)
+                .map_err(::rccl_thrust::DeviceAlgorithmError::Memory)?;
+            let mut __rccl_partitions =
+                __rccl_execution.temporary::<usize>(__rccl_partition_count)
+                .map_err(::rccl_thrust::DeviceAlgorithmError::Memory)?;
             ::rccl_cub::device_merge_sort_keys!(::<#key_type, #target>(
                 __rccl_execution,
                 __rccl_range,
-                __rccl_scratch_keys,
-                __rccl_partitions,
+                &mut __rccl_scratch_keys,
+                &mut __rccl_partitions,
                 __rccl_compare,
             ))
-        }},
+        })()},
     )
 }
 
@@ -202,27 +222,37 @@ fn expand_stable_sort(call: call::SortCall) -> syn::Result<proc_macro2::TokenStr
     let target = call.target;
     let execution = call.execution;
     let range = call.range;
-    let scratch_keys = call.scratch_keys;
-    let bins = call.bins;
-    let lookback = call.lookback;
-    let counters = call.counters;
     synchronous_cub(
         execution,
-        quote! {{
+        quote! {(|| -> ::core::result::Result<
+            (),
+            ::rccl_thrust::DeviceAlgorithmError,
+        > {
             let __rccl_range = #range;
-            let __rccl_scratch_keys = #scratch_keys;
-            let __rccl_bins = #bins;
-            let __rccl_lookback = #lookback;
-            let __rccl_counters = #counters;
+            let __rccl_len = ::rccl_thrust::DeviceRange::len(&*__rccl_range);
+            let __rccl_workspace =
+                ::rccl_cub::device_radix_sort_workspace!(::<#key_type, #target>(__rccl_len));
+            let mut __rccl_scratch_keys =
+                __rccl_execution.temporary::<#key_type>(__rccl_workspace.scratch_keys)
+                .map_err(::rccl_thrust::DeviceAlgorithmError::Memory)?;
+            let mut __rccl_bins =
+                __rccl_execution.temporary::<u64>(__rccl_workspace.bins)
+                .map_err(::rccl_thrust::DeviceAlgorithmError::Memory)?;
+            let mut __rccl_lookback =
+                __rccl_execution.temporary::<i32>(__rccl_workspace.lookback)
+                .map_err(::rccl_thrust::DeviceAlgorithmError::Memory)?;
+            let mut __rccl_counters =
+                __rccl_execution.temporary::<i32>(__rccl_workspace.counters)
+                .map_err(::rccl_thrust::DeviceAlgorithmError::Memory)?;
             ::rccl_cub::device_radix_sort_keys!(::<#key_type, #target>(
                 __rccl_execution,
                 __rccl_range,
-                __rccl_scratch_keys,
-                __rccl_bins,
-                __rccl_lookback,
-                __rccl_counters,
+                &mut __rccl_scratch_keys,
+                &mut __rccl_bins,
+                &mut __rccl_lookback,
+                &mut __rccl_counters,
             ))
-        }},
+        })()},
     )
 }
 
@@ -231,24 +261,34 @@ fn expand_stable_sort_by(call: call::SortByCall) -> syn::Result<proc_macro2::Tok
     let target = call.target;
     let execution = call.execution;
     let range = call.range;
-    let scratch_keys = call.scratch_keys;
-    let partitions = call.partitions;
     let compare = call.compare;
     synchronous_cub(
         execution,
-        quote! {{
+        quote! {(|| -> ::core::result::Result<
+            (),
+            ::rccl_thrust::DeviceAlgorithmError,
+        > {
             let __rccl_range = #range;
-            let __rccl_scratch_keys = #scratch_keys;
-            let __rccl_partitions = #partitions;
             let __rccl_compare = #compare;
+            let __rccl_len = ::rccl_thrust::DeviceRange::len(&*__rccl_range);
+            let __rccl_partition_count =
+                ::rccl_cub::device_merge_sort_partition_count!(::<#key_type, #target>(
+                    __rccl_len
+                ))?;
+            let mut __rccl_scratch_keys =
+                __rccl_execution.temporary::<#key_type>(__rccl_len)
+                .map_err(::rccl_thrust::DeviceAlgorithmError::Memory)?;
+            let mut __rccl_partitions =
+                __rccl_execution.temporary::<usize>(__rccl_partition_count)
+                .map_err(::rccl_thrust::DeviceAlgorithmError::Memory)?;
             ::rccl_cub::device_stable_merge_sort_keys!(::<#key_type, #target>(
                 __rccl_execution,
                 __rccl_range,
-                __rccl_scratch_keys,
-                __rccl_partitions,
+                &mut __rccl_scratch_keys,
+                &mut __rccl_partitions,
                 __rccl_compare,
             ))
-        }},
+        })()},
     )
 }
 
@@ -259,32 +299,47 @@ fn expand_sort_by_key(call: call::SortByKeyCall) -> syn::Result<proc_macro2::Tok
     let execution = call.execution;
     let keys = call.keys;
     let values = call.values;
-    let scratch_keys = call.scratch_keys;
-    let scratch_values = call.scratch_values;
-    let bins = call.bins;
-    let lookback = call.lookback;
-    let counters = call.counters;
     synchronous_cub(
         execution,
-        quote! {{
+        quote! {(|| -> ::core::result::Result<
+            (),
+            ::rccl_thrust::DeviceAlgorithmError,
+        > {
             let __rccl_keys = #keys;
             let __rccl_values = #values;
-            let __rccl_scratch_keys = #scratch_keys;
-            let __rccl_scratch_values = #scratch_values;
-            let __rccl_bins = #bins;
-            let __rccl_lookback = #lookback;
-            let __rccl_counters = #counters;
+            let __rccl_len = ::rccl_thrust::DeviceRange::len(&*__rccl_keys);
+            let __rccl_workspace =
+                ::rccl_cub::device_radix_sort_pairs_workspace!(::<
+                    #key_type,
+                    #value_type,
+                    #target
+                >(__rccl_len));
+            let mut __rccl_scratch_keys =
+                __rccl_execution.temporary::<#key_type>(__rccl_workspace.scratch_keys)
+                .map_err(::rccl_thrust::DeviceAlgorithmError::Memory)?;
+            let mut __rccl_scratch_values =
+                __rccl_execution.temporary::<#value_type>(__rccl_workspace.scratch_values)
+                .map_err(::rccl_thrust::DeviceAlgorithmError::Memory)?;
+            let mut __rccl_bins =
+                __rccl_execution.temporary::<u64>(__rccl_workspace.bins)
+                .map_err(::rccl_thrust::DeviceAlgorithmError::Memory)?;
+            let mut __rccl_lookback =
+                __rccl_execution.temporary::<i32>(__rccl_workspace.lookback)
+                .map_err(::rccl_thrust::DeviceAlgorithmError::Memory)?;
+            let mut __rccl_counters =
+                __rccl_execution.temporary::<i32>(__rccl_workspace.counters)
+                .map_err(::rccl_thrust::DeviceAlgorithmError::Memory)?;
             ::rccl_cub::device_radix_sort_pairs!(::<#key_type, #value_type, #target>(
                 __rccl_execution,
                 __rccl_keys,
                 __rccl_values,
-                __rccl_scratch_keys,
-                __rccl_scratch_values,
-                __rccl_bins,
-                __rccl_lookback,
-                __rccl_counters,
+                &mut __rccl_scratch_keys,
+                &mut __rccl_scratch_values,
+                &mut __rccl_bins,
+                &mut __rccl_lookback,
+                &mut __rccl_counters,
             ))
-        }},
+        })()},
     )
 }
 
@@ -295,29 +350,40 @@ fn expand_sort_by_key_with(call: call::SortByKeyWithCall) -> syn::Result<proc_ma
     let execution = call.execution;
     let keys = call.keys;
     let values = call.values;
-    let scratch_keys = call.scratch_keys;
-    let scratch_values = call.scratch_values;
-    let partitions = call.partitions;
     let compare = call.compare;
     synchronous_cub(
         execution,
-        quote! {{
+        quote! {(|| -> ::core::result::Result<
+            (),
+            ::rccl_thrust::DeviceAlgorithmError,
+        > {
             let __rccl_keys = #keys;
             let __rccl_values = #values;
-            let __rccl_scratch_keys = #scratch_keys;
-            let __rccl_scratch_values = #scratch_values;
-            let __rccl_partitions = #partitions;
             let __rccl_compare = #compare;
+            let __rccl_len = ::rccl_thrust::DeviceRange::len(&*__rccl_keys);
+            let __rccl_partition_count =
+                ::rccl_cub::device_merge_sort_partition_count!(::<#key_type, #target>(
+                    __rccl_len
+                ))?;
+            let mut __rccl_scratch_keys =
+                __rccl_execution.temporary::<#key_type>(__rccl_len)
+                .map_err(::rccl_thrust::DeviceAlgorithmError::Memory)?;
+            let mut __rccl_scratch_values =
+                __rccl_execution.temporary::<#value_type>(__rccl_len)
+                .map_err(::rccl_thrust::DeviceAlgorithmError::Memory)?;
+            let mut __rccl_partitions =
+                __rccl_execution.temporary::<usize>(__rccl_partition_count)
+                .map_err(::rccl_thrust::DeviceAlgorithmError::Memory)?;
             ::rccl_cub::device_merge_sort_pairs!(::<#key_type, #value_type, #target>(
                 __rccl_execution,
                 __rccl_keys,
                 __rccl_values,
-                __rccl_scratch_keys,
-                __rccl_scratch_values,
-                __rccl_partitions,
+                &mut __rccl_scratch_keys,
+                &mut __rccl_scratch_values,
+                &mut __rccl_partitions,
                 __rccl_compare,
             ))
-        }},
+        })()},
     )
 }
 
@@ -328,32 +394,47 @@ fn expand_stable_sort_by_key(call: call::SortByKeyCall) -> syn::Result<proc_macr
     let execution = call.execution;
     let keys = call.keys;
     let values = call.values;
-    let scratch_keys = call.scratch_keys;
-    let scratch_values = call.scratch_values;
-    let bins = call.bins;
-    let lookback = call.lookback;
-    let counters = call.counters;
     synchronous_cub(
         execution,
-        quote! {{
+        quote! {(|| -> ::core::result::Result<
+            (),
+            ::rccl_thrust::DeviceAlgorithmError,
+        > {
             let __rccl_keys = #keys;
             let __rccl_values = #values;
-            let __rccl_scratch_keys = #scratch_keys;
-            let __rccl_scratch_values = #scratch_values;
-            let __rccl_bins = #bins;
-            let __rccl_lookback = #lookback;
-            let __rccl_counters = #counters;
+            let __rccl_len = ::rccl_thrust::DeviceRange::len(&*__rccl_keys);
+            let __rccl_workspace =
+                ::rccl_cub::device_radix_sort_pairs_workspace!(::<
+                    #key_type,
+                    #value_type,
+                    #target
+                >(__rccl_len));
+            let mut __rccl_scratch_keys =
+                __rccl_execution.temporary::<#key_type>(__rccl_workspace.scratch_keys)
+                .map_err(::rccl_thrust::DeviceAlgorithmError::Memory)?;
+            let mut __rccl_scratch_values =
+                __rccl_execution.temporary::<#value_type>(__rccl_workspace.scratch_values)
+                .map_err(::rccl_thrust::DeviceAlgorithmError::Memory)?;
+            let mut __rccl_bins =
+                __rccl_execution.temporary::<u64>(__rccl_workspace.bins)
+                .map_err(::rccl_thrust::DeviceAlgorithmError::Memory)?;
+            let mut __rccl_lookback =
+                __rccl_execution.temporary::<i32>(__rccl_workspace.lookback)
+                .map_err(::rccl_thrust::DeviceAlgorithmError::Memory)?;
+            let mut __rccl_counters =
+                __rccl_execution.temporary::<i32>(__rccl_workspace.counters)
+                .map_err(::rccl_thrust::DeviceAlgorithmError::Memory)?;
             ::rccl_cub::device_radix_sort_pairs!(::<#key_type, #value_type, #target>(
                 __rccl_execution,
                 __rccl_keys,
                 __rccl_values,
-                __rccl_scratch_keys,
-                __rccl_scratch_values,
-                __rccl_bins,
-                __rccl_lookback,
-                __rccl_counters,
+                &mut __rccl_scratch_keys,
+                &mut __rccl_scratch_values,
+                &mut __rccl_bins,
+                &mut __rccl_lookback,
+                &mut __rccl_counters,
             ))
-        }},
+        })()},
     )
 }
 
@@ -366,29 +447,40 @@ fn expand_stable_sort_by_key_with(
     let execution = call.execution;
     let keys = call.keys;
     let values = call.values;
-    let scratch_keys = call.scratch_keys;
-    let scratch_values = call.scratch_values;
-    let partitions = call.partitions;
     let compare = call.compare;
     synchronous_cub(
         execution,
-        quote! {{
+        quote! {(|| -> ::core::result::Result<
+            (),
+            ::rccl_thrust::DeviceAlgorithmError,
+        > {
             let __rccl_keys = #keys;
             let __rccl_values = #values;
-            let __rccl_scratch_keys = #scratch_keys;
-            let __rccl_scratch_values = #scratch_values;
-            let __rccl_partitions = #partitions;
             let __rccl_compare = #compare;
+            let __rccl_len = ::rccl_thrust::DeviceRange::len(&*__rccl_keys);
+            let __rccl_partition_count =
+                ::rccl_cub::device_merge_sort_partition_count!(::<#key_type, #target>(
+                    __rccl_len
+                ))?;
+            let mut __rccl_scratch_keys =
+                __rccl_execution.temporary::<#key_type>(__rccl_len)
+                .map_err(::rccl_thrust::DeviceAlgorithmError::Memory)?;
+            let mut __rccl_scratch_values =
+                __rccl_execution.temporary::<#value_type>(__rccl_len)
+                .map_err(::rccl_thrust::DeviceAlgorithmError::Memory)?;
+            let mut __rccl_partitions =
+                __rccl_execution.temporary::<usize>(__rccl_partition_count)
+                .map_err(::rccl_thrust::DeviceAlgorithmError::Memory)?;
             ::rccl_cub::device_stable_merge_sort_pairs!(::<#key_type, #value_type, #target>(
                 __rccl_execution,
                 __rccl_keys,
                 __rccl_values,
-                __rccl_scratch_keys,
-                __rccl_scratch_values,
-                __rccl_partitions,
+                &mut __rccl_scratch_keys,
+                &mut __rccl_scratch_values,
+                &mut __rccl_partitions,
                 __rccl_compare,
             ))
-        }},
+        })()},
     )
 }
 
@@ -398,25 +490,34 @@ fn expand_merge(call: call::MergeCall) -> syn::Result<proc_macro2::TokenStream> 
     let execution = call.execution;
     let first = call.first;
     let second = call.second;
-    let partitions = call.partitions;
     let output = call.output;
     let order = natural_order(&value_type);
     synchronous_cub(
         execution,
-        quote! {{
+        quote! {(|| -> ::core::result::Result<
+            (),
+            ::rccl_thrust::DeviceAlgorithmError,
+        > {
             let __rccl_first = #first;
             let __rccl_second = #second;
-            let __rccl_partitions = #partitions;
             let __rccl_output = #output;
+            let __rccl_partition_count =
+                ::rccl_cub::device_merge_keys_partition_count!(::<#value_type, #target>(
+                    ::rccl_thrust::DeviceRange::len(&__rccl_first),
+                    ::rccl_thrust::DeviceRange::len(&__rccl_second),
+                ))?;
+            let mut __rccl_partitions =
+                __rccl_execution.temporary::<usize>(__rccl_partition_count)
+                .map_err(::rccl_thrust::DeviceAlgorithmError::Memory)?;
             ::rccl_cub::device_merge_keys!(::<#value_type, #target>(
                 __rccl_execution,
                 __rccl_first,
                 __rccl_second,
-                __rccl_partitions,
+                &mut __rccl_partitions,
                 __rccl_output,
                 #order,
             ))
-        }},
+        })()},
     )
 }
 
@@ -426,26 +527,35 @@ fn expand_merge_by(call: call::MergeByCall) -> syn::Result<proc_macro2::TokenStr
     let execution = call.execution;
     let first = call.first;
     let second = call.second;
-    let partitions = call.partitions;
     let output = call.output;
     let compare = call.compare;
     synchronous_cub(
         execution,
-        quote! {{
+        quote! {(|| -> ::core::result::Result<
+            (),
+            ::rccl_thrust::DeviceAlgorithmError,
+        > {
             let __rccl_first = #first;
             let __rccl_second = #second;
-            let __rccl_partitions = #partitions;
             let __rccl_output = #output;
             let __rccl_compare = #compare;
+            let __rccl_partition_count =
+                ::rccl_cub::device_merge_keys_partition_count!(::<#value_type, #target>(
+                    ::rccl_thrust::DeviceRange::len(&__rccl_first),
+                    ::rccl_thrust::DeviceRange::len(&__rccl_second),
+                ))?;
+            let mut __rccl_partitions =
+                __rccl_execution.temporary::<usize>(__rccl_partition_count)
+                .map_err(::rccl_thrust::DeviceAlgorithmError::Memory)?;
             ::rccl_cub::device_merge_keys!(::<#value_type, #target>(
                 __rccl_execution,
                 __rccl_first,
                 __rccl_second,
-                __rccl_partitions,
+                &mut __rccl_partitions,
                 __rccl_output,
                 __rccl_compare,
             ))
-        }},
+        })()},
     )
 }
 
@@ -458,32 +568,45 @@ fn expand_merge_by_key(call: call::MergeByKeyCall) -> syn::Result<proc_macro2::T
     let first_values = call.first_values;
     let second_keys = call.second_keys;
     let second_values = call.second_values;
-    let partitions = call.partitions;
     let output_keys = call.output_keys;
     let output_values = call.output_values;
     let order = natural_order(&key_type);
     synchronous_cub(
         execution,
-        quote! {{
+        quote! {(|| -> ::core::result::Result<
+            (),
+            ::rccl_thrust::DeviceAlgorithmError,
+        > {
             let __rccl_first_keys = #first_keys;
             let __rccl_first_values = #first_values;
             let __rccl_second_keys = #second_keys;
             let __rccl_second_values = #second_values;
-            let __rccl_partitions = #partitions;
             let __rccl_output_keys = #output_keys;
             let __rccl_output_values = #output_values;
+            let __rccl_partition_count =
+                ::rccl_cub::device_merge_pairs_partition_count!(::<
+                    #key_type,
+                    #value_type,
+                    #target
+                >(
+                    ::rccl_thrust::DeviceRange::len(&__rccl_first_keys),
+                    ::rccl_thrust::DeviceRange::len(&__rccl_second_keys),
+                ))?;
+            let mut __rccl_partitions =
+                __rccl_execution.temporary::<usize>(__rccl_partition_count)
+                .map_err(::rccl_thrust::DeviceAlgorithmError::Memory)?;
             ::rccl_cub::device_merge_pairs!(::<#key_type, #value_type, #target>(
                 __rccl_execution,
                 __rccl_first_keys,
                 __rccl_first_values,
                 __rccl_second_keys,
                 __rccl_second_values,
-                __rccl_partitions,
+                &mut __rccl_partitions,
                 __rccl_output_keys,
                 __rccl_output_values,
                 #order,
             ))
-        }},
+        })()},
     )
 }
 
@@ -498,33 +621,46 @@ fn expand_merge_by_key_with(
     let first_values = call.first_values;
     let second_keys = call.second_keys;
     let second_values = call.second_values;
-    let partitions = call.partitions;
     let output_keys = call.output_keys;
     let output_values = call.output_values;
     let compare = call.compare;
     synchronous_cub(
         execution,
-        quote! {{
+        quote! {(|| -> ::core::result::Result<
+            (),
+            ::rccl_thrust::DeviceAlgorithmError,
+        > {
             let __rccl_first_keys = #first_keys;
             let __rccl_first_values = #first_values;
             let __rccl_second_keys = #second_keys;
             let __rccl_second_values = #second_values;
-            let __rccl_partitions = #partitions;
             let __rccl_output_keys = #output_keys;
             let __rccl_output_values = #output_values;
             let __rccl_compare = #compare;
+            let __rccl_partition_count =
+                ::rccl_cub::device_merge_pairs_partition_count!(::<
+                    #key_type,
+                    #value_type,
+                    #target
+                >(
+                    ::rccl_thrust::DeviceRange::len(&__rccl_first_keys),
+                    ::rccl_thrust::DeviceRange::len(&__rccl_second_keys),
+                ))?;
+            let mut __rccl_partitions =
+                __rccl_execution.temporary::<usize>(__rccl_partition_count)
+                .map_err(::rccl_thrust::DeviceAlgorithmError::Memory)?;
             ::rccl_cub::device_merge_pairs!(::<#key_type, #value_type, #target>(
                 __rccl_execution,
                 __rccl_first_keys,
                 __rccl_first_values,
                 __rccl_second_keys,
                 __rccl_second_values,
-                __rccl_partitions,
+                &mut __rccl_partitions,
                 __rccl_output_keys,
                 __rccl_output_values,
                 __rccl_compare,
             ))
-        }},
+        })()},
     )
 }
 
@@ -573,11 +709,7 @@ mod tests {
                 "sort",
                 expand_sort(syn::parse_quote!(::<i32, sm_89>(
                     &exec,
-                    &mut keys,
-                    &mut scratch_keys,
-                    &mut bins,
-                    &mut lookback,
-                    &mut counters
+                    &mut keys
                 )))
                 .expect("sort must lower"),
                 "device_radix_sort_keys",
@@ -588,8 +720,6 @@ mod tests {
                     ::<i32, sm_89>(
                         &exec,
                         &mut keys,
-                        &mut scratch_keys,
-                        &mut partitions,
                         |left: &i32, right: &i32| left.cmp(right)
                     )
                 ))
@@ -600,11 +730,7 @@ mod tests {
                 "stable_sort",
                 expand_stable_sort(syn::parse_quote!(::<i32, sm_89>(
                     &exec,
-                    &mut keys,
-                    &mut scratch_keys,
-                    &mut bins,
-                    &mut lookback,
-                    &mut counters
+                    &mut keys
                 )))
                 .expect("stable_sort must lower"),
                 "device_radix_sort_keys",
@@ -615,8 +741,6 @@ mod tests {
                     ::<i32, sm_89>(
                         &exec,
                         &mut keys,
-                        &mut scratch_keys,
-                        &mut partitions,
                         |left: &i32, right: &i32| left.cmp(right)
                     )
                 ))
@@ -628,12 +752,7 @@ mod tests {
                 expand_sort_by_key(syn::parse_quote!(::<i32, u64, sm_89>(
                     &exec,
                     &mut keys,
-                    &mut values,
-                    &mut scratch_keys,
-                    &mut scratch_values,
-                    &mut bins,
-                    &mut lookback,
-                    &mut counters
+                    &mut values
                 )))
                 .expect("sort_by_key must lower"),
                 "device_radix_sort_pairs",
@@ -645,9 +764,6 @@ mod tests {
                         &exec,
                         &mut keys,
                         &mut values,
-                        &mut scratch_keys,
-                        &mut scratch_values,
-                        &mut partitions,
                         |left: &i32, right: &i32| left.cmp(right)
                     )
                 ))
@@ -659,12 +775,7 @@ mod tests {
                 expand_stable_sort_by_key(syn::parse_quote!(::<i32, u64, sm_89>(
                     &exec,
                     &mut keys,
-                    &mut values,
-                    &mut scratch_keys,
-                    &mut scratch_values,
-                    &mut bins,
-                    &mut lookback,
-                    &mut counters
+                    &mut values
                 )))
                 .expect("stable_sort_by_key must lower"),
                 "device_radix_sort_pairs",
@@ -676,9 +787,6 @@ mod tests {
                         &exec,
                         &mut keys,
                         &mut values,
-                        &mut scratch_keys,
-                        &mut scratch_values,
-                        &mut partitions,
                         |left: &i32, right: &i32| left.cmp(right)
                     )
                 ))
@@ -691,7 +799,6 @@ mod tests {
                     &exec,
                     &first,
                     &second,
-                    &mut partitions,
                     &mut output
                 )))
                 .expect("merge must lower"),
@@ -704,7 +811,6 @@ mod tests {
                         &exec,
                         &first,
                         &second,
-                        &mut partitions,
                         &mut output,
                         |left: &i32, right: &i32| left.cmp(right)
                     )
@@ -721,7 +827,6 @@ mod tests {
                         &first_values,
                         &second_keys,
                         &second_values,
-                        &mut partitions,
                         &mut output_keys,
                         &mut output_values
                     )
@@ -738,7 +843,6 @@ mod tests {
                         &first_values,
                         &second_keys,
                         &second_values,
-                        &mut partitions,
                         &mut output_keys,
                         &mut output_values,
                         |left: &i32, right: &i32| left.cmp(right)
@@ -757,8 +861,81 @@ mod tests {
             );
             assert!(text.contains("synchronize"), "{name} lost Thrust sync");
             assert!(
+                text.contains("temporary"),
+                "{name} did not acquire its temporary storage from the execution policy: {text}",
+            );
+            assert!(
                 !text.contains("prepare_device"),
                 "{name} contains a direct kernel preparation instead of CUB lowering",
+            );
+        }
+    }
+
+    #[test]
+    fn ordering_storage_extent_is_selected_inside_the_thrust_lowering() {
+        let expansions = [
+            (
+                "radix keys",
+                expand_sort(syn::parse_quote!(::<u32, sm_89>(&exec, &mut keys)))
+                    .expect("sort must lower"),
+                "device_radix_sort_workspace",
+            ),
+            (
+                "radix pairs",
+                expand_sort_by_key(syn::parse_quote!(::<u32, u64, sm_89>(
+                    &exec,
+                    &mut keys,
+                    &mut values
+                )))
+                .expect("sort_by_key must lower"),
+                "device_radix_sort_pairs_workspace",
+            ),
+            (
+                "merge sort",
+                expand_sort_by(syn::parse_quote!(::<u32, sm_89>(
+                    &exec,
+                    &mut keys,
+                    |left: &u32, right: &u32| left.cmp(right)
+                )))
+                .expect("sort_by must lower"),
+                "device_merge_sort_partition_count",
+            ),
+            (
+                "merge keys",
+                expand_merge(syn::parse_quote!(::<u32, sm_89>(
+                    &exec,
+                    &first,
+                    &second,
+                    &mut output
+                )))
+                .expect("merge must lower"),
+                "device_merge_keys_partition_count",
+            ),
+            (
+                "merge pairs",
+                expand_merge_by_key(syn::parse_quote!(::<u32, u64, sm_89>(
+                    &exec,
+                    &first_keys,
+                    &first_values,
+                    &second_keys,
+                    &second_values,
+                    &mut output_keys,
+                    &mut output_values
+                )))
+                .expect("merge_by_key must lower"),
+                "device_merge_pairs_partition_count",
+            ),
+        ];
+
+        for (family, expansion, extent_macro) in expansions {
+            let text = expansion.to_string();
+            assert!(
+                text.contains(&format!("rccl_cub :: {extent_macro} !")),
+                "{family} lost its macro-selected temporary extent: {text}",
+            );
+            assert!(
+                text.contains("temporary"),
+                "{family} stopped allocating through Execution: {text}",
             );
         }
     }

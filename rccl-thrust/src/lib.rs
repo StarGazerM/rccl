@@ -8,7 +8,6 @@ pub use cuda_core::DeviceCopy;
 pub use rccl_cub::{
     ContiguousRange, DeviceAlgorithmError, DeviceRange, DoubleBuffer, KeyValue, RandomAccessRange,
     ReadRange, TempStorage, TempStorageError, TempStorageLayout, WriteRange,
-    device_merge_sort_partition_count,
 };
 pub use rccl_memory as memory;
 pub use rccl_thrust_macros::{

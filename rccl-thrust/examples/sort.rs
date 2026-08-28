@@ -15,46 +15,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     let module = unsafe { __rccl_thrust_kernels::load(&context)? };
     let exec = rccl_thrust::cuda::par(&stream, &allocator, &module)?;
 
-    // Comparison-based Thrust routes borrow the exact CUB ping-pong and
-    // partition workspace. Allocation stays outside every algorithm call.
-    let partition_count_16 = rccl_thrust::device_merge_sort_partition_count!(::<i32, sm_89>(16))?;
-    let mut scratch_keys_16 = DeviceBuffer::<i32>::zeroed(&stream, 16)?;
-    let mut scratch_values_16 = DeviceBuffer::<i32>::zeroed(&stream, 16)?;
-    let mut partitions_16 = DeviceBuffer::<usize>::zeroed(&stream, partition_count_16)?;
-    let partition_count_9 = rccl_thrust::device_merge_sort_partition_count!(::<i32, sm_89>(9))?;
-    let mut scratch_keys_9 = DeviceBuffer::<i32>::zeroed(&stream, 9)?;
-    let mut scratch_values_9 = DeviceBuffer::<i32>::zeroed(&stream, 9)?;
-    let mut partitions_9 = DeviceBuffer::<usize>::zeroed(&stream, partition_count_9)?;
-    let partition_count_8 = rccl_thrust::device_merge_sort_partition_count!(::<i32, sm_89>(8))?;
-    let mut scratch_keys_8 = DeviceBuffer::<i32>::zeroed(&stream, 8)?;
-    let mut partitions_8 = DeviceBuffer::<usize>::zeroed(&stream, partition_count_8)?;
-    let partition_count_7 = rccl_thrust::device_merge_sort_partition_count!(::<i32, sm_89>(7))?;
-    let mut scratch_keys_7 = DeviceBuffer::<i32>::zeroed(&stream, 7)?;
-    let mut scratch_values_7 = DeviceBuffer::<i32>::zeroed(&stream, 7)?;
-    let mut partitions_7 = DeviceBuffer::<usize>::zeroed(&stream, partition_count_7)?;
-    let mut radix_scratch_keys_4 = DeviceBuffer::<i32>::zeroed(&stream, 4)?;
-    let mut radix_scratch_keys_6 = DeviceBuffer::<f32>::zeroed(&stream, 6)?;
-    let mut radix_scratch_values_6 = DeviceBuffer::<i32>::zeroed(&stream, 6)?;
-    let radix_workspace_16 = rccl_cub::device_radix_sort_workspace!(::<i32, sm_89>(16));
-    let mut radix_bins = DeviceBuffer::<u64>::zeroed(&stream, radix_workspace_16.bins)?;
-    let mut radix_lookback = DeviceBuffer::<i32>::zeroed(&stream, radix_workspace_16.lookback)?;
-    let mut radix_counters = DeviceBuffer::<i32>::zeroed(&stream, radix_workspace_16.counters)?;
-    let pair_radix_workspace_16 =
-        rccl_cub::device_radix_sort_pairs_workspace!(::<i32, i32, sm_89>(16));
-    let mut pair_radix_bins = DeviceBuffer::<u64>::zeroed(&stream, pair_radix_workspace_16.bins)?;
-    let mut pair_radix_lookback =
-        DeviceBuffer::<i32>::zeroed(&stream, pair_radix_workspace_16.lookback)?;
-    let mut pair_radix_counters =
-        DeviceBuffer::<i32>::zeroed(&stream, pair_radix_workspace_16.counters)?;
-    let float_pair_radix_workspace_6 =
-        rccl_cub::device_radix_sort_pairs_workspace!(::<f32, i32, sm_89>(6));
-    let mut float_pair_radix_bins =
-        DeviceBuffer::<u64>::zeroed(&stream, float_pair_radix_workspace_6.bins)?;
-    let mut float_pair_radix_lookback =
-        DeviceBuffer::<i32>::zeroed(&stream, float_pair_radix_workspace_6.lookback)?;
-    let mut float_pair_radix_counters =
-        DeviceBuffer::<i32>::zeroed(&stream, float_pair_radix_workspace_6.counters)?;
-
     // Exact integer rows printed by pinned `thrust/examples/sort.cu`. The
     // source's default_random_engine seed 123456 produces this input.
     let upstream_input = [
@@ -64,10 +24,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     rccl_thrust::sort!(::<i32, sm_89>(
         &exec,
         &mut upstream_natural,
-        &mut scratch_keys_16,
-        &mut radix_bins,
-        &mut radix_lookback,
-        &mut radix_counters,
     ))?;
     assert_eq!(
         upstream_natural.to_host_vec(&stream)?,
@@ -80,8 +36,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     rccl_thrust::sort_by!(::<i32, sm_89>(
         &exec,
         &mut upstream_descending,
-        &mut scratch_keys_16,
-        &mut partitions_16,
         |left: &i32, right: &i32| right.cmp(left),
     ))?;
     assert_eq!(
@@ -95,8 +49,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     rccl_thrust::sort_by!(::<i32, sm_89>(
         &exec,
         &mut upstream_custom,
-        &mut scratch_keys_16,
-        &mut partitions_16,
         |left: &i32, right: &i32| match ((left & 1) == 0, (right & 1) == 0) {
             (true, false) => core::cmp::Ordering::Less,
             (false, true) => core::cmp::Ordering::Greater,
@@ -119,11 +71,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         &exec,
         &mut upstream_pair_keys,
         &mut upstream_pair_values,
-        &mut scratch_keys_16,
-        &mut scratch_values_16,
-        &mut pair_radix_bins,
-        &mut pair_radix_lookback,
-        &mut pair_radix_counters,
     ))?;
     assert_eq!(
         upstream_pair_keys.to_host_vec(&stream)?,
@@ -145,9 +92,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         &exec,
         &mut upstream_pair_keys_descending,
         &mut upstream_pair_values_descending,
-        &mut scratch_keys_16,
-        &mut scratch_values_16,
-        &mut partitions_16,
         |left: &i32, right: &i32| right.cmp(left),
     ))?;
     assert_eq!(
@@ -162,22 +106,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
 
     let mut keys = DeviceBuffer::from_host(&stream, &[1_i32, 3, 6, 5, 2, 0, 4])?;
-    rccl_thrust::sort!(::<i32, sm_89>(
-        &exec,
-        &mut keys,
-        &mut scratch_keys_7,
-        &mut radix_bins,
-        &mut radix_lookback,
-        &mut radix_counters,
-    ))?;
+    rccl_thrust::sort!(::<i32, sm_89>(&exec, &mut keys))?;
     assert_eq!(keys.to_host_vec(&stream)?, [0, 1, 2, 3, 4, 5, 6]);
 
     let mut descending = DeviceBuffer::from_host(&stream, &[1_i32, 3, 6, 5, 2, 0, 4])?;
     rccl_thrust::sort_by!(::<i32, sm_89>(
         &exec,
         &mut descending,
-        &mut scratch_keys_7,
-        &mut partitions_7,
         |left: &i32, right: &i32| right.cmp(left),
     ))?;
     assert_eq!(descending.to_host_vec(&stream)?, [6, 5, 4, 3, 2, 1, 0]);
@@ -186,8 +121,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     rccl_thrust::sort_by!(::<i32, sm_89>(
         &exec,
         &mut custom,
-        &mut scratch_keys_8,
-        &mut partitions_8,
         |left: &i32, right: &i32| {
             (left & 1).cmp(&(right & 1)).then_with(|| left.cmp(right))
         },
@@ -202,21 +135,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     rccl_thrust::stable_sort_by!(::<i32, sm_89>(
         &exec,
         &mut stable,
-        &mut scratch_keys_9,
-        &mut partitions_9,
         |left: &i32, right: &i32| (left / 10).cmp(&(right / 10)),
     ))?;
     assert_eq!(stable.to_host_vec(&stream)?, stable_expected);
 
     let mut natural_stable = DeviceBuffer::from_host(&stream, &[3_i32, 1, 2, 1])?;
-    rccl_thrust::stable_sort!(::<i32, sm_89>(
-        &exec,
-        &mut natural_stable,
-        &mut radix_scratch_keys_4,
-        &mut radix_bins,
-        &mut radix_lookback,
-        &mut radix_counters,
-    ))?;
+    rccl_thrust::stable_sort!(::<i32, sm_89>(&exec, &mut natural_stable))?;
     assert_eq!(natural_stable.to_host_vec(&stream)?, [1, 1, 2, 3]);
 
     let mut pair_keys = DeviceBuffer::from_host(&stream, &[1_i32, 3, 6, 5, 2, 0, 4])?;
@@ -225,11 +149,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         &exec,
         &mut pair_keys,
         &mut pair_values,
-        &mut scratch_keys_7,
-        &mut scratch_values_7,
-        &mut pair_radix_bins,
-        &mut pair_radix_lookback,
-        &mut pair_radix_counters,
     ))?;
     assert_eq!(pair_keys.to_host_vec(&stream)?, [0, 1, 2, 3, 4, 5, 6]);
     assert_eq!(pair_values.to_host_vec(&stream)?, [5, 0, 4, 1, 6, 3, 2]);
@@ -240,9 +159,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         &exec,
         &mut descending_keys,
         &mut descending_values,
-        &mut scratch_keys_7,
-        &mut scratch_values_7,
-        &mut partitions_7,
         |left: &i32, right: &i32| right.cmp(left),
     ))?;
     assert_eq!(descending_keys.to_host_vec(&stream)?, [6, 5, 4, 3, 2, 1, 0]);
@@ -257,11 +173,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         &exec,
         &mut unstable_keys,
         &mut unstable_values,
-        &mut scratch_keys_7,
-        &mut scratch_values_7,
-        &mut pair_radix_bins,
-        &mut pair_radix_lookback,
-        &mut pair_radix_counters,
     ))?;
     assert_eq!(unstable_keys.to_host_vec(&stream)?, [0, 1, 2, 3, 4, 5, 6]);
     assert_eq!(unstable_values.to_host_vec(&stream)?, [5, 0, 4, 1, 6, 3, 2]);
@@ -272,9 +183,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         &exec,
         &mut stable_keys,
         &mut stable_values,
-        &mut scratch_keys_9,
-        &mut scratch_values_9,
-        &mut partitions_9,
         |left: &i32, right: &i32| (left / 10).cmp(&(right / 10)),
     ))?;
     assert_eq!(stable_keys.to_host_vec(&stream)?, stable_expected);
@@ -295,11 +203,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         &exec,
         &mut float_keys,
         &mut float_values,
-        &mut radix_scratch_keys_6,
-        &mut radix_scratch_values_6,
-        &mut float_pair_radix_bins,
-        &mut float_pair_radix_lookback,
-        &mut float_pair_radix_counters,
     ))?;
     assert_eq!(
         float_keys

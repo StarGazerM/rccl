@@ -1,6 +1,6 @@
 # CUB/Thrust ordering upstream correspondence and masking review
 
-Date: 2026-08-27
+Date: 2026-08-28
 
 Pinned CCCL revision: `571f2fc3bc53cd710e306ad43d58995c1fe4219f`.
 
@@ -24,6 +24,7 @@ Sources read for the currently exported intersection:
 - `thrust/examples/sort.cu`;
 - `thrust/testing/sort.cu`, `stable_sort.cu`, `sort_by_key.cu`, and
   `stable_sort_by_key.cu`;
+- `thrust/thrust/system/cuda/detail/sort.h`;
 - `thrust/testing/merge.cu` and `merge_key_value.cu`.
 
 The direct public Rust calls are the `device_merge_*!`,
@@ -53,6 +54,13 @@ Primitive aliases and custom records currently fail closed because their
 layout/decomposition is opaque to the macro. No `TypeId`, runtime trait
 object, type registry, inferred fallback, or comparison-sort substitution is
 used to hide that missing TMP input.
+
+Temporary storage is not a Thrust semantic operand. Pinned CUDA Thrust first
+queries CUB for `storage_size`, creates `temporary_array<std::uint8_t,
+Derived>` from the execution policy, and then runs the CUB operation. RCCL's
+Thrust macro therefore selects the CUB workspace/partition formula, derives
+its runtime extent from the ranges, and acquires the concrete buffers through
+`Execution`. Only direct CUB retains an explicit caller-storage boundary.
 
 ## Result masking audit
 
@@ -105,6 +113,11 @@ used to hide that missing TMP input.
 - All calls propagate `Result`; no launch error is discarded. None of the
   semantic fixtures is empty, so the zero-length fast path cannot make them
   vacuously pass.
+- Thrust parser tests reject every former scratch-bearing sort arity, while
+  expansion tests require the exact radix-workspace, merge-sort-partition, or
+  merge-partition macro plus an `Execution` temporary acquisition. This keeps
+  a hand-sized allocation or silently ignored legacy operand from passing the
+  current examples.
 - The executable is built with `cargo oxide build` immediately before
   execution. Both fault iterations reported recompilation of the macro and
   runtime crates, ruling out a stale pre-fault executable.
@@ -114,7 +127,8 @@ used to hide that missing TMP input.
   The direct bit-window and Policy800 single-tile additions bring the gate to
   fourteen paths. Its latest median-of-medians run still fails, including
   key-only radix at 1.062280x, bit-window keys at 1.090674x, single-tile keys
-  at 1.020335x, and Thrust sort at 1.030226x; the gate still exits nonzero with
+  at 1.020335x, and historical pre-storage-fix Thrust sort at 1.030226x; the
+  direct-CUB gate still exits nonzero with
   `implementation gap is not masked`. The complete ratios and backend-boundary
   diagnosis are recorded in
   `reviews/current-implemented-performance.md`.
@@ -191,9 +205,14 @@ because all result probes pass.
 This review is partial. The implemented SM89 primitive agent topology is now
 source-mapped. Primitive 32/64-bit SM80-policy borrowed-double-buffer bit
 windows now execute the pinned runtime pass graph, including partial final
-digits and selector updates. Exact single-tile and one-sweep performance,
-pointer-input/output bit windows, range-specific temp-storage queries,
-multi-portion inputs, resource-owned allocation, 8/16-bit keys, half/bfloat,
+digits and selector updates. `ORDER-PERF-01` records the known unresolved
+cuda-oxide/LLVM ballot-complement code-generation gap for direct CUB
+Policy800 one-sweep radix and dependent Thrust sort paths; it is
+`backend-blocked`, not an accepted difference. Exact single-tile and one-sweep
+performance, pointer-input/output bit windows, range-specific temp-storage queries,
+multi-portion inputs, direct-CUB resource-owned allocation, non-default Thrust
+temporary allocators beyond cuda-oxide's concrete synchronous buffer ABI,
+8/16-bit keys, half/bfloat,
 decomposers/custom records, 32/64-bit offset selection,
 general iterator/adaptor products, segmented sorting, and all other
 architecture rows remain. Thrust permutation/zip/fancy-iterator ordering and

@@ -410,7 +410,11 @@ The device-wide APIs must expose both of CUB's relevant allocation forms:
 2. an environment/resource convenience path that owns allocation policy.
 
 Thrust calls the resource form internally. Direct CUB users must not be forced
-through a Thrust `Execution`.
+through a Thrust `Execution`. No Thrust ordering macro may expose a CUB
+partition-count query, ping-pong buffer, bins, lookback state, counter array,
+or partition array as a caller operand. The proc macro owns the layout formula;
+the runtime range length determines the extent; and `Execution` owns resource
+selection.
 
 ## Execution and asynchronous safety
 
@@ -434,6 +438,25 @@ sequential implementation in device code because nested launches are not the
 contract. Implement those only after the range algebra can execute without
 host dispatch.
 
+## Known backend-blocked performance gaps
+
+These entries remain unfinished work. They are not accepted differences and
+cannot be used to promote a `partial` row to `implemented`.
+
+| Gap | Affected public rows | Current evidence | Required closure |
+|---|---|---|---|
+| `ORDER-PERF-01`: ballot/complement NVPTX code generation | CUB Policy800 one-sweep `device_radix_sort` keys/pairs and every Thrust sort form that lowers through it | the pinned eight-ballot `MatchAny<8>` topology is present, but cuda-oxide/LLVM 22 lowers each Rust ballot plus conditional complement through duplicated predicate extraction and `selp`/`xor` rather than CUB's same-predicate predicated `not`; SM89 one-sweep keys use 99 registers versus CUB's 75 and pairs use 80 versus 65, with identical static shared sizes and zero spills | repair the cuda-oxide/LLVM compiler boundary without RCCL inline PTX, JIT, PTX post-processing, a different radix algorithm, unsafe/raw-pointer escape hatches, or relaxed tests; then retain exact result/permutation/stability checks and pass the unchanged PTX/SASS, register, occupancy, and equal-work large-input gates |
+| `THRUST-TEMP-01`: checked synchronous temporary-buffer ABI | every implemented Thrust sort and merge form | the public API now correctly hides CUB storage and allocates it through `Execution`, but current cuda-oxide synchronous slice launchers require `cuda_core::DeviceBuffer<T>` and its safe owning constructor zeroes the allocation; pinned Thrust policy storage is an uninitialized `temporary_array<uint8_t>`, so the extra scratch memsets and the restriction to the direct CUDA resource are not performance/allocator parity | add a safe checked cuda-oxide synchronous launch capability for allocator-owned read/write buffers, including write-first uninitialized storage; initialize only CUB protocol state that requires zero and pass the unchanged equal-work allocation-inclusive Thrust gate without raw pointers, generated unsafe, runtime type erasure, or caller scratch operands |
+
+Rust-source spelling is not an open action for `ORDER-PERF-01`: a mutable
+conditional form emitted byte-identical PTX, LLVM `-O1`, `-O2`, and `-O3` all
+kept the 99-register key kernel, and skipping the middle end introduced 2,064
+bytes of stack per thread. A compiler fix must gain an adversarial code-shape
+test that fails on the current `selp`/mask-producing `xor` sequence. Phase 9
+must also show that the unchanged runtime and performance gates fail before
+the fix and pass after it; changing thresholds or expected results is test
+masking, not closure.
+
 ## Dependency-ordered delivery plan
 
 | Phase | Deliverable | Unlocks | Exit evidence |
@@ -445,7 +468,7 @@ host dispatch.
 | 4 | CUB agents, grid partitioning/lookback, public temp-storage query/resource forms, 32/64-bit offset selection | complete device-wide API contracts | query/execute parity, insufficient-storage errors, large-count boundary tests |
 | 5 | DeviceFor/Transform/Copy/Memcpy/Find and Thrust traversal, copy, generation, gather/scatter, replace, reverse | broad linear algorithm surface | contiguous and fancy-range differential matrices |
 | 6 | DeviceReduce/Scan/Select/Partition/Histogram/RLE/adjacent difference and corresponding Thrust reductions, scans, logical/query, compaction | analytics and fundamental data-parallel substrate | operation/type/operator/offset/segment matrices plus SM performance gates |
-| 7 | Complete radix/merge/segmented sorts, merge sort, set operations, binary search, top-k; repair existing sort/merge gaps | all ordered algorithms | scalar/decomposer/bit-range/double-buffer/iterator/stability matrices and equal-boundary benchmarks |
+| 7 | Complete radix/merge/segmented sorts, merge sort, set operations, binary search, top-k; repair existing sort/merge gaps including `ORDER-PERF-01` | all ordered algorithms | scalar/decomposer/bit-range/double-buffer/iterator/stability matrices, compiler code-shape/resource checks, and equal-boundary benchmarks |
 | 8 | Complete container/unique-allocation API, managed/pinned aliases, random, complex, device-side sequential Thrust entry points | remaining support and user ergonomics | construction/destruction, allocator propagation, exact RNG sequence, complex math, device-call tests |
 | 9 | Related examples, unit/negative/property tests, then adversarial review and repair iteration | trustworthy evidence rather than tests that merely agree with the current implementation | every public row has a runnable public-API example and focused tests; seeded implementation/launch faults make the relevant tests fail; the masking-error checklist below is closed with evidence; cold and warm full gates pass after repairs |
 | 10 | Product hardening across supported SM targets | release-quality full subset | pinned upstream randomized product, compile matrix for SM80/89/90/100, runtime where hardware exists, sanitizer and performance reports |
