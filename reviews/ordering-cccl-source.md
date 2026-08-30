@@ -28,16 +28,19 @@ Sources read for the currently exported intersection:
 - `thrust/testing/merge.cu` and `merge_key_value.cu`.
 
 The direct public Rust calls are the `device_merge_*!`,
-`device_merge_sort_*!`, and `device_radix_sort_*!` CUB macros. Thrust
-`sort*!` and `merge*!` macros lower through those exact CUB operation macros;
-Thrust owns no ordering kernel.
+`device_merge_sort_*!`, and `device_radix_sort_*!` CUB macros. Thrust exposes
+ordinary `sort*` and `merge*` methods; declarative backend impls lower those
+methods through the exact CUB operation macros. Thrust owns no ordering
+kernel.
 
 ## TMP boundary
 
 C++ deduces `KeyT`, `ValueT`, iterator value types, and policy inputs before
 instantiating dispatch and agents. A stable Rust proc macro cannot query
-rustc's later inference. Every fact that changes this lowering is therefore
-macro input:
+rustc's later inference. The public method lets rustc infer its traits
+normally, while the closed primitive backend catalog supplies the concrete
+type token to each CUB policy macro. Every fact that changes CUB lowering is
+still macro input:
 
 - key and value types select layout-dependent merge policy;
 - primitive radix category selects unsigned, sign-bit, or floating bit
@@ -58,9 +61,9 @@ used to hide that missing TMP input.
 Temporary storage is not a Thrust semantic operand. Pinned CUDA Thrust first
 queries CUB for `storage_size`, creates `temporary_array<std::uint8_t,
 Derived>` from the execution policy, and then runs the CUB operation. RCCL's
-Thrust macro therefore selects the CUB workspace/partition formula, derives
-its runtime extent from the ranges, and acquires the concrete buffers through
-`Execution`. Direct CUB retains the explicit caller-storage boundary as one
+Thrust method backend therefore selects the CUB workspace/partition formula,
+derives its runtime extent from the ranges, and acquires the concrete buffers
+through `Execution`. Direct CUB retains the explicit caller-storage boundary as one
 typed, opaque, reusable workspace. Its fields are private, matching CUB's
 single `d_temp_storage` operand without importing byte pointers into Rust.
 
@@ -78,8 +81,8 @@ architecture token rather than ignoring it.
 | Pinned CCCL call boundary | Rust call boundary | Deliberate Rust translation |
 |---|---|---|
 | `thrust::cuda::par.on(stream)` | `let exec = thrust.par(&stream)?` | the typed `Program` owns the cuda-oxide program artifact; the execution value contains only runtime stream/allocation state |
-| `thrust::sort(policy, first, last, comp)` | `sort_by!(::<T>(&exec, &mut range, closure))` | one mutable device range replaces the iterator pair; a Rust closure replaces the comparator object |
-| `thrust::merge(policy, first1, last1, first2, last2, result, comp)` | `merge_by!(::<T>(&exec, &first, &second, &mut output, closure))` | range lengths and output exclusivity come from borrows |
+| `thrust::sort(policy, first, last, comp)` | `range.sort_by(&exec, closure)` | one mutable device range replaces the iterator pair; inference replaces explicit template/type arguments; a Rust closure replaces the comparator object |
+| `thrust::merge(policy, first1, last1, first2, last2, result, comp)` | `exec.merge_by_into(&first, &second, &mut output, closure)` | range lengths and output exclusivity come from borrows |
 | CUB query/execute with one `d_temp_storage` and `temp_storage_bytes` pair | one `device_*_workspace!` construction followed by `device_*!(..., &mut workspace, ...)` | a typed opaque owner replaces the byte pointer/size pair; internal scratch and agent state are private |
 | CUB stream/environment operand | `let launch = cub.on(&stream)?`, then `&launch` | the stream binding is reusable runtime state; no invented CUB execution policy, module argument, or architecture token |
 | CUB block/warp primitive inside a user `__global__` kernel | `#[rccl_cub::program] mod kernels { #[kernel] fn ... { warp_reduce!(...) } }`, then one `kernels::program!(&context)` bind | cuda-oxide requires an explicit Rust program boundary; the paired item/expression macros prove artifact provenance and keep its unsafe loader out of user code |
@@ -140,12 +143,12 @@ neither the benchmarked operation nor its comparator receives a module.
 - All calls propagate `Result`; no launch error is discarded. None of the
   semantic fixtures is empty, so the zero-length fast path cannot make them
   vacuously pass.
-- CUB and Thrust parser tests reject every former scratch-bearing arity.
-  Thrust expansion tests require the internal radix-workspace,
-  merge-sort-partition, or merge-partition formula plus an `Execution`
-  temporary acquisition; direct CUB examples require one opaque workspace
-  constructor. This keeps a hand-sized allocation or silently ignored legacy
-  operand from passing the current examples.
+- CUB parser tests reject every former scratch-bearing arity. Thrust backend
+  tests require the internal radix-workspace, merge-sort-partition, or
+  merge-partition CUB dependency, while the tracked GPU example requires one
+  allocation, one peak live allocation, and zero outstanding allocations.
+  This keeps a hand-sized allocation or silently ignored legacy operand from
+  passing the current examples.
 - The executable is built with `cargo oxide build` immediately before
   execution. Both fault iterations reported recompilation of the macro and
   runtime crates, ruling out a stale pre-fault executable.
@@ -154,10 +157,10 @@ neither the benchmarked operation nor its comparator receives a module.
   failing, so result parity cannot be misreported as CCCL performance parity.
   The direct bit-window and Policy800 single-tile additions bring the gate to
   fourteen paths. Its latest median-of-medians run still fails, including
-  key-only radix at 1.066641x, bit-window keys at 1.198025x, and single-tile
-  keys at 1.049754x. The repaired one-allocation Thrust routes now measure
-  merge at 1.005731x, merge-by-key at 0.999934x, sort at 0.919659x, and
-  sort-by-key at 0.754599x. Merge remains outside the unchanged band after
+  key-only radix at 1.054579x, bit-window keys at 1.204724x, and single-tile
+  keys at 1.049954x. The repaired one-allocation Thrust routes now measure
+  merge at 1.005818x, merge-by-key at 0.999848x, sort at 0.917355x, and
+  sort-by-key at 0.752757x. Merge remains outside the unchanged band after
   removing Rust-only warmups. The combined gate exits
   nonzero with
   `implementation gap is not masked`. The complete ratios and backend-boundary

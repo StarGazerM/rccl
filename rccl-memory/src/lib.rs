@@ -22,6 +22,7 @@ use cuda_core::{
 };
 use std::{
     alloc::Layout,
+    cell::RefCell,
     error::Error,
     ffi::c_void,
     fmt,

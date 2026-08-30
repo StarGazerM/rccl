@@ -735,6 +735,96 @@ pub struct BorrowedCudaMemoryResource<'context> {
     runtime_anchor: Option<DeviceBlock>,
 }
 
+/// Exact-size CUDA allocation cache restricted to one stream.
+///
+/// This is the Rust ownership equivalent of the pinned CCCL benchmark's
+/// `caching_allocator_t`: deallocation returns an affine [`DeviceBlock`] to a
+/// host-side exact-size cache, and the next request on the same stream may
+/// reuse it without recording CUDA work. The single-stream lifetime and
+/// `RefCell` make the intended non-concurrent use explicit; callers that need
+/// cross-stream or cross-thread reuse should select a stream-ordered pool.
+pub struct SingleStreamCachingMemoryResource<'stream> {
+    stream: &'stream CudaStream,
+    upstream: BorrowedCudaMemoryResource<'stream>,
+    free_blocks: RefCell<Vec<DeviceBlock>>,
+}
+
+impl fmt::Debug for SingleStreamCachingMemoryResource<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SingleStreamCachingMemoryResource")
+            .field("device", &self.stream.context().ordinal())
+            .field("free_blocks", &self.free_blocks.borrow().len())
+            .finish()
+    }
+}
+
+impl<'stream> SingleStreamCachingMemoryResource<'stream> {
+    pub fn new(stream: &'stream CudaStream) -> Result<Self, MemoryError> {
+        Ok(Self {
+            stream,
+            upstream: BorrowedCudaMemoryResource::new(stream.context())?,
+            free_blocks: RefCell::new(Vec::new()),
+        })
+    }
+
+    pub fn free_blocks(&self) -> usize {
+        self.free_blocks.borrow().len()
+    }
+
+    fn validate_stream(&self, stream: &CudaStream) -> Result<(), MemoryError> {
+        validate_stream(self.upstream.context(), stream)?;
+        if self.stream.cu_stream() != stream.cu_stream() {
+            return Err(MemoryError::StreamMismatch);
+        }
+        Ok(())
+    }
+}
+
+unsafe impl DeviceAllocator for SingleStreamCachingMemoryResource<'_> {
+    fn context(&self) -> &Arc<CudaContext> {
+        self.upstream.context()
+    }
+
+    fn allocate(&self, layout: Layout, stream: &CudaStream) -> Result<DeviceBlock, MemoryError> {
+        validate_layout(layout)?;
+        self.validate_stream(stream)?;
+        let mut free_blocks = self.free_blocks.borrow_mut();
+        if let Some(index) = free_blocks
+            .iter()
+            .position(|block| block.size() == layout.size())
+        {
+            let DeviceBlock { ptr, size, .. } = free_blocks.swap_remove(index);
+            return Ok(DeviceBlock {
+                ptr,
+                size,
+                align: layout.align(),
+            });
+        }
+        drop(free_blocks);
+        self.upstream.allocate(layout, stream)
+    }
+
+    unsafe fn deallocate(
+        &self,
+        block: DeviceBlock,
+        stream: &CudaStream,
+    ) -> Result<(), MemoryError> {
+        self.validate_stream(stream)?;
+        self.free_blocks.borrow_mut().push(block);
+        Ok(())
+    }
+}
+
+impl Drop for SingleStreamCachingMemoryResource<'_> {
+    fn drop(&mut self) {
+        self.context().record_err(self.stream.synchronize());
+        for block in self.free_blocks.get_mut().drain(..) {
+            let _ = unsafe { self.upstream.deallocate(block, self.stream) };
+        }
+    }
+}
+
 mod cuda_runtime {
     use std::ffi::c_void;
 

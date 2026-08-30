@@ -220,6 +220,34 @@ macro_rules! for_each_warp_scan_offset {
     }};
 }
 
+// Set-operation Policy600 has sixteen warps. `BlockScanWarpScans` template
+// recurses over warp aggregates 1..16; preserve that fixed dependency graph.
+macro_rules! for_each_set_warp {
+    ($warp:ident, $body:block) => {{
+        macro_rules! one {
+            ($index:expr) => {{
+                let $warp = $index;
+                $body
+            }};
+        }
+        one!(1usize);
+        one!(2usize);
+        one!(3usize);
+        one!(4usize);
+        one!(5usize);
+        one!(6usize);
+        one!(7usize);
+        one!(8usize);
+        one!(9usize);
+        one!(10usize);
+        one!(11usize);
+        one!(12usize);
+        one!(13usize);
+        one!(14usize);
+        one!(15usize);
+    }};
+}
+
 // `BlockRadixRank` fully unrolls its 33-word memoized raking segment. Keep the
 // exact compile-time repetition visible to rustc/cuda-oxide instead of relying
 // on an optimizer loop heuristic.
@@ -302,9 +330,11 @@ const fn load_to_shared_buffer_bytes(items: u32, item_size: u32) -> u32 {
 
 mod merge;
 mod radix;
+mod set;
 
 pub use merge::*;
 pub use radix::*;
+pub use set::*;
 
 #[cfg(test)]
 use merge::local_merge_path_begin;

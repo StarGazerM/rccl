@@ -50,3 +50,21 @@ name = "ordering_benchmark"
 path = "examples/ordering_benchmark.rs"
 test = false
 required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "set_operations"
+path = "examples/set_operations.rs"
+test = false
+required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "set_operations_tests"
+path = "examples/set_operations_tests.rs"
+test = false
+required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "set_operations_benchmark"
+path = "examples/set_operations_benchmark.rs"
+test = false
+required-features = ["cuda-oxide-example"]

@@ -1,6 +1,6 @@
 # Current implemented-subset performance
 
-Date: 2026-08-28
+Date: 2026-08-29
 
 Reference: CCCL `571f2fc3bc53cd710e306ad43d58995c1fe4219f`  
 Backend: pinned cuda-oxide `6bc513bbcdda781b13a328cf692df86f2215acf9`
@@ -14,14 +14,15 @@ synchronization, and full result oracle.
 
 | Implemented intersection | RCCL minimum median | CCCL minimum median | RCCL / CCCL | Gate result |
 |---|---:|---:|---:|---:|
-| CUB 32-lane `i32` WarpReduce sum, four independent reductions per value | 0.017817 ms | 0.017801 ms | 1.000899 | pass, limit 1.001 |
-| Thrust binary in-place transform plus constant range | 0.013955 ms | 0.017350 ms | 0.804323 | pass, limit 1.001 |
+| CUB 32-lane `i32` WarpReduce sum, four independent reductions per value | 0.017439 ms | 0.017418 ms | 1.001206 | **fail**, limit 1.001 |
+| Thrust binary in-place transform plus constant range | 0.014007 ms | 0.017103 ms | 0.818979 | faster; raw row measured before the preceding strict failure stopped the script |
 
-The current full latest-oxide baseline gate passes both rows. An earlier
-standalone repetition measured WarpReduce at 1.001152 and exited before the
-transform assertion. The gate did not round that result, widen its band, or
-retry it into a pass; this run-to-run boundary crossing remains measurement
-evidence, not a reason to relax the strict limit.
+The current latest-oxide baseline gate stops at the WarpReduce row. Earlier
+runs measured it at 1.000899 and 1.001152; this run-to-run boundary crossing
+remains measurement evidence, not a reason to round, retry, or relax the
+strict limit. The transform samples were already complete and remain faster,
+but the script correctly did not turn them into a final PASS after the first
+row failed.
 
 The same strict gate now measures every implemented ordering path. The table
 records the median of five independently measured per-process medians for
@@ -30,29 +31,29 @@ the public borrowed `DoubleBuffer` forms directly.
 
 | Implemented ordering intersection | RCCL / CCCL | Gate result |
 |---|---:|---:|
-| CUB DeviceMerge keys | 1.000000 | pass |
-| CUB DeviceMerge pairs | 0.998876 | pass |
-| CUB DeviceMergeSort keys | 0.980481 | pass |
-| CUB DeviceMergeSort pairs | 1.002974 | **fail** |
-| CUB DeviceRadixSort keys | 1.066641 | **fail** |
-| CUB DeviceRadixSort pairs | 1.001422 | **fail** |
-| CUB DeviceRadixSort keys `DoubleBuffer` 0..24 | 1.198025 | **fail** |
-| CUB DeviceRadixSort pairs `DoubleBuffer` 0..24 | 1.033191 | **fail** |
-| CUB DeviceRadixSort keys, exact Policy800 single tile | 1.049754 | **fail** |
-| CUB DeviceRadixSort pairs, exact Policy800 single tile | 1.025851 | **fail** |
-| Thrust merge | 1.005731 | **fail** |
-| Thrust merge-by-key | 0.999934 | pass |
-| Thrust sort | 0.919659 | pass |
-| Thrust sort-by-key | 0.754599 | pass |
+| CUB DeviceMerge keys | 1.003281 | **fail** |
+| CUB DeviceMerge pairs | 1.001951 | **fail** |
+| CUB DeviceMergeSort keys | 0.979379 | pass |
+| CUB DeviceMergeSort pairs | 1.000686 | pass |
+| CUB DeviceRadixSort keys | 1.054579 | **fail** |
+| CUB DeviceRadixSort pairs | 1.001515 | **fail** |
+| CUB DeviceRadixSort keys `DoubleBuffer` 0..24 | 1.204724 | **fail** |
+| CUB DeviceRadixSort pairs `DoubleBuffer` 0..24 | 1.025068 | **fail** |
+| CUB DeviceRadixSort keys, exact Policy800 single tile | 1.049954 | **fail** |
+| CUB DeviceRadixSort pairs, exact Policy800 single tile | 1.028427 | **fail** |
+| Thrust merge | 1.005818 | **fail** |
+| Thrust merge-by-key | 0.999848 | pass |
+| Thrust sort | 0.917355 | pass |
+| Thrust sort-by-key | 0.752757 | pass |
 
-Three of the ten direct-CUB paths and three of the four Thrust paths are inside
+Two of the ten direct-CUB paths and three of the four Thrust paths are inside
 the 1.001 no-regression band in this run. The Thrust benchmark includes the same
 temporary allocation, destruction, and synchronous `par` completion points as
 the pinned implementation; allocation work was not moved outside the event
 interval. Some repeated-run ratios move across the boundary even when the
 normalized cuda-oxide kernel instructions are unchanged, but the gate does
 not retry failures, classify that observation as a pass, or widen its band.
-The aggregate gate remains red on the seven direct-CUB and one Thrust rows shown
+The aggregate gate remains red on the eight direct-CUB and one Thrust rows shown
 above.
 
 The two single-tile rows each batch 512 sequential public API calls between
@@ -95,7 +96,7 @@ parity is exact: both benchmarks validate every output element after timing.
 ## Repaired Thrust temporary-storage boundary (`THRUST-TEMP-01`)
 
 Status: closed. The synchronous cuda-oxide launcher now accepts safe
-`KernelSliceArg` implementations, so the Thrust declarative macros allocate one
+`KernelSliceArg` implementations, so the Thrust method backends allocate one
 uninitialized byte transaction and split it into private typed regions with
 the same 128/256-byte rounding as pinned Thrust and CUB. Only CUB protocol
 state that requires zeroing is cleared. The generated algorithm code contains
@@ -120,8 +121,8 @@ outstanding allocations, and the exact sorted result.
 
 Closing the storage bug does not waive the strict performance gate. After the
 anti-masking review removed three Rust-only merge warmups, the default
-five-process median-of-medians run measured merge at 1.005731 and
-merge-by-key at 0.999934. Merge remains a failing row; earlier default and
+five-process median-of-medians run measured merge at 1.005818 and
+merge-by-key at 0.999848. Merge remains a failing row; earlier default and
 focused runs moved both merge forms across the 1.001 boundary. That timing
 tail is kept as open measurement evidence rather than retried into a pass.
 
@@ -201,7 +202,7 @@ produced the same 99-register, zero-stack key kernel. Omitting the LLVM middle
 end produced 2,064 bytes of stack per thread and is not a performance fix.
 The current `6bc513bbcdda` pin adds macro span/debug preservation and an
 unrelated scalar conversion; it does not alter this ballot/NVPTX lowering,
-and the unchanged latest-oxide performance gate still measures 1.066641 for
+and the unchanged latest-oxide performance gate still measures 1.054579 for
 the full-range key route.
 
 Closure requires a compiler-side semantic/code-generation repair followed by

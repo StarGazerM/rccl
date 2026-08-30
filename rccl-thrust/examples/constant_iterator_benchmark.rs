@@ -1,7 +1,7 @@
 //! Equivalent-work benchmark for the pinned Thrust constant-iterator example.
 
 use cuda_core::{CudaContext, DeviceBuffer};
-use rccl_thrust::range::RepeatN;
+use rccl_thrust::repeat_n;
 use std::error::Error;
 
 const ITEMS: usize = 8 * 1024 * 1024;
@@ -22,7 +22,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let host_input = (0..ITEMS).map(input_value).collect::<Vec<_>>();
     let mut data = DeviceBuffer::from_host(&stream, &host_input)?;
-    let repeated = RepeatN::new(ADD, ITEMS);
+    let repeated = repeat_n(ADD, ITEMS);
 
     for _ in 0..WARMUPS {
         rccl_thrust::transform!(&exec, &mut data, repeated, |left, right| left + right)?;

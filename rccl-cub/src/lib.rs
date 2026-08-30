@@ -21,7 +21,8 @@ pub use range::{ContiguousRange, DeviceRange, KeyValue, RandomAccessRange, ReadR
 pub use workspace::{
     DeviceMergeSortKeysWorkspace, DeviceMergeSortPairsWorkspace, DeviceMergeWorkspace,
     DeviceRadixSortBufferWorkspace, DeviceRadixSortKeysWorkspace, DeviceRadixSortPairsWorkspace,
-    RadixSortPairsWorkspaceCounts, RadixSortWorkspaceCounts, WorkspaceBuffer,
+    DeviceSetOperationWorkspace, RadixSortPairsWorkspaceCounts, RadixSortWorkspaceCounts,
+    SetOperationWorkspaceCounts, WorkspaceBuffer,
 };
 
 pub use rccl_cub_macros::{

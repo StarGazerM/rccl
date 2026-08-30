@@ -25,20 +25,17 @@ family, or fallback dispatcher.
 The DSL is the shallow Rust invocation itself, not a separate `.dsl` file:
 
 ```rust,ignore
-rccl_thrust::sort!(::<u32>(&exec, &mut keys))?;
+use rccl_thrust::prelude::*;
 
-rccl_thrust::sort_by!(::<i64>(
-    &exec,
-    &mut keys,
-    |left: &i64, right: &i64| right.cmp(left),
-))?;
+keys.sort_unstable(&exec)?;
+keys.sort_by(&exec, |left, right| right.cmp(left))?;
 
-rccl_thrust::stable_sort_by_key_with!(::<i64, u32>(
-    &exec,
-    &mut keys,
-    &mut values,
-    |left: &i64, right: &i64| left.cmp(right),
-))?;
+keys.with_values_mut(&mut values)?
+    .sort_by(&exec, |left, right| left.cmp(right))?;
+
+exec.merge_by_into(&first, &second, &mut output, |left, right| {
+    left.cmp(right)
+})?;
 
 let aggregate = rccl_cub::warp_reduce!(::<i32, 32>(
     thread_value,
@@ -48,8 +45,8 @@ let aggregate = rccl_cub::warp_reduce!(::<i32, 32>(
 
 Rust expressions, closures, paths, and borrows remain Rust syntax. The macros
 do not introduce a C++ iterator-pair facade or comparator object hierarchy.
-The `_by_key` suffix changes the input shape (keys plus associated values);
-`_by` or `_with` supplies an ordinary Rust ordering closure.
+Key/value shape is expressed by `with_values_mut`, not a C++-derived suffix.
+`sort_by` and `merge_by_into` accept an ordinary Rust ordering closure.
 
 ## The three semantic layers
 
@@ -71,29 +68,17 @@ template.
 
 ### Declarative macros
 
-`rccl-thrust/src/macros` owns fixed Thrust-to-CUB lowering:
+`rccl-thrust/src/macros` owns only fixed syntax boundaries:
 
 - program construction;
-- transform;
-- sort and stable sort;
-- sort-by-key forms;
-- merge and merge-by-key forms.
+- the currently implemented constant-input transform.
 
-The macros preserve evaluation-once bindings, allocate private temporary
-storage, and invoke the actual CUB dependency. They make no architecture or
-algorithm-policy decision. Natural order is an ordinary closure emitted by
-the declarative macro.
+Ordering and merge are ordinary trait methods. They allocate private
+temporary storage and invoke a statically implemented backend trait; there is
+no public call macro and no runtime algorithm selection.
 
 `rccl-cub/src/macros` owns the fixed device-wide program binder and the
 fixed transform launch wrapper.
-
-A subtle Rust boundary matters here: forwarding a metavariable captured as
-`ty` makes that fragment opaque to a nested macro. The implemented primitive
-ordering surface therefore captures its supported bare primitive token as an
-`ident` and forwards it unchanged to the CUB proc macro. The CUB layer—not
-the Thrust wrapper—owns the closed primitive layout decision. Extending this
-surface to custom/decomposed keys requires an explicit macro-visible metadata
-contract; it must not fall back to runtime type inspection.
 
 ### Procedural macros
 
@@ -108,6 +93,7 @@ has a capability that `macro_rules!` or normal generics cannot provide:
 | DeviceMerge operations/workspaces/counts | read the selected SM target, inspect supported type layout, and materialize literal CUB tile/load/shared-memory policy |
 | DeviceMergeSort operations/workspaces/counts | select target/type policy, launch bounds, static shared extent, and pass graph |
 | DeviceRadixSort operations/workspaces/counts | select ordered representation, bit width, Policy800 scaling, static unions, kernel entries, and pass graph |
+| Thrust set-operation substrate | select the pinned SM52/SM60 thread/item policy from macro-visible key layout, materialize the physical/virtual shared union, and emit narrow/wide init-partition-agent graphs |
 
 The proc-macro entry functions only parse and dispatch. A fixed public
 proc-macro function that merely returns `quote!` is rejected by the
@@ -162,14 +148,23 @@ not discover type or architecture policy.
 The Thrust layer is:
 
 ```text
-lower_thrust(C)
-  = evaluation-once bindings
+call_thrust_method(C)
+  = ordinary trait dispatch fixed by rustc
   + private temporary allocation
-  + one corresponding CUB macro invocation
+  + one generated CUB backend call
   + synchronization required by the Thrust API
 ```
 
 It contains no CUB kernel and no duplicate policy table.
+
+The optional `thrust_program!(&context; set_operations)` spelling narrows only
+the statically emitted capability catalog. It prevents unrelated algorithm
+families from constraining a set-only target, while the nested CUB proc macros
+remain the sole owners of target/type schedule selection. Set calls themselves
+remain ordinary trait methods. Capability names compose as a declarative list;
+for example, the pinned upstream example requests `merge, set_operations`.
+Set comparator closures are `Copy + 'static`; captured constants must be owned
+with `move`, so a borrowed host stack reference cannot cross the kernel ABI.
 
 ## Ownership and safety boundary
 
@@ -194,6 +189,13 @@ Thrust calls never expose scratch keys, partitions, radix bins, lookback
 state, or counters. Their declarative macros allocate one private temporary
 transaction, split it through safe affine typed regions, construct the CUB
 workspace, invoke CUB, and synchronize.
+
+Set-operation record keys make the type boundary explicit without a runtime
+layout registry. `KeyValue<K, V>` is a `#[repr(C)]` device-copy product; its
+field types remain raw tokens through declarative scaffolding so the CUB proc
+macro computes the same `sizeof(KeyValue)` policy as CCCL. Rust trait dispatch
+selects the generated backend, while user ordering remains an ordinary
+closure. No proc macro attempts to query rustc-inferred types.
 
 ## Review rule
 

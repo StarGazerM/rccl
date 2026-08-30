@@ -1,10 +1,64 @@
 use core::{
+    fmt,
     marker::PhantomData,
-    ops::{Add, Mul},
+    ops::{Add, Bound, Mul, RangeBounds},
 };
 
-use cuda_core::DeviceCopy;
+use cuda_core::{DeviceBuffer, DeviceCopy};
 use rccl_cub::{ContiguousRange, DeviceRange, RandomAccessRange, ReadRange, WriteRange};
+
+/// Invalid construction of a finite device-range expression.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RangeError {
+    LengthMismatch {
+        first: usize,
+        second: usize,
+    },
+    ZeroStep,
+    OutOfBounds {
+        start: usize,
+        end: usize,
+        len: usize,
+    },
+    BoundOverflow,
+}
+
+impl fmt::Display for RangeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::LengthMismatch { first, second } => {
+                write!(
+                    formatter,
+                    "device range lengths differ: {first} and {second}"
+                )
+            }
+            Self::ZeroStep => formatter.write_str("device range step must be non-zero"),
+            Self::OutOfBounds { start, end, len } => write!(
+                formatter,
+                "device subrange {start}..{end} is outside range length {len}"
+            ),
+            Self::BoundOverflow => formatter.write_str("device range bound overflowed"),
+        }
+    }
+}
+
+impl std::error::Error for RangeError {}
+
+pub fn repeat_n<T>(value: T, len: usize) -> RepeatN<T> {
+    RepeatN::new(value, len)
+}
+
+pub fn arithmetic_range<T>(start: T, step: T, len: usize) -> ArithmeticRange<T> {
+    ArithmeticRange::new(start, step, len)
+}
+
+pub fn discard<T>(len: usize) -> Discard<T> {
+    Discard::new(len)
+}
+
+pub fn indexed_output<F, T>(len: usize, write: F) -> IndexedOutput<F, T> {
+    IndexedOutput::new(len, write)
+}
 
 /// A finite constant device-range expression.
 #[derive(Clone, Copy, Debug)]
@@ -99,6 +153,96 @@ impl<T: DeviceCopy> WriteRange for Discard<T> {
 }
 
 impl<T> RandomAccessRange for Discard<T> {}
+
+/// A borrowed structure-of-arrays key/value input range.
+#[derive(Clone, Copy)]
+pub struct KeyValueRange<'a, K: DeviceCopy, V: DeviceCopy> {
+    keys: &'a DeviceBuffer<K>,
+    values: &'a DeviceBuffer<V>,
+}
+
+impl<'a, K: DeviceCopy, V: DeviceCopy> KeyValueRange<'a, K, V> {
+    pub fn new(keys: &'a DeviceBuffer<K>, values: &'a DeviceBuffer<V>) -> Result<Self, RangeError> {
+        if keys.len() != values.len() {
+            return Err(RangeError::LengthMismatch {
+                first: keys.len(),
+                second: values.len(),
+            });
+        }
+        Ok(Self { keys, values })
+    }
+
+    pub fn parts(self) -> (&'a DeviceBuffer<K>, &'a DeviceBuffer<V>) {
+        (self.keys, self.values)
+    }
+}
+
+impl<K: DeviceCopy, V: DeviceCopy> DeviceRange for KeyValueRange<'_, K, V> {
+    fn len(&self) -> usize {
+        self.keys.len()
+    }
+}
+
+impl<K: DeviceCopy, V: DeviceCopy> ReadRange for KeyValueRange<'_, K, V>
+where
+    (K, V): DeviceCopy,
+{
+    type Item = (K, V);
+}
+
+impl<K: DeviceCopy, V: DeviceCopy> RandomAccessRange for KeyValueRange<'_, K, V> {}
+
+/// A borrowed structure-of-arrays key/value range with exclusive output
+/// ownership of both component buffers.
+pub struct KeyValueRangeMut<'a, K: DeviceCopy, V: DeviceCopy> {
+    keys: &'a mut DeviceBuffer<K>,
+    values: &'a mut DeviceBuffer<V>,
+}
+
+impl<'a, K: DeviceCopy, V: DeviceCopy> KeyValueRangeMut<'a, K, V> {
+    pub fn new(
+        keys: &'a mut DeviceBuffer<K>,
+        values: &'a mut DeviceBuffer<V>,
+    ) -> Result<Self, RangeError> {
+        if keys.len() != values.len() {
+            return Err(RangeError::LengthMismatch {
+                first: keys.len(),
+                second: values.len(),
+            });
+        }
+        Ok(Self { keys, values })
+    }
+
+    pub fn parts_mut(&mut self) -> (&mut DeviceBuffer<K>, &mut DeviceBuffer<V>) {
+        (&mut *self.keys, &mut *self.values)
+    }
+
+    pub fn into_parts(self) -> (&'a mut DeviceBuffer<K>, &'a mut DeviceBuffer<V>) {
+        (self.keys, self.values)
+    }
+}
+
+impl<K: DeviceCopy, V: DeviceCopy> DeviceRange for KeyValueRangeMut<'_, K, V> {
+    fn len(&self) -> usize {
+        self.keys.len()
+    }
+}
+
+impl<K: DeviceCopy, V: DeviceCopy> ReadRange for KeyValueRangeMut<'_, K, V>
+where
+    (K, V): DeviceCopy,
+{
+    type Item = (K, V);
+}
+
+impl<K: DeviceCopy, V: DeviceCopy> WriteRange for KeyValueRangeMut<'_, K, V>
+where
+    (K, V): DeviceCopy,
+{
+    type Item = (K, V);
+}
+
+impl<K: DeviceCopy, V: DeviceCopy> RandomAccessRange for KeyValueRangeMut<'_, K, V> {}
 
 /// A checked contiguous logical subrange expression.
 #[derive(Clone, Copy, Debug)]
@@ -217,7 +361,7 @@ impl<R: WriteRange> WriteRange for StepBy<R> {
 impl<R: RandomAccessRange> RandomAccessRange for StepBy<R> {}
 
 /// A zero-copy mapped input expression. Construction does not evaluate the
-/// closure; an algorithm macro compiles it into device code.
+/// closure; a generated algorithm backend compiles it into device code.
 #[derive(Clone, Copy, Debug)]
 pub struct Map<R, F, T> {
     inner: R,
@@ -368,6 +512,11 @@ impl<A: DeviceRange, B: DeviceRange> Zip<A, B> {
     pub fn into_parts(self) -> (A, B) {
         (self.first, self.second)
     }
+
+    fn shortest(first: A, second: B) -> Self {
+        let len = first.len().min(second.len());
+        Self { first, second, len }
+    }
 }
 
 impl<A, B> DeviceRange for Zip<A, B> {
@@ -432,13 +581,13 @@ where
 
 /// An index-aware output expression compiled into device code.
 #[derive(Clone, Copy, Debug)]
-pub struct Tabulate<F, T> {
+pub struct IndexedOutput<F, T> {
     write: F,
     len: usize,
     value: PhantomData<fn(T)>,
 }
 
-impl<F, T> Tabulate<F, T> {
+impl<F, T> IndexedOutput<F, T> {
     pub fn new(len: usize, write: F) -> Self {
         Self {
             write,
@@ -452,21 +601,145 @@ impl<F, T> Tabulate<F, T> {
     }
 }
 
-impl<F, T> DeviceRange for Tabulate<F, T> {
+impl<F, T> DeviceRange for IndexedOutput<F, T> {
     fn len(&self) -> usize {
         self.len
     }
 }
 
-impl<F, T> WriteRange for Tabulate<F, T>
+impl<F, T> WriteRange for IndexedOutput<F, T>
 where
-    F: FnMut(usize, T),
+    F: Fn(usize, T),
     T: DeviceCopy,
 {
     type Item = T;
 }
 
-impl<F, T> RandomAccessRange for Tabulate<F, T> {}
+impl<F, T> RandomAccessRange for IndexedOutput<F, T> {}
+
+fn checked_bounds<R: RangeBounds<usize>>(
+    bounds: R,
+    len: usize,
+) -> Result<(usize, usize), RangeError> {
+    let start = match bounds.start_bound() {
+        Bound::Included(&value) => value,
+        Bound::Excluded(&value) => value.checked_add(1).ok_or(RangeError::BoundOverflow)?,
+        Bound::Unbounded => 0,
+    };
+    let end = match bounds.end_bound() {
+        Bound::Included(&value) => value.checked_add(1).ok_or(RangeError::BoundOverflow)?,
+        Bound::Excluded(&value) => value,
+        Bound::Unbounded => len,
+    };
+    if start > end || end > len {
+        return Err(RangeError::OutOfBounds { start, end, len });
+    }
+    Ok((start, end))
+}
+
+/// Iterator-like construction of lazy finite device-range expressions.
+///
+/// These methods never evaluate a closure or access device storage on the
+/// host. A device algorithm may accept the resulting generic type only after
+/// that adaptor has a real generated lowering; construction alone does not
+/// claim operational coverage.
+pub trait DeviceRangeExt: DeviceRange + Sized {
+    fn map<F, T>(self, map: F) -> Map<Self, F, T>
+    where
+        Self: ReadRange,
+        F: Fn(Self::Item) -> T,
+        T: DeviceCopy,
+    {
+        Map::new(self, map)
+    }
+
+    fn map_write<F, T>(self, map: F) -> MapOutput<Self, F, T, Self::Item>
+    where
+        Self: WriteRange,
+        F: Fn(T) -> Self::Item,
+        T: DeviceCopy,
+    {
+        MapOutput::new(self, map)
+    }
+
+    fn map_read_write<Read, Write, Input, Output>(
+        self,
+        read: Read,
+        write: Write,
+    ) -> MapInOut<Self, Read, Write, Input, Output>
+    where
+        Self: ReadRange + WriteRange,
+        Read: Fn(<Self as ReadRange>::Item) -> Output,
+        Write: Fn(Input) -> <Self as WriteRange>::Item,
+        Input: DeviceCopy,
+        Output: DeviceCopy,
+    {
+        MapInOut::new(self, read, write)
+    }
+
+    fn rev(self) -> Rev<Self> {
+        Rev::new(self)
+    }
+
+    fn step_by(self, step: usize) -> Result<StepBy<Self>, RangeError> {
+        StepBy::new(self, step).ok_or(RangeError::ZeroStep)
+    }
+
+    fn slice<R: RangeBounds<usize>>(self, bounds: R) -> Result<Subrange<Self>, RangeError> {
+        let len = self.len();
+        let (start, end) = checked_bounds(bounds, len)?;
+        Subrange::new(self, start, end - start).ok_or(RangeError::OutOfBounds { start, end, len })
+    }
+
+    fn zip<R: DeviceRange>(self, other: R) -> Zip<Self, R> {
+        Zip::shortest(self, other)
+    }
+
+    fn zip_eq<R: DeviceRange>(self, other: R) -> Result<Zip<Self, R>, RangeError> {
+        let first = self.len();
+        let second = other.len();
+        Zip::new(self, other).ok_or(RangeError::LengthMismatch { first, second })
+    }
+
+    fn gather<I>(self, indices: I) -> Select<Self, I>
+    where
+        Self: ReadRange + RandomAccessRange,
+        I: ReadRange<Item = usize> + RandomAccessRange,
+    {
+        Select::new(self, indices)
+    }
+}
+
+impl<R: DeviceRange> DeviceRangeExt for R {}
+
+/// Safe construction of structure-of-arrays key/value ranges.
+pub trait DeviceKeyValueExt<K: DeviceCopy> {
+    fn with_values<'a, V: DeviceCopy>(
+        &'a self,
+        values: &'a DeviceBuffer<V>,
+    ) -> Result<KeyValueRange<'a, K, V>, RangeError>;
+
+    fn with_values_mut<'a, V: DeviceCopy>(
+        &'a mut self,
+        values: &'a mut DeviceBuffer<V>,
+    ) -> Result<KeyValueRangeMut<'a, K, V>, RangeError>;
+}
+
+impl<K: DeviceCopy> DeviceKeyValueExt<K> for DeviceBuffer<K> {
+    fn with_values<'a, V: DeviceCopy>(
+        &'a self,
+        values: &'a DeviceBuffer<V>,
+    ) -> Result<KeyValueRange<'a, K, V>, RangeError> {
+        KeyValueRange::new(self, values)
+    }
+
+    fn with_values_mut<'a, V: DeviceCopy>(
+        &'a mut self,
+        values: &'a mut DeviceBuffer<V>,
+    ) -> Result<KeyValueRangeMut<'a, K, V>, RangeError> {
+        KeyValueRangeMut::new(self, values)
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -527,35 +800,66 @@ mod tests {
     impl<T> RandomAccessRange for TestOutput<T> {}
     impl<T> ContiguousRange for TestOutput<T> {}
 
+    struct TestInOut<T> {
+        len: usize,
+        item: PhantomData<T>,
+    }
+
+    impl<T> TestInOut<T> {
+        fn new(len: usize) -> Self {
+            Self {
+                len,
+                item: PhantomData,
+            }
+        }
+    }
+
+    impl<T> DeviceRange for TestInOut<T> {
+        fn len(&self) -> usize {
+            self.len
+        }
+    }
+
+    impl<T: DeviceCopy> ReadRange for TestInOut<T> {
+        type Item = T;
+    }
+
+    impl<T: DeviceCopy> WriteRange for TestInOut<T> {
+        type Item = T;
+    }
+
+    impl<T> RandomAccessRange for TestInOut<T> {}
+
     fn read_i32<R: ReadRange<Item = i32> + RandomAccessRange>(_range: R) {}
     fn write_i32<R: WriteRange<Item = i32> + RandomAccessRange>(_range: R) {}
     fn read_pair<R: ReadRange<Item = (i32, i32)> + RandomAccessRange>(_range: R) {}
 
     #[test]
     fn range_expressions_expose_only_semantic_capabilities() {
-        read_i32(RepeatN::new(7_i32, 3));
-        read_i32(ArithmeticRange::new(1_i32, 2_i32, 3));
-        write_i32(Discard::<i32>::new(3));
+        read_i32(repeat_n(7_i32, 3));
+        read_i32(arithmetic_range(1_i32, 2_i32, 3));
+        write_i32(discard::<i32>(3));
 
         let values = TestInput::<i32>::new(4);
-        read_i32(Subrange::new(values, 1, 2).expect("valid subrange"));
-        read_i32(Rev::new(values));
-        read_i32(StepBy::new(values, 2).expect("valid stride"));
-        assert!(StepBy::new(values, 0).is_none());
-        assert!(Subrange::new(values, usize::MAX, 2).is_none());
+        read_i32(values.slice(1..3).expect("valid subrange"));
+        read_i32(values.rev());
+        read_i32(values.step_by(2).expect("valid stride"));
+        assert_eq!(values.step_by(0).err(), Some(RangeError::ZeroStep));
+        assert!(matches!(
+            values.slice(usize::MAX..),
+            Err(RangeError::OutOfBounds { .. })
+        ));
     }
 
     #[test]
     fn construction_never_executes_user_closures_on_the_host() {
         let values = TestInput::<i32>::new(3);
-        let mapped = Map::<_, _, i32>::new(values, |_value| {
-            std::panic::panic_any("map closure executed on host")
-        });
+        let mapped = values.map(|_value| std::panic::panic_any("map closure executed on host"));
         assert_eq!(mapped.len(), 3);
         read_i32(mapped);
 
-        let tabulated = Tabulate::<_, i32>::new(3, |_index, _value| {
-            std::panic::panic_any("tabulate closure executed on host")
+        let tabulated = indexed_output::<_, i32>(3, |_index, _value| {
+            std::panic::panic_any("indexed_output closure executed on host")
         });
         assert_eq!(tabulated.len(), 3);
         write_i32(tabulated);
@@ -565,13 +869,20 @@ mod tests {
     fn composed_capabilities_preserve_shape_and_item_types() {
         let first = TestInput::<i32>::new(3);
         let second = TestInput::<i32>::new(3);
-        let zipped = Zip::new(first, second).expect("equal lengths must zip");
+        let zipped = first.zip_eq(second).expect("equal lengths must zip");
         assert_eq!(zipped.len(), 3);
         read_pair(zipped);
-        assert!(Zip::new(first, TestInput::<i32>::new(2)).is_none());
+        assert_eq!(first.zip(TestInput::<i32>::new(2)).len(), 2);
+        assert!(matches!(
+            first.zip_eq(TestInput::<i32>::new(2)),
+            Err(RangeError::LengthMismatch {
+                first: 3,
+                second: 2
+            })
+        ));
 
         let indices = TestInput::<usize>::new(2);
-        let selected = Select::new(first, indices);
+        let selected = first.gather(indices);
         assert_eq!(selected.len(), 2);
         read_i32(selected);
     }
@@ -579,11 +890,31 @@ mod tests {
     #[test]
     fn writable_compositions_require_mutable_borrows() {
         let output = TestOutput::<i32>::new(4);
-        write_i32(Subrange::new(output, 1, 2).expect("valid output subrange"));
-        write_i32(Rev::new(TestOutput::<i32>::new(4)));
-        write_i32(StepBy::new(TestOutput::<i32>::new(4), 2).expect("valid output stride"));
+        write_i32(output.slice(1..3).expect("valid output subrange"));
+        write_i32(TestOutput::<i32>::new(4).rev());
+        write_i32(
+            TestOutput::<i32>::new(4)
+                .step_by(2)
+                .expect("valid output stride"),
+        );
 
-        let mapped = MapOutput::<_, _, i32, i32>::new(TestOutput::new(4), |value| value * 2);
+        let mapped = TestOutput::new(4).map_write(|value: i32| value * 2);
         write_i32(mapped);
+
+        let mapped = TestInOut::<i32>::new(4).map_read_write(|value| value + 1, |value| value - 1);
+        read_i32(&mapped);
+        write_i32(mapped);
+    }
+
+    #[test]
+    fn included_and_unbounded_slice_bounds_match_rust_ranges() {
+        let values = TestInput::<i32>::new(5);
+        assert_eq!(values.slice(..=2).expect("valid prefix").len(), 3);
+        assert_eq!(values.slice(2..).expect("valid suffix").len(), 3);
+        assert_eq!(values.slice(..).expect("valid full range").len(), 5);
+        assert!(matches!(
+            values.slice(..=usize::MAX),
+            Err(RangeError::BoundOverflow)
+        ));
     }
 }

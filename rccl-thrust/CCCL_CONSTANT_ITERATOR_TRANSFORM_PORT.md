@@ -14,7 +14,7 @@ result:
 
 ```rust,ignore
 let mut data = DeviceBuffer::from_host(&stream, &[3_i32, 7, 2, 5])?;
-let repeated = RepeatN::new(10_i32, data.len());
+let repeated = repeat_n(10_i32, data.len());
 rccl_thrust::transform!(&exec, &mut data, repeated, |left, right| left + right)?;
 assert_eq!(data.to_host_vec(&stream)?, [13, 17, 12, 15]);
 ```
@@ -31,7 +31,7 @@ function-object compatibility type or runtime callable erasure.
 | Pinned CCCL evidence | Rust evidence |
 |---|---|
 | example input `{3, 7, 2, 5}` | the same four `i32` values in the GPU executable |
-| `constant_iterator<int>(10)` | finite `RepeatN::new(10_i32, data.len())` |
+| `constant_iterator<int>(10)` | finite `repeat_n(10_i32, data.len())` |
 | binary in-place `transform` with addition | `transform!` with `|left, right| left + right` |
 | result `{13, 17, 12, 15}` | every copied-back element is asserted exactly |
 | constant iterator is trivially copyable | `repeat_n_is_copy_and_keeps_value_and_extent` |

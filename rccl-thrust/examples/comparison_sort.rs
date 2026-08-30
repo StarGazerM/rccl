@@ -4,6 +4,7 @@
 
 use cuda_core::{CudaContext, DeviceBuffer};
 use rccl_thrust::memory::{BorrowedCudaMemoryResource, TrackingMemoryResource};
+use rccl_thrust::prelude::*;
 use std::error::Error;
 
 fn shuffled_unique(count: usize) -> Vec<u32> {
@@ -28,13 +29,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Pinned Thrust comparator sort: descending order is selected by the Rust
     // closure. Its CUB schedule and temporary storage stay implementation
-    // details of the macro and execution policy.
+    // details of the generated backend and execution policy.
     let mut descending = DeviceBuffer::from_host(&stream, &input)?;
-    rccl_thrust::sort_by!(::<u32>(
-        &exec,
-        &mut descending,
-        |left: &u32, right: &u32| right.cmp(left),
-    ))?;
+    descending.sort_unstable_by(&exec, |left: &u32, right: &u32| right.cmp(left))?;
     assert_eq!(
         descending.to_host_vec(&stream)?,
         (0..input.len() as u32).rev().collect::<Vec<_>>()
@@ -43,12 +40,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Pinned Thrust comparison `sort_by_key`: values must follow their keys.
     let mut pair_keys = DeviceBuffer::from_host(&stream, &input)?;
     let mut pair_values = DeviceBuffer::from_host(&stream, &input)?;
-    rccl_thrust::sort_by_key_with!(::<u32, u32>(
-        &exec,
-        &mut pair_keys,
-        &mut pair_values,
-        |left: &u32, right: &u32| right.cmp(left),
-    ))?;
+    pair_keys
+        .with_values_mut(&mut pair_values)?
+        .sort_unstable_by(&exec, |left: &u32, right: &u32| right.cmp(left))?;
     let descending_expected = (0..input.len() as u32).rev().collect::<Vec<_>>();
     assert_eq!(pair_keys.to_host_vec(&stream)?, descending_expected);
     assert_eq!(pair_values.to_host_vec(&stream)?, descending_expected);
@@ -66,12 +60,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     expected.sort_by_key(|pair| pair.0);
     let mut stable_keys = DeviceBuffer::from_host(&stream, &stable_keys_host)?;
     let mut stable_values = DeviceBuffer::from_host(&stream, &stable_values_host)?;
-    rccl_thrust::stable_sort_by_key_with!(::<u32, u32>(
-        &exec,
-        &mut stable_keys,
-        &mut stable_values,
-        |left: &u32, right: &u32| left.cmp(right),
-    ))?;
+    stable_keys
+        .with_values_mut(&mut stable_values)?
+        .sort_by(&exec, |left: &u32, right: &u32| left.cmp(right))?;
     let actual = stable_keys
         .to_host_vec(&stream)?
         .into_iter()
@@ -85,11 +76,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let tracked = TrackingMemoryResource::new(BorrowedCudaMemoryResource::new(stream.context())?);
     let tracked_exec = thrust.par_in(&stream, &tracked)?;
     let mut tracked_keys = DeviceBuffer::from_host(&stream, &input)?;
-    rccl_thrust::sort_by!(::<u32>(
-        &tracked_exec,
-        &mut tracked_keys,
-        |left: &u32, right: &u32| right.cmp(left),
-    ))?;
+    tracked_keys.sort_unstable_by(&tracked_exec, |left: &u32, right: &u32| right.cmp(left))?;
     assert_eq!(
         tracked_keys.to_host_vec(&stream)?,
         (0..input.len() as u32).rev().collect::<Vec<_>>()

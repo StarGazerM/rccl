@@ -66,6 +66,31 @@ impl<T: TemporaryValue> TemporaryRegion<'_, T> {
         }
         Ok(())
     }
+
+    /// Copy the first temporary value to the host at a synchronous algorithm
+    /// completion point.
+    ///
+    /// Set operations use this for CCCL's device output-count word.  The
+    /// stream synchronization and the following synchronous DtoH copy match
+    /// `synchronize(policy)` followed by `get_value(policy, ptr)`.
+    #[doc(hidden)]
+    pub fn first_to_host(&self) -> Result<T, MemoryError> {
+        if self.is_empty() {
+            return Err(MemoryError::SizeOverflow);
+        }
+        self.stream.synchronize().map_err(MemoryError::Driver)?;
+        let mut host = MaybeUninit::<T>::uninit();
+        // SAFETY: a nonempty TemporaryRegion owns at least one initialized
+        // element-sized device slot. The preceding stream synchronization
+        // completes the kernel write, and the synchronous driver copy returns
+        // only after filling `host`.
+        unsafe {
+            sys::cuMemcpyDtoH_v2(host.as_mut_ptr().cast(), self.ptr, std::mem::size_of::<T>())
+                .result()
+                .map_err(MemoryError::Driver)?;
+            Ok(host.assume_init())
+        }
+    }
 }
 
 impl<T: TemporaryValue> fmt::Debug for TemporaryRegion<'_, T> {
@@ -224,8 +249,26 @@ macro_rules! define_temporary_workspace {
                 counts: [usize; $count],
                 alignments: [usize; $count],
             ) -> Result<Self, MemoryError> {
+                Self::new_in_with_extra_tail(allocator, stream, counts, alignments, 0)
+            }
+
+            /// Preserve an additional outer aliasing level without changing
+            /// any typed-region offset. CCCL set operations nest their inner
+            /// three-part alias inside the Thrust output-count alias, adding
+            /// one more 256-byte rounded tail to the single allocation.
+            #[doc(hidden)]
+            pub fn new_in_with_extra_tail(
+                allocator: A,
+                stream: &'stream CudaStream,
+                counts: [usize; $count],
+                alignments: [usize; $count],
+                extra_tail: usize,
+            ) -> Result<Self, MemoryError> {
                 let sizes = [$(temporary_region_bytes::<$ty>(counts[$index])?),+];
-                let (offsets, total) = temporary_layout(sizes, alignments)?;
+                let (offsets, base_total) = temporary_layout(sizes, alignments)?;
+                let total = base_total
+                    .checked_add(extra_tail)
+                    .ok_or(MemoryError::SizeOverflow)?;
                 let allocation = TemporaryAllocation::new(allocator, stream, total)?;
                 let base = allocation.ptr();
                 Ok(Self {

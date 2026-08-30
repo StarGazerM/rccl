@@ -71,7 +71,6 @@ entries = [
   "thrust/thrust/scan.h",
   "thrust/thrust/scatter.h",
   "thrust/thrust/sequence.h",
-  "thrust/thrust/set_operations.h",
   "thrust/thrust/shuffle.h",
   "thrust/thrust/swap.h",
   "thrust/thrust/tabulate.h",
@@ -85,12 +84,21 @@ entries = [
 evidence = ["CCCL_THRUST_CUB_COVERAGE_PLAN.md"]
 
 [[surface]]
+id = "thrust-set-operations"
+kind = "thrust-public-header"
+owner = "rccl-thrust/rccl-cub/rccl-cub-macros"
+status = "partial"
+entries = ["thrust/thrust/set_operations.h"]
+evidence = ["rccl-thrust/src/set.rs", "rccl-cub/src/ordering_backend/set.rs", "rccl-cub-macros/src/set.rs", "rccl-thrust/examples/set_operations.rs", "rccl-thrust/examples/set_operations_tests.rs", "reviews/set-operations-cccl-source.md", "scripts/test-set-operations.sh"]
+review = "reviews/set-operations-cccl-source.md"
+
+[[surface]]
 id = "thrust-sort"
 kind = "thrust-public-header"
 owner = "rccl-thrust"
 status = "backend-blocked"
 entries = ["thrust/thrust/sort.h"]
-evidence = ["rccl-thrust/src/macros/ordering.rs", "RCCL_COMPILER_DSL.md", "reviews/ordering-cccl-source.md"]
+evidence = ["rccl-thrust/src/ordering.rs", "rccl-thrust/src/backend.rs", "RCCL_COMPILER_DSL.md", "reviews/ordering-cccl-source.md"]
 
 [[surface]]
 id = "thrust-merge"
@@ -98,7 +106,7 @@ kind = "thrust-public-header"
 owner = "rccl-thrust"
 status = "backend-blocked"
 entries = ["thrust/thrust/merge.h"]
-evidence = ["rccl-thrust/src/macros/merge.rs", "RCCL_COMPILER_DSL.md", "reviews/ordering-cccl-source.md"]
+evidence = ["rccl-thrust/src/merge.rs", "rccl-thrust/src/backend.rs", "RCCL_COMPILER_DSL.md", "reviews/ordering-cccl-source.md"]
 
 [[surface]]
 id = "thrust-support-native"

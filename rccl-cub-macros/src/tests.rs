@@ -1,7 +1,45 @@
 use super::*;
 use crate::merge::{merge_load_to_shared_policy, merge_shared_bytes, nominal_4b_items};
 use crate::radix::reg_bound_policy;
-use crate::target::tmp_cuda_target;
+use crate::set::set_policy_for;
+use crate::target::{tmp_cuda_target, tmp_primitive_size};
+
+#[test]
+fn set_key_value_layout_and_target_policies_match_pinned_cccl() {
+    let key_value: syn::Type = syn::parse_quote!(
+        ::rccl_cub::KeyValue<i32, i32>
+    );
+    assert_eq!(tmp_primitive_size(&key_value).unwrap(), 8);
+
+    let padded: syn::Type = syn::parse_quote!(
+        ::rccl_cub::KeyValue<u8, u64>
+    );
+    assert_eq!(tmp_primitive_size(&padded).unwrap(), 16);
+
+    let spoofed: syn::Type = syn::parse_quote!(application::KeyValue<u8, u64>);
+    assert!(
+        tmp_primitive_size(&spoofed)
+            .unwrap_err()
+            .to_string()
+            .contains("only rccl_cub::KeyValue")
+    );
+
+    let sm52 = tmp_cuda_target(&syn::parse_quote!(sm_52)).unwrap();
+    let policy = set_policy_for(sm52, 8, 8).unwrap();
+    assert_eq!((policy.threads, policy.items), (256, 8));
+    assert_eq!(policy.shared_bytes, 19_456);
+    assert!(!policy.sm70);
+
+    let sm89 = tmp_cuda_target(&syn::parse_quote!(sm_89)).unwrap();
+    let policy = set_policy_for(sm89, 8, 8).unwrap();
+    assert_eq!((policy.threads, policy.items), (512, 10));
+    assert_eq!(policy.shared_bytes, 47_104);
+    assert!(policy.sm70);
+
+    let wide_value = set_policy_for(sm89, 4, 16).unwrap();
+    assert_eq!(wide_value.items, 19, "value size must not tune items");
+    assert_eq!(wide_value.shared_bytes, 165_872);
+}
 
 #[test]
 fn user_program_owns_only_the_exact_scoped_cuda_oxide_bind() {

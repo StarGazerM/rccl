@@ -52,12 +52,12 @@ The runtime dependency direction is:
 rccl-memory -> rccl-cub -> rccl-thrust -> rccl
 ```
 
-Closed CUB policy information is above that graph; fixed Thrust lowering is
-declarative Rust in its runtime crate:
+Closed CUB policy information is above that graph; ordinary Thrust methods
+dispatch to program-generated backend trait implementations:
 
 ```text
-rccl-cub-macros          -> generated policy-specialized rccl-cub Rust
-rccl-thrust macro_rules! -> fixed Thrust-to-CUB lowering
+rccl-cub-macros       -> generated policy-specialized rccl-cub Rust
+rccl-thrust methods   -> generated typed CUB backend traits
 ```
 
 `rccl-memory` is also consumed directly by `rccl-thrust`. Support code goes in
@@ -69,8 +69,9 @@ the lowest existing owner that needs it:
   cuda-oxide kernel families;
 - `rccl-cub`: handwritten support/runtime values plus macro-emitted operation
   code only after an operation is implemented;
-- `rccl-thrust`: handwritten adaptors, execution/completion values, and
-  declarative Thrust-to-CUB operation macros only after implementation;
+- `rccl-thrust`: handwritten adaptors, execution/completion values, ordinary
+  method APIs, and declarative program/backend scaffolding only after
+  implementation;
 - `rccl`: re-exports only.
 
 Do not create a monolithic compatibility crate. If real implementation work
@@ -99,17 +100,18 @@ Other rules:
 
 ### Compiler DSL contract
 
-The complete contract is in `RCCL_COMPILER_DSL.md`. The CUB and Thrust DSLs
-are shallow user call-site macros parsed into operation-specific `syn` 3.0.4
-ASTs with `syn_derive` 0.2.0. Their closed inventories and lowering tables are
-typed Rust compiler catalogs, not separate `.dsl` files and not user-authored
-syntax.
+The complete contract is in `RCCL_COMPILER_DSL.md`. CUB operations that need
+closed policy selection use shallow call-site proc macros parsed into
+operation-specific `syn` 3.0.4 ASTs with `syn_derive` 0.2.0. Thrust calls use
+ordinary methods over generated backend traits. Closed inventories and
+lowering tables are typed Rust compiler catalogs, not separate `.dsl` files
+and not user-authored syntax.
 Expansion must:
 
-1. expose every operation requiring TMP, schedule selection, kernel
-   registration, or static shared-storage syntax as a shallow macro such as
-   `sort_by!`, while leaving ordinary Rust support operations as normal types
-   and functions;
+1. expose the program/kernel-family boundary and every CUB operation requiring
+   closed TMP, schedule selection, or static shared-storage syntax as a
+   shallow macro, while leaving Thrust calls and ordinary support operations
+   as normal traits, methods, types, and functions;
 2. pass resolved schedule values as literal const-generic operands and direct
    cuda-oxide compiler attributes;
 3. require every deduced C++ template fact in macro syntax whenever lowering
@@ -156,7 +158,7 @@ performance gate remains red until the upstream kernels are reproduced.
 | `device_reference` and proxy references | no free-standing fake `&T`; range/read/write capabilities and adaptor-specific device lowering | CUB + Thrust | partial; minimal host capability traits cover cuda-core and allocator-aware device buffers but deliberately not host slices, while generated kernels remain |
 | iterator traits/categories/facade/adaptor | descriptor structs compose range/read/write/random-access capabilities without host execution methods | CUB + Thrust | partial; finite constant input is operational for the binary in-place transform intersection; other handwritten descriptor forms remain non-operational planning vocabulary until their device lowering and upstream evidence exist |
 | `mdspan`, extents, layouts | typed multidimensional device view with shape, strides, and layout marker; contiguous 1-D case lowers to slice | CUB | missing; cuda-oxide checked 2-D views are reusable backend pieces |
-| functional objects | ordinary `Fn`/`FnMut` bounds plus `Copy` device-callable closures; fixed Thrust forwarding is declarative and closed CUB specialization stays in `rccl-cub-macros` | CUB + Thrust macros | catalogued; algorithm expansion is backend-blocked; no RCCL callable compatibility trait |
+| functional objects | ordinary `Fn` bounds plus `Copy` device-callable closures; Thrust methods dispatch through generated traits and closed CUB specialization stays in `rccl-cub-macros` | CUB + Thrust | catalogued; algorithm expansion is backend-blocked; no RCCL callable compatibility trait |
 | `complex<T>` | RCCL-owned `#[repr(C)] Complex<T>` or an upstream cuda-core `DeviceCopy` implementation for a standard Rust complex type | CUB value layer | missing |
 | random engines/distributions | small copyable RNG state values with Rust methods; exact pinned sequences tested against Thrust | Thrust | missing |
 | memory construction/destruction and unique allocation | `MaybeUninit<T>`, RAII owners, `Drop`, and explicit stream-ordered destruction/release | memory + Thrust | partial; unique object/array helpers and nontrivial device construction remain |
@@ -202,7 +204,8 @@ already provide.
   headers; fixed Thrust lowering does not justify a second proc-macro catalog.
   Support families are ordinary-library coverage rows, not compiler entries.
 - `rccl-cub` exposes handwritten safe support values, WarpReduce, DeviceMerge,
-  DeviceMergeSort, and primitive integer/`f32`/`f64` DeviceRadixSort. Its
+  DeviceMergeSort, the private CUB substrate used by Thrust set operations,
+  and primitive integer/`f32`/`f64` DeviceRadixSort. Its
   32/64-bit Policy800 radix path includes the exact single-tile threshold,
   runtime bit windows, and borrowed key/pair DoubleBuffers; pair buffers have
   one structural selector rather than synchronized C++ selector integers.
@@ -216,8 +219,14 @@ already provide.
   `cuda::Execution` values borrowing that program and a stream. Ordinary
   `par` supplies the default temporary allocator; `par_in` is the explicit
   resource form. Public code never loads or passes a module or architecture.
+  Set-only programs may request the declarative `set_operations` capability
+  catalog so unrelated backends do not constrain the target; target/type
+  policy remains exclusively inside the nested CUB proc macros.
   Binary in-place `transform!`, sort/stable/by-key, and merge/by-key all lower
-  through their actual CUB dependency.
+  through their actual CUB dependency. The four set operations support
+  contiguous keys, structure-of-arrays values, ordinary comparator closures,
+  discard outputs, arithmetic/counting inputs, and the pinned `KeyValue`
+  record test types through the same CUB lowering.
 - Other descriptor-only fancy-range algebra remains support/planning
   vocabulary; it is not counted as executable algorithm coverage.
 
@@ -294,7 +303,7 @@ not confuse them with an owning vector container.
 | Scans/differences | `scan`, `transform_scan`, `adjacent_difference` including scan-by-key | missing | thread/warp/block/device scan |
 | Compaction | `remove`, `unique`, `partition` including copy, stable, by-key, and point/query forms | missing | scan + select/partition agents |
 | Replacement | `replace` and copy/predicate variants | missing | elementwise traversal |
-| Merge and sets | `merge`, `set_operations` including key/value forms | merge keys/pairs implemented for contiguous buffers; sets and general iterators missing; performance gate failing | general iterators + exact DeviceMerge kernel |
+| Merge and sets | `merge`, `set_operations` including key/value forms | merge keys/pairs and all four set operations are implemented for contiguous buffers; sets additionally cover key/value source selection, owned comparator closures, discard output, 64-bit arithmetic/counting inputs, and pinned key-only record types; native SM89 correctness plus memcheck/racecheck pass, SM70 builds, SM52 TMP policy is pinned but cuda-oxide's basic-module floor prevents device lowering; isolated SM89 `i32` union reports 83 Rust versus 64 CCCL registers, and the exclusive-GPU performance gate remains unrun while a foreign VLLM process owns the GPU | cuda-oxide SM52 lowering + set-agent codegen/resource repair + remaining general range expressions + exclusive performance run |
 | Sorting | `sort` including stable/key/value/query forms | primitive integer/`f32`/`f64` contiguous keys/pairs implemented with macro-visible TMP smart selection and signed-zero handling; direct CUB 32/64-bit Policy800 bit-window/DoubleBuffer forms are implemented, while Thrust exposure, 8/16-bit keys, half/bfloat/decomposer/general iterator forms are missing; performance gate failing | exact radix/merge-sort agents, offsets, decomposers, iterators |
 
 This table covers exactly these 34 headers:
@@ -414,7 +423,7 @@ The device-wide APIs must expose both of CUB's relevant allocation forms:
 2. an environment/resource convenience path that owns allocation policy.
 
 Thrust calls the resource form internally. Direct CUB users must not be forced
-through a Thrust `Execution`. No Thrust ordering macro may expose a CUB
+through a Thrust `Execution`. No Thrust ordering method may expose a CUB
 partition-count query, ping-pong buffer, bins, lookback state, counter array,
 or partition array as a caller operand. The proc macro owns the layout formula;
 the runtime range length determines the extent; and `Execution` owns resource
@@ -450,7 +459,7 @@ cannot be used to promote a `partial` row to `implemented`.
 | Gap | Affected public rows | Current evidence | Required closure |
 |---|---|---|---|
 | `ORDER-PERF-01`: ballot/complement NVPTX code generation | CUB Policy800 one-sweep `device_radix_sort` keys/pairs and every Thrust sort form that lowers through it | the pinned eight-ballot `MatchAny<8>` topology is present, but cuda-oxide/LLVM 22 lowers each Rust ballot plus conditional complement through duplicated predicate extraction and `selp`/`xor` rather than CUB's same-predicate predicated `not`; SM89 one-sweep keys use 99 registers versus CUB's 75 and pairs use 80 versus 65, with identical static shared sizes and zero spills | repair the cuda-oxide/LLVM compiler boundary without RCCL inline PTX, JIT, PTX post-processing, a different radix algorithm, unsafe/raw-pointer escape hatches, or relaxed tests; then retain exact result/permutation/stability checks and pass the unchanged PTX/SASS, register, occupancy, and equal-work large-input gates |
-| `THRUST-PAR-PERF-02`: synchronous policy timing tail | Thrust merge and merge-by-key | after the one-allocation repair and removal of Rust-only merge warmups, the latest-oxide five-round gate measures 1.005731 and 0.999934; direct CUB merge is 1.000000/0.998876, all results and sanitizers pass, and earlier runs moved both Thrust rows across 1.001 | retain the exact allocation and synchronization graph, isolate the remaining host/runtime-policy interval without adding warmups, caching, caller scratch, or a threshold exception, and pass the unchanged five-round gate |
+| `THRUST-PAR-PERF-02`: synchronous policy timing tail | Thrust merge and merge-by-key | after the method/view refactor retained the one-allocation graph and moved persistent view validation outside the measured interval, the latest-oxide five-round gate measures 1.005818 and 0.999848; all complete outputs pass, and earlier runs moved both Thrust rows across 1.001 | retain the exact allocation and synchronization graph, isolate the remaining host/runtime-policy interval without adding warmups, caching, caller scratch, or a threshold exception, and pass the unchanged five-round gate |
 
 `THRUST-TEMP-01` is closed. The pinned cuda-oxide host/macro crates are patched
 at their safe synchronous launch boundary so `KernelSliceArg` implementations,

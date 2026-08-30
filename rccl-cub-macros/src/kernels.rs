@@ -1,5 +1,494 @@
 use quote::{format_ident, quote};
 
+fn set_kernels_for_index(
+    index: &syn::Type,
+    transaction: &syn::Type,
+    suffix: &str,
+) -> proc_macro2::TokenStream {
+    let init = format_ident!("device_set_init_{suffix}");
+    let partition = format_ident!("device_set_partition_{suffix}");
+    let arithmetic_partition = format_ident!("device_set_arithmetic_partition_{suffix}");
+    let agents = [256usize, 512usize].into_iter().map(|threads| {
+        let keys = format_ident!("device_set_keys_{suffix}_{threads}");
+        let keys_virtual = format_ident!("device_set_keys_virtual_{suffix}_{threads}");
+        let discard = format_ident!("device_set_discard_{suffix}_{threads}");
+        let discard_virtual = format_ident!("device_set_discard_virtual_{suffix}_{threads}");
+        let arithmetic = format_ident!("device_set_arithmetic_{suffix}_{threads}");
+        let arithmetic_virtual = format_ident!("device_set_arithmetic_virtual_{suffix}_{threads}");
+        let pairs = format_ident!("device_set_pairs_{suffix}_{threads}");
+        let pairs_virtual = format_ident!("device_set_pairs_virtual_{suffix}_{threads}");
+        // `quote` preserves a primitive integer's suffix (`512usize`).  CUDA's
+        // launch-contract coordinates are `u32`, while the agent const generic
+        // is `usize`, so emit one unsuffixed literal and let each Rust context
+        // assign the correct type.
+        let threads = proc_macro2::Literal::usize_unsuffixed(threads);
+        quote! {
+            #[kernel]
+            #[launch_bounds(#threads)]
+            #[launch_contract(
+                domain = 1,
+                coordinates = u32,
+                block = (#threads, 1, 1),
+                dynamic_shared_range = (0, 49152),
+                dynamic_shared_alignment = 16,
+            )]
+            pub fn #keys<K, F, Op, const ITEMS: usize, const SHARED_BYTES: usize, const SM70: bool>(
+                first: &[K],
+                second: &[K],
+                partitions: &[#transaction],
+                order: F,
+                tile_state: DisjointSlice<#transaction>,
+                output_count: DisjointSlice<usize>,
+                output: DisjointSlice<K>,
+            ) where
+                K: Copy,
+                F: Fn(&K, &K) -> ::core::cmp::Ordering + Copy,
+                Op: ::rccl_cub::__private::SerialSetOperation,
+            {
+                let shared = ::rccl_cub::__private::BlockSharedMemory::new(SHARED_BYTES);
+                ::rccl_cub::__private::set_keys_agent::<
+                    K,
+                    #index,
+                    F,
+                    Op,
+                    #threads,
+                    ITEMS,
+                    SM70,
+                >(
+                    first,
+                    second,
+                    partitions,
+                    order,
+                    tile_state,
+                    output_count,
+                    output,
+                    shared,
+                );
+            }
+
+            #[kernel]
+            #[launch_bounds(#threads)]
+            #[launch_contract(domain = 1, coordinates = u32, block = (#threads, 1, 1))]
+            pub fn #keys_virtual<
+                K,
+                F,
+                Op,
+                const ITEMS: usize,
+                const SHARED_BYTES: usize,
+                const SM70: bool,
+            >(
+                first: &[K],
+                second: &[K],
+                partitions: &[#transaction],
+                order: F,
+                tile_state: DisjointSlice<#transaction>,
+                output_count: DisjointSlice<usize>,
+                output: DisjointSlice<K>,
+                virtual_shared: DisjointSlice<u8>,
+            ) where
+                K: Copy,
+                F: Fn(&K, &K) -> ::core::cmp::Ordering + Copy,
+                Op: ::rccl_cub::__private::SerialSetOperation,
+            {
+                let shared = ::rccl_cub::__private::BlockSharedMemory::from_virtual_block(
+                    virtual_shared,
+                    thread::blockIdx_x(),
+                    SHARED_BYTES,
+                );
+                ::rccl_cub::__private::set_keys_agent::<
+                    K,
+                    #index,
+                    F,
+                    Op,
+                    #threads,
+                    ITEMS,
+                    SM70,
+                >(
+                    first,
+                    second,
+                    partitions,
+                    order,
+                    tile_state,
+                    output_count,
+                    output,
+                    shared,
+                );
+            }
+
+            #[kernel]
+            #[launch_bounds(#threads)]
+            #[launch_contract(
+                domain = 1,
+                coordinates = u32,
+                block = (#threads, 1, 1),
+                dynamic_shared_range = (0, 49152),
+                dynamic_shared_alignment = 16,
+            )]
+            pub fn #discard<
+                K,
+                F,
+                Op,
+                const ITEMS: usize,
+                const SHARED_BYTES: usize,
+                const SM70: bool,
+            >(
+                first: &[K],
+                second: &[K],
+                partitions: &[#transaction],
+                order: F,
+                tile_state: DisjointSlice<#transaction>,
+                output_count: DisjointSlice<usize>,
+            ) where
+                K: Copy,
+                F: Fn(&K, &K) -> ::core::cmp::Ordering + Copy,
+                Op: ::rccl_cub::__private::SerialSetOperation,
+            {
+                let shared = ::rccl_cub::__private::BlockSharedMemory::new(SHARED_BYTES);
+                ::rccl_cub::__private::set_keys_discard_agent::<
+                    K,
+                    #index,
+                    F,
+                    Op,
+                    #threads,
+                    ITEMS,
+                    SM70,
+                >(
+                    first,
+                    second,
+                    partitions,
+                    order,
+                    tile_state,
+                    output_count,
+                    shared,
+                );
+            }
+
+            #[kernel]
+            #[launch_bounds(#threads)]
+            #[launch_contract(domain = 1, coordinates = u32, block = (#threads, 1, 1))]
+            pub fn #discard_virtual<
+                K,
+                F,
+                Op,
+                const ITEMS: usize,
+                const SHARED_BYTES: usize,
+                const SM70: bool,
+            >(
+                first: &[K],
+                second: &[K],
+                partitions: &[#transaction],
+                order: F,
+                tile_state: DisjointSlice<#transaction>,
+                output_count: DisjointSlice<usize>,
+                virtual_shared: DisjointSlice<u8>,
+            ) where
+                K: Copy,
+                F: Fn(&K, &K) -> ::core::cmp::Ordering + Copy,
+                Op: ::rccl_cub::__private::SerialSetOperation,
+            {
+                let shared = ::rccl_cub::__private::BlockSharedMemory::from_virtual_block(
+                    virtual_shared,
+                    thread::blockIdx_x(),
+                    SHARED_BYTES,
+                );
+                ::rccl_cub::__private::set_keys_discard_agent::<
+                    K,
+                    #index,
+                    F,
+                    Op,
+                    #threads,
+                    ITEMS,
+                    SM70,
+                >(
+                    first,
+                    second,
+                    partitions,
+                    order,
+                    tile_state,
+                    output_count,
+                    shared,
+                );
+            }
+
+            #[kernel]
+            #[launch_bounds(#threads)]
+            #[launch_contract(
+                domain = 1,
+                coordinates = u32,
+                block = (#threads, 1, 1),
+                dynamic_shared_range = (0, 49152),
+                dynamic_shared_alignment = 16,
+            )]
+            pub fn #arithmetic<
+                K,
+                F,
+                Op,
+                const ITEMS: usize,
+                const SHARED_BYTES: usize,
+                const SM70: bool,
+            >(
+                first_start: Uniform<K>,
+                first_step: Uniform<K>,
+                first_len: Uniform<usize>,
+                second_start: Uniform<K>,
+                second_step: Uniform<K>,
+                second_len: Uniform<usize>,
+                partitions: &[#transaction],
+                order: F,
+                tile_state: DisjointSlice<#transaction>,
+                output_count: DisjointSlice<usize>,
+                output: DisjointSlice<K>,
+            ) where
+                K: Copy
+                    + ::core::convert::TryFrom<usize>
+                    + ::core::ops::Add<Output = K>
+                    + ::core::ops::Mul<Output = K>,
+                F: Fn(&K, &K) -> ::core::cmp::Ordering + Copy,
+                Op: ::rccl_cub::__private::SerialSetOperation,
+            {
+                let shared = ::rccl_cub::__private::BlockSharedMemory::new(SHARED_BYTES);
+                let first = ::rccl_cub::__private::ArithmeticSetRange::new(
+                    first_start.get(), first_step.get(), first_len.get(),
+                );
+                let second = ::rccl_cub::__private::ArithmeticSetRange::new(
+                    second_start.get(), second_step.get(), second_len.get(),
+                );
+                ::rccl_cub::__private::set_arithmetic_keys_agent::<
+                    K, #index, F, Op, #threads, ITEMS, SM70,
+                >(
+                    first, second, partitions, order, tile_state, output_count, output, shared,
+                );
+            }
+
+            #[kernel]
+            #[launch_bounds(#threads)]
+            #[launch_contract(domain = 1, coordinates = u32, block = (#threads, 1, 1))]
+            pub fn #arithmetic_virtual<
+                K,
+                F,
+                Op,
+                const ITEMS: usize,
+                const SHARED_BYTES: usize,
+                const SM70: bool,
+            >(
+                first_start: Uniform<K>,
+                first_step: Uniform<K>,
+                first_len: Uniform<usize>,
+                second_start: Uniform<K>,
+                second_step: Uniform<K>,
+                second_len: Uniform<usize>,
+                partitions: &[#transaction],
+                order: F,
+                tile_state: DisjointSlice<#transaction>,
+                output_count: DisjointSlice<usize>,
+                output: DisjointSlice<K>,
+                virtual_shared: DisjointSlice<u8>,
+            ) where
+                K: Copy
+                    + ::core::convert::TryFrom<usize>
+                    + ::core::ops::Add<Output = K>
+                    + ::core::ops::Mul<Output = K>,
+                F: Fn(&K, &K) -> ::core::cmp::Ordering + Copy,
+                Op: ::rccl_cub::__private::SerialSetOperation,
+            {
+                let shared = ::rccl_cub::__private::BlockSharedMemory::from_virtual_block(
+                    virtual_shared, thread::blockIdx_x(), SHARED_BYTES,
+                );
+                let first = ::rccl_cub::__private::ArithmeticSetRange::new(
+                    first_start.get(), first_step.get(), first_len.get(),
+                );
+                let second = ::rccl_cub::__private::ArithmeticSetRange::new(
+                    second_start.get(), second_step.get(), second_len.get(),
+                );
+                ::rccl_cub::__private::set_arithmetic_keys_agent::<
+                    K, #index, F, Op, #threads, ITEMS, SM70,
+                >(
+                    first, second, partitions, order, tile_state, output_count, output, shared,
+                );
+            }
+
+            #[kernel]
+            #[launch_bounds(#threads)]
+            #[launch_contract(
+                domain = 1,
+                coordinates = u32,
+                block = (#threads, 1, 1),
+                dynamic_shared_range = (0, 49152),
+                dynamic_shared_alignment = 16,
+            )]
+            pub fn #pairs<
+                K,
+                V,
+                F,
+                Op,
+                const ITEMS: usize,
+                const SHARED_BYTES: usize,
+                const SM70: bool,
+            >(
+                first_keys: &[K],
+                second_keys: &[K],
+                first_values: &[V],
+                second_values: &[V],
+                partitions: &[#transaction],
+                order: F,
+                tile_state: DisjointSlice<#transaction>,
+                output_count: DisjointSlice<usize>,
+                output_keys: DisjointSlice<K>,
+                output_values: DisjointSlice<V>,
+            ) where
+                K: Copy,
+                V: Copy,
+                F: Fn(&K, &K) -> ::core::cmp::Ordering + Copy,
+                Op: ::rccl_cub::__private::SerialSetOperation,
+            {
+                let shared = ::rccl_cub::__private::BlockSharedMemory::new(SHARED_BYTES);
+                ::rccl_cub::__private::set_pairs_agent::<
+                    K,
+                    V,
+                    #index,
+                    F,
+                    Op,
+                    #threads,
+                    ITEMS,
+                    SM70,
+                >(
+                    first_keys,
+                    second_keys,
+                    first_values,
+                    second_values,
+                    partitions,
+                    order,
+                    tile_state,
+                    output_count,
+                    output_keys,
+                    output_values,
+                    shared,
+                );
+            }
+
+            #[kernel]
+            #[launch_bounds(#threads)]
+            #[launch_contract(domain = 1, coordinates = u32, block = (#threads, 1, 1))]
+            pub fn #pairs_virtual<
+                K,
+                V,
+                F,
+                Op,
+                const ITEMS: usize,
+                const SHARED_BYTES: usize,
+                const SM70: bool,
+            >(
+                first_keys: &[K],
+                second_keys: &[K],
+                first_values: &[V],
+                second_values: &[V],
+                partitions: &[#transaction],
+                order: F,
+                tile_state: DisjointSlice<#transaction>,
+                output_count: DisjointSlice<usize>,
+                output_keys: DisjointSlice<K>,
+                output_values: DisjointSlice<V>,
+                virtual_shared: DisjointSlice<u8>,
+            ) where
+                K: Copy,
+                V: Copy,
+                F: Fn(&K, &K) -> ::core::cmp::Ordering + Copy,
+                Op: ::rccl_cub::__private::SerialSetOperation,
+            {
+                let shared = ::rccl_cub::__private::BlockSharedMemory::from_virtual_block(
+                    virtual_shared,
+                    thread::blockIdx_x(),
+                    SHARED_BYTES,
+                );
+                ::rccl_cub::__private::set_pairs_agent::<
+                    K,
+                    V,
+                    #index,
+                    F,
+                    Op,
+                    #threads,
+                    ITEMS,
+                    SM70,
+                >(
+                    first_keys,
+                    second_keys,
+                    first_values,
+                    second_values,
+                    partitions,
+                    order,
+                    tile_state,
+                    output_count,
+                    output_keys,
+                    output_values,
+                    shared,
+                );
+            }
+        }
+    });
+    quote! {
+        #[kernel]
+        #[launch_bounds(128)]
+        #[launch_contract(domain = 1, coordinates = u32, block = (128, 1, 1))]
+        pub fn #init(tile_state: DisjointSlice<#transaction>, num_tiles: Uniform<usize>) {
+            ::rccl_cub::__private::set_init_agent::<#index>(tile_state, num_tiles.get());
+        }
+
+        #[kernel(launch_context = launch_context)]
+        #[launch_bounds(256)]
+        #[launch_contract(domain = 1, coordinates = u32, block = (256, 1, 1))]
+        pub fn #partition<K, F, const ITEMS_PER_TILE: usize>(
+            first: &[K],
+            second: &[K],
+            order: F,
+            partitions: DisjointSlice<#transaction>,
+        ) where
+            K: Copy,
+            F: Fn(&K, &K) -> ::core::cmp::Ordering + Copy,
+        {
+            ::rccl_cub::__private::set_partition_agent::<
+                #index,
+                K,
+                F,
+                _,
+                _,
+                ITEMS_PER_TILE,
+            >(first, second, order, partitions, launch_context);
+        }
+
+        #[kernel(launch_context = launch_context)]
+        #[launch_bounds(256)]
+        #[launch_contract(domain = 1, coordinates = u32, block = (256, 1, 1))]
+        pub fn #arithmetic_partition<K, F, const ITEMS_PER_TILE: usize>(
+            first_start: Uniform<K>,
+            first_step: Uniform<K>,
+            first_len: Uniform<usize>,
+            second_start: Uniform<K>,
+            second_step: Uniform<K>,
+            second_len: Uniform<usize>,
+            order: F,
+            partitions: DisjointSlice<#transaction>,
+        ) where
+            K: Copy
+                + ::core::convert::TryFrom<usize>
+                + ::core::ops::Add<Output = K>
+                + ::core::ops::Mul<Output = K>,
+            F: Fn(&K, &K) -> ::core::cmp::Ordering + Copy,
+        {
+            let first = ::rccl_cub::__private::ArithmeticSetRange::new(
+                first_start.get(), first_step.get(), first_len.get(),
+            );
+            let second = ::rccl_cub::__private::ArithmeticSetRange::new(
+                second_start.get(), second_step.get(), second_len.get(),
+            );
+            ::rccl_cub::__private::set_partition_agent::<
+                #index, K, F, _, _, ITEMS_PER_TILE,
+            >(first, second, order, partitions, launch_context);
+        }
+
+        #(#agents)*
+    }
+}
+
 fn radix_onesweep_keys_kernel(shared_bytes: usize) -> proc_macro2::TokenStream {
     let kernel = format_ident!("device_radix_sort_onesweep_keys_{shared_bytes}");
     let storage = format_ident!("__RCCL_RADIX_ONESWEEP_KEYS_{shared_bytes}");
@@ -150,6 +639,8 @@ pub(super) fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macr
     let radix_onesweep_pairs = [28_160usize, 26_624usize, 32_768usize]
         .into_iter()
         .map(radix_onesweep_pairs_kernel);
+    let set_narrow = set_kernels_for_index(&syn::parse_quote!(i32), &syn::parse_quote!(u64), "i32");
+    let set_wide = set_kernels_for_index(&syn::parse_quote!(i64), &syn::parse_quote!(u128), "i64");
     Ok(quote! {
         #[doc(hidden)]
         use ::rccl_cub::__private::cuda_core;
@@ -166,6 +657,9 @@ pub(super) fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macr
             use ::rccl_cub::__private::cuda_device::{
                 DisjointSlice, LinearTiles, Uniform, kernel, launch_bounds, launch_contract, thread,
             };
+
+            #set_narrow
+            #set_wide
 
             #[inline(always)]
             fn ordered_before<K, F>(order: &F, left: &K, right: &K) -> bool

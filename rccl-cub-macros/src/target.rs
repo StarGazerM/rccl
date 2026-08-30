@@ -1,6 +1,24 @@
 use crate::syntax::ungroup_type;
+use syn::{GenericArgument, PathArguments};
+
+#[derive(Clone, Copy)]
+struct TmpLayout {
+    size: usize,
+    align: usize,
+}
+
+fn align_up(value: usize, alignment: usize, source: &syn::Type) -> syn::Result<usize> {
+    value
+        .checked_add(alignment - 1)
+        .map(|value| value / alignment * alignment)
+        .ok_or_else(|| syn::Error::new_spanned(source, "macro-visible type layout overflowed"))
+}
 
 pub(super) fn tmp_primitive_size(value_type: &syn::Type) -> syn::Result<usize> {
+    Ok(tmp_type_layout(value_type)?.size)
+}
+
+fn tmp_type_layout(value_type: &syn::Type) -> syn::Result<TmpLayout> {
     let semantic_type = ungroup_type(value_type);
     let syn::Type::Path(path) = semantic_type else {
         return Err(syn::Error::new_spanned(
@@ -8,23 +26,78 @@ pub(super) fn tmp_primitive_size(value_type: &syn::Type) -> syn::Result<usize> {
             "this CUB schedule needs macro-visible type layout metadata",
         ));
     };
-    if path.qself.is_some() || path.path.segments.len() != 1 {
+    if path.qself.is_some() {
         return Err(syn::Error::new_spanned(
             value_type,
             "aliases and custom values need explicit macro-visible size/alignment metadata",
         ));
     }
-    match path.path.segments[0].ident.to_string().as_str() {
-        "bool" | "u8" | "i8" => Ok(1),
-        "u16" | "i16" => Ok(2),
-        "u32" | "i32" | "f32" => Ok(4),
-        "u64" | "i64" | "usize" | "isize" | "f64" => Ok(8),
-        "u128" | "i128" => Ok(16),
+    let segment = path.path.segments.last().expect("a Rust path is nonempty");
+    if segment.ident == "KeyValue" {
+        let trusted_product = path
+            .path
+            .segments
+            .iter()
+            .rev()
+            .nth(1)
+            .is_some_and(|parent| parent.ident == "rccl_cub");
+        if !trusted_product {
+            return Err(syn::Error::new_spanned(
+                value_type,
+                "only rccl_cub::KeyValue has built-in macro-visible product layout metadata",
+            ));
+        }
+        let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+            return Err(syn::Error::new_spanned(
+                value_type,
+                "KeyValue schedule metadata requires two macro-visible field types",
+            ));
+        };
+        let fields = arguments
+            .args
+            .iter()
+            .filter_map(|argument| match argument {
+                GenericArgument::Type(field) => Some(field),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if fields.len() != 2 || arguments.args.len() != 2 {
+            return Err(syn::Error::new_spanned(
+                value_type,
+                "KeyValue schedule metadata requires exactly two macro-visible field types",
+            ));
+        }
+        let key = tmp_type_layout(fields[0])?;
+        let value = tmp_type_layout(fields[1])?;
+        let value_offset = align_up(key.size, value.align, value_type)?;
+        let align = key.align.max(value.align);
+        let size = align_up(
+            value_offset
+                .checked_add(value.size)
+                .ok_or_else(|| syn::Error::new_spanned(value_type, "KeyValue layout overflowed"))?,
+            align,
+            value_type,
+        )?;
+        return Ok(TmpLayout { size, align });
+    }
+    if path.path.segments.len() != 1 || !matches!(segment.arguments, PathArguments::None) {
+        return Err(syn::Error::new_spanned(
+            value_type,
+            "aliases and custom values need explicit macro-visible size/alignment metadata",
+        ));
+    }
+    let (size, align) = match segment.ident.to_string().as_str() {
+        "bool" | "u8" | "i8" => (1, 1),
+        "u16" | "i16" => (2, 2),
+        "u32" | "i32" | "f32" => (4, 4),
+        "u64" | "i64" | "usize" | "isize" | "f64" => (8, 8),
+        "u128" | "i128" => (16, 16),
         _ => Err(syn::Error::new_spanned(
             value_type,
             "aliases and custom values need explicit macro-visible size/alignment metadata",
-        )),
-    }
+        ))?,
+    };
+    Ok(TmpLayout { size, align })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

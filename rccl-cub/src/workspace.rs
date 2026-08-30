@@ -17,6 +17,16 @@ pub struct RadixSortPairsWorkspaceCounts {
     pub lookback: usize,
     pub counters: usize,
 }
+
+/// Runtime extents selected by the compile-time set-operation policy.
+#[doc(hidden)]
+pub struct SetOperationWorkspaceCounts {
+    pub num_tiles: usize,
+    pub tile_descriptors: usize,
+    pub partitions: usize,
+    pub virtual_shared_bytes: usize,
+    pub wide_indices: bool,
+}
 /// Normalize an owned direct buffer and a borrowed aliased temporary region to
 /// the same mutable range surface.
 #[doc(hidden)]
@@ -58,6 +68,72 @@ impl<P: WorkspaceBuffer<usize>> DeviceMergeWorkspace<P> {
     #[doc(hidden)]
     pub fn __partitions_mut(&mut self) -> &mut P::Range {
         self.partitions.range_mut()
+    }
+}
+
+/// Opaque regions inside Thrust's one nested set-operation allocation.
+#[doc(hidden)]
+pub struct DeviceSetOperationWorkspace<O, D, P, V> {
+    output_count: O,
+    tile_descriptors: D,
+    partitions: P,
+    virtual_shared: V,
+}
+
+impl<O, D, P, V> DeviceSetOperationWorkspace<O, D, P, V> {
+    #[doc(hidden)]
+    pub fn __from_parts(
+        output_count: O,
+        tile_descriptors: D,
+        partitions: P,
+        virtual_shared: V,
+    ) -> Self {
+        Self {
+            output_count,
+            tile_descriptors,
+            partitions,
+            virtual_shared,
+        }
+    }
+}
+
+impl<O, D, P, V> DeviceSetOperationWorkspace<O, D, P, V>
+where
+    O: WorkspaceBuffer<usize>,
+    D: WorkspaceBuffer<u64>,
+    P: WorkspaceBuffer<u64>,
+    V: WorkspaceBuffer<u8>,
+{
+    #[doc(hidden)]
+    pub fn __narrow_parts_mut(
+        &mut self,
+    ) -> (&mut O::Range, &mut D::Range, &mut P::Range, &mut V::Range) {
+        (
+            self.output_count.range_mut(),
+            self.tile_descriptors.range_mut(),
+            self.partitions.range_mut(),
+            self.virtual_shared.range_mut(),
+        )
+    }
+}
+
+impl<O, D, P, V> DeviceSetOperationWorkspace<O, D, P, V>
+where
+    O: WorkspaceBuffer<usize>,
+    D: WorkspaceBuffer<u128>,
+    P: WorkspaceBuffer<u128>,
+    V: WorkspaceBuffer<u8>,
+{
+    #[doc(hidden)]
+    pub fn __wide_parts_mut(
+        &mut self,
+    ) -> (&mut O::Range, &mut D::Range, &mut P::Range, &mut V::Range) {
+        (
+            self.output_count.range_mut(),
+            self.tile_descriptors.range_mut(),
+            self.partitions.range_mut(),
+            self.virtual_shared.range_mut(),
+        )
     }
 }
 

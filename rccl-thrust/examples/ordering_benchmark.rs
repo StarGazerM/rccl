@@ -2,6 +2,7 @@
 //! through CUB and includes Thrust's synchronous completion contract.
 
 use cuda_core::{CudaContext, CudaStream, DeviceBuffer};
+use rccl_thrust::prelude::*;
 use std::error::Error;
 use std::time::Instant;
 
@@ -109,14 +110,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             iterations,
             &mut (),
             |_| Ok(()),
-            |_| {
-                rccl_thrust::merge!(::<u32>(
-                    &exec,
-                    &first,
-                    &second,
-                    &mut merged,
-                ))
-            },
+            |_| exec.merge_into(&first, &second, &mut merged),
         )?;
         let merged_host = merged.to_host_vec(&stream)?;
         assert!(
@@ -137,24 +131,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         let second_values = DeviceBuffer::from_host(&stream, &second_values_host)?;
         let mut merged_pair_keys = DeviceBuffer::<u32>::zeroed(&stream, count * 2)?;
         let mut merged_pair_values = DeviceBuffer::<u64>::zeroed(&stream, count * 2)?;
+        let first_pairs = first.with_values(&first_values)?;
+        let second_pairs = second.with_values(&second_values)?;
+        let mut merged_pairs = merged_pair_keys.with_values_mut(&mut merged_pair_values)?;
         let pair_merge_timing = timed(
             &stream,
             0,
             iterations,
-            &mut (),
+            &mut merged_pairs,
             |_| Ok(()),
-            |_| {
-                rccl_thrust::merge_by_key!(::<u32, u64>(
-                    &exec,
-                    &first,
-                    &first_values,
-                    &second,
-                    &second_values,
-                    &mut merged_pair_keys,
-                    &mut merged_pair_values,
-                ))
-            },
+            |output| exec.merge_into(first_pairs, second_pairs, output),
         )?;
+        let (_, merged_pair_values) = merged_pairs.into_parts();
         assert!(
             merged_pair_values
                 .to_host_vec(&stream)?
@@ -183,23 +171,23 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .synchronize()
                     .map_err(rccl_thrust::DeviceAlgorithmError::Driver)
             },
-            |target| rccl_thrust::sort!(::<u32>(&exec, target)),
+            |target| target.sort_unstable(&exec),
         )?;
         let sorted_host = sort_input.to_host_vec(&stream)?;
         assert_eq!(sorted_host, sort_expected);
 
         let pair_sort_source_keys = DeviceBuffer::from_host(&stream, &sort_input_host)?;
         let pair_sort_source_values = DeviceBuffer::from_host(&stream, &sort_input_host)?;
-        let mut pair_sort = (
-            DeviceBuffer::from_host(&stream, &sort_input_host)?,
-            DeviceBuffer::from_host(&stream, &sort_input_host)?,
-        );
+        let mut pair_sort_keys = DeviceBuffer::from_host(&stream, &sort_input_host)?;
+        let mut pair_sort_values = DeviceBuffer::from_host(&stream, &sort_input_host)?;
+        let mut pair_sort = pair_sort_keys.with_values_mut(&mut pair_sort_values)?;
         let pair_sort_timing = timed(
             &stream,
             3,
             iterations,
             &mut pair_sort,
-            |(keys, values)| {
+            |pairs| {
+                let (keys, values) = pairs.parts_mut();
                 rccl_thrust::memory::copy_device_range::<u32, _, _>(
                     &pair_sort_source_keys,
                     keys,
@@ -216,10 +204,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .synchronize()
                     .map_err(rccl_thrust::DeviceAlgorithmError::Driver)
             },
-            |(keys, values)| rccl_thrust::sort_by_key!(::<u32, u32>(&exec, keys, values)),
+            |pairs| pairs.sort_unstable(&exec),
         )?;
-        assert_eq!(pair_sort.0.to_host_vec(&stream)?, sort_expected);
-        assert_eq!(pair_sort.1.to_host_vec(&stream)?, sort_expected);
+        let (pair_sort_keys, pair_sort_values) = pair_sort.into_parts();
+        assert_eq!(pair_sort_keys.to_host_vec(&stream)?, sort_expected);
+        assert_eq!(pair_sort_values.to_host_vec(&stream)?, sort_expected);
         (sort_timing, pair_sort_timing)
     };
 

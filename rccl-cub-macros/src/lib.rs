@@ -7,6 +7,7 @@ mod kernels;
 mod merge;
 mod program;
 mod radix;
+mod set;
 mod syntax;
 mod target;
 #[cfg(test)]
@@ -18,6 +19,7 @@ use merge::*;
 use proc_macro::TokenStream;
 use program::expand_user_program;
 use radix::*;
+use set::*;
 use warp::{expand_warp_reduce, expand_warp_reduce_items};
 
 /// Declare a crate-root cuda-oxide program containing user kernels that call
@@ -57,7 +59,7 @@ pub fn warp_reduce_items(input: TokenStream) -> TokenStream {
         .into()
 }
 
-/// Internal item lowering used by the Thrust macro layer.
+/// Internal item lowering used by declarative Thrust backend scaffolding.
 #[doc(hidden)]
 #[proc_macro]
 pub fn __device_kernels(input: TokenStream) -> TokenStream {
@@ -108,6 +110,51 @@ operation_macro!(
     device_merge_pairs,
     call::DeviceMergePairsCall,
     expand_device_merge_pairs
+);
+operation_macro!(
+    __device_set_workspace_counts,
+    call::DeviceSetWorkspaceCountsCall,
+    expand_device_set_workspace_counts
+);
+operation_macro!(
+    __device_set_keys_i32,
+    call::DeviceSetKeysCall,
+    expand_device_set_keys_i32
+);
+operation_macro!(
+    __device_set_keys_i64,
+    call::DeviceSetKeysCall,
+    expand_device_set_keys_i64
+);
+operation_macro!(
+    __device_set_discard_i32,
+    call::DeviceSetDiscardCall,
+    expand_device_set_discard_i32
+);
+operation_macro!(
+    __device_set_discard_i64,
+    call::DeviceSetDiscardCall,
+    expand_device_set_discard_i64
+);
+operation_macro!(
+    __device_set_arithmetic_i32,
+    call::DeviceSetArithmeticCall,
+    expand_device_set_arithmetic_i32
+);
+operation_macro!(
+    __device_set_arithmetic_i64,
+    call::DeviceSetArithmeticCall,
+    expand_device_set_arithmetic_i64
+);
+operation_macro!(
+    __device_set_pairs_i32,
+    call::DeviceSetPairsCall,
+    expand_device_set_pairs_i32
+);
+operation_macro!(
+    __device_set_pairs_i64,
+    call::DeviceSetPairsCall,
+    expand_device_set_pairs_i64
 );
 operation_macro!(
     device_merge_sort_keys,

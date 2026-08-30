@@ -3,7 +3,8 @@ use rccl_memory::{DeviceAllocator, TemporaryValue};
 
 /// A key/value product used when field names are semantically useful.
 /// Ordinary products remain Rust tuples.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, DeviceCopy)]
 pub struct KeyValue<K, V> {
     pub key: K,
     pub value: V,
@@ -11,9 +12,9 @@ pub struct KeyValue<K, V> {
 
 /// Runtime extent shared by device-range expressions.
 ///
-/// This trait contains no host-side access operation. An algorithm macro
-/// lowers a concrete range expression to device access after Rust has inferred
-/// its type.
+/// This trait contains no host-side access operation. A generated algorithm
+/// backend lowers a concrete range expression to device access after Rust has
+/// inferred its type.
 pub trait DeviceRange {
     fn len(&self) -> usize;
 

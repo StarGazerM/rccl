@@ -428,6 +428,68 @@ typed_operation_call!(
     second_len,
 );
 
+// Hidden set-operation lowering. The operation is a Rust zero-sized trait
+// type (the analogue of CCCL's serial functor type); key/value widths and the
+// target affect the pinned policy and therefore remain macro-visible.
+typed_operation_call!(
+    DeviceSetWorkspaceCountsCall,
+    "__device_set_workspace_counts!",
+    [key_type, value_type],
+    execution,
+    first_len,
+    second_len,
+);
+
+typed_operation_call!(
+    DeviceSetKeysCall,
+    "__device_set_keys!",
+    [key_type, operation_type],
+    execution,
+    first,
+    second,
+    workspace,
+    output,
+    order,
+);
+
+typed_operation_call!(
+    DeviceSetDiscardCall,
+    "__device_set_discard!",
+    [key_type, operation_type],
+    execution,
+    first,
+    second,
+    workspace,
+    order,
+);
+
+typed_operation_call!(
+    DeviceSetArithmeticCall,
+    "__device_set_arithmetic!",
+    [key_type, operation_type],
+    execution,
+    first,
+    second,
+    workspace,
+    output,
+    order,
+);
+
+typed_operation_call!(
+    DeviceSetPairsCall,
+    "__device_set_pairs!",
+    [key_type, value_type, operation_type],
+    execution,
+    first_keys,
+    first_values,
+    second_keys,
+    second_values,
+    workspace,
+    output_keys,
+    output_values,
+    order,
+);
+
 // DeviceMergeSort's in-place key and key/value forms. Copy and stable forms
 // have distinct parsers below even where they share a stable implementation:
 // their ownership and observable input-preservation contracts differ.

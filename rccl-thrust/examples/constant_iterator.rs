@@ -1,7 +1,7 @@
 //! Rust port of pinned CCCL `thrust/examples/constant_iterator.cu`.
 
 use cuda_core::{CudaContext, DeviceBuffer};
-use rccl_thrust::range::RepeatN;
+use rccl_thrust::repeat_n;
 use std::error::Error;
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -11,7 +11,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let exec = thrust.par(&stream)?;
 
     let mut data = DeviceBuffer::from_host(&stream, &[3_i32, 7, 2, 5])?;
-    let repeated = RepeatN::new(10_i32, data.len());
+    let repeated = repeat_n(10_i32, data.len());
     rccl_thrust::transform!(&exec, &mut data, repeated, |left, right| left + right)?;
 
     assert_eq!(data.to_host_vec(&stream)?, [13, 17, 12, 15]);

@@ -7,9 +7,9 @@ layer, type registry, or algorithm dispatcher.
 The implementation boundary is:
 
 ```text
-Thrust call
-  -> rccl-thrust macro_rules! syntax/lifetime wrapper
-  -> rccl-cub proc macro only when CUB TMP policy must be selected
+Thrust method on a typed device range or execution value
+  -> ordinary rccl-thrust trait/generic code
+  -> backend trait implementation emitted with the program's CUB policy
   -> concrete cuda-oxide Rust
   -> rustc/cuda-oxide monomorphization
 
@@ -32,7 +32,8 @@ The current executable vertical slices include:
 - CUB DeviceMerge, DeviceMergeSort, and primitive
   integer/`f32`/`f64` DeviceRadixSort paths;
 - Thrust binary in-place transform with a finite constant input;
-- Thrust sort/stable-sort/by-key and merge/by-key forms lowered through CUB.
+- Thrust sort/stable-sort/by-key, merge/by-key, and four set-operation families
+  lowered through their pinned CUB/CUDA substrate.
 
 The exact coverage ledger remains explicit about missing and partial CCCL
 surfaces. Passing tests for these slices is not described as full CUB or
@@ -48,24 +49,75 @@ architecture.
 
 ## Macro boundary
 
-The public calls stay shallow Rust syntax:
+The public calls are ordinary, type-inferred Rust method syntax:
 
 ```rust,ignore
+use rccl_thrust::prelude::*;
+
 let thrust = rccl_thrust::thrust_program!(&context)?;
 let exec = thrust.par(&stream)?;
 
-rccl_thrust::sort_by!(::<i64>(
-    &exec,
-    &mut keys,
-    |left: &i64, right: &i64| right.cmp(left),
-))?;
+keys.sort_unstable_by(&exec, |left, right| right.cmp(left))?;
+
+keys.with_values_mut(&mut values)?
+    .sort_by(&exec, |left, right| left.cmp(right))?;
+
+exec.merge_into(&first, &second, &mut output)?;
+
+let initialized = exec.union_by_into(
+    &first,
+    &second,
+    &mut output,
+    |left, right| left.cmp(right),
+)?;
+let intersection_size = exec.intersection_into(
+    &first,
+    &second,
+    rccl_thrust::discard::<i32>(first.len().min(second.len())),
+)?;
 ```
 
-Thrust macros are declarative because they only preserve operands, allocate
-the required private workspace, and select the corresponding CUB operation.
-The inner CUB macro receives the primitive type token unchanged and performs
-the real compile-time schedule selection. Architecture is read once inside
-the CUB policy boundary; it is neither a public operand nor runtime state.
+The method allocates the same private workspace and calls a statically
+selected backend trait implementation. `thrust_program!` is the item
+generation boundary: declarative scaffolding implements those traits for its
+cuda-oxide module, and the nested CUB proc macros emit the exact policy and
+launch graphs. Architecture/type policy therefore remains compile time
+without making every algorithm call a macro. Architecture is neither a public
+operand nor runtime state.
+
+A program that uses only set algorithms may write
+`thrust_program!(&context; set_operations)`. This compile-time capability
+selection emits only set backend trait implementations; it does not select a
+set algorithm or policy, change the method API, or introduce runtime dispatch.
+Capabilities compose, so the pinned example uses
+`thrust_program!(&context; merge, set_operations)`. The default form remains
+the full implemented backend catalog.
+
+Comparator closures are copied into device kernel arguments. A comparator
+that captures values therefore uses Rust's `move` closure syntax; the public
+set traits require `'static + Copy`, making an accidental host-reference
+capture a compile-time error.
+
+The set policy retains CCCL's SM52 and SM60+ branches. Current cuda-oxide
+supports basic Rust CUDA modules only from SM70, so SM52 is policy/layout-tested
+but cannot yet be device-built; SM70 and native SM89 builds are validated.
+
+Fancy-iterator behavior is expressed as lazy finite range values and method
+adaptors, not a C++ iterator category/facade hierarchy:
+
+```rust,ignore
+use rccl_thrust::{arithmetic_range, repeat_n};
+
+let odds = arithmetic_range(1_u32, 2, count);
+let selected = values.slice(4..end)?.rev().gather(indices);
+let paired = odds.zip_eq(repeat_n(10_u32, count))?;
+```
+
+`zip` follows Rust iterator shortest-range semantics; `zip_eq`, `slice`, and
+`step_by` expose checked variants where a GPU algorithm requires an exact
+shape. A descriptor becomes operational only when that algorithm implements
+its generated lowering; constructing it never executes a device closure on
+the host.
 
 The remaining proc macros are intentionally limited to:
 
@@ -78,8 +130,8 @@ The remaining proc macros are intentionally limited to:
 - CUB merge/radix operations and workspace formulas whose literal policy
   depends on target architecture and macro-visible type layout.
 
-Fixed program construction and transform launch wrappers are `macro_rules!`,
-not quote-only proc macros.
+Fixed program construction and the currently implemented constant-input
+transform launch wrapper are `macro_rules!`, not quote-only proc macros.
 
 ## Rust API direction
 

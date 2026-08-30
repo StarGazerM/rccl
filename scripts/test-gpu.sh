@@ -31,7 +31,7 @@ if [[ "$(package_dependencies rccl-cub)" != 'cuda-core cuda-device cuda-host rcc
   exit 1
 fi
 if [[ "$(package_dependencies rccl-thrust)" != 'cuda-core cuda-device cuda-host rccl-cub rccl-memory' ]]; then
-  printf '%s\n' 'rccl-thrust must use declarative macros and may not depend on a proc-macro facade' >&2
+  printf '%s\n' 'rccl-thrust must receive CUB policy expansion through rccl-cub and may not depend on a proc-macro facade' >&2
   exit 1
 fi
 if [[ "$(package_dependencies rccl)" != 'rccl-cub rccl-thrust' ]]; then
@@ -102,7 +102,8 @@ if ! rg -q '^pub fn program\(' rccl-cub-macros/src/lib.rs \
   || ! rg -q '^pub fn warp_reduce_items\(' rccl-cub-macros/src/lib.rs \
   || ! rg -q '^pub fn __device_kernels\(' rccl-cub-macros/src/lib.rs \
   || ! rg -q 'device_merge_keys' rccl-cub-macros/src/lib.rs \
-  || ! rg -q 'device_radix_sort_keys' rccl-cub-macros/src/lib.rs; then
+  || ! rg -q 'device_radix_sort_keys' rccl-cub-macros/src/lib.rs \
+  || ! rg -q 'device_set_keys' rccl-cub-macros/src/lib.rs; then
   printf '%s\n' 'the remaining proc macros must be the item/kernel/policy specializers' >&2
   exit 1
 fi
@@ -115,9 +116,8 @@ for declarative_macro in \
   fi
 done
 for declarative_macro in \
-  thrust_program transform sort sort_by stable_sort stable_sort_by \
-  sort_by_key sort_by_key_with stable_sort_by_key stable_sort_by_key_with \
-  merge merge_by merge_by_key merge_by_key_with; do
+  thrust_program transform __thrust_backends __thrust_selected_backends \
+  __thrust_merge_backends __thrust_set_backends; do
   if ! rg -q "macro_rules! $declarative_macro" rccl-thrust/src/macros/*.rs; then
     printf '%s\n' "missing declarative Thrust macro $declarative_macro" >&2
     exit 1
@@ -128,15 +128,29 @@ if rg -n '\$(key|value)_type:ty' rccl-thrust/src/macros --glob '*.rs'; then
   exit 1
 fi
 if rg -n 'sm_[0-9]+|CUDA_OXIDE_TARGET|CudaTarget|configured_cuda_target' "${runtime_sources[@]}" \
-  || [[ "$(rg -l 'configured_cuda_target' rccl-cub-macros/src/*.rs | sort | paste -sd ' ' -)" != 'rccl-cub-macros/src/merge.rs rccl-cub-macros/src/radix.rs rccl-cub-macros/src/target.rs' ]]; then
+  || [[ "$(rg -l 'configured_cuda_target' rccl-cub-macros/src/*.rs | sort | paste -sd ' ' -)" != 'rccl-cub-macros/src/merge.rs rccl-cub-macros/src/radix.rs rccl-cub-macros/src/set.rs rccl-cub-macros/src/target.rs' ]]; then
   printf '%s\n' 'architecture selection escaped the CUB policy expansion boundary' >&2
   exit 1
 fi
 if rg -n '#\[kernel|cuda_module' \
-  rccl-thrust/src/macros/{program,transform,ordering,merge}.rs \
+  rccl-thrust/src/macros/{backends,program,transform}.rs \
   || ! rg -q '__device_kernels' rccl-thrust/src/macros/program.rs \
+  || ! rg -q '__thrust_backends' rccl-thrust/src/macros/program.rs \
+  || ! rg -q '__thrust_merge_backends' rccl-thrust/src/macros/program.rs \
+  || ! rg -q '__thrust_set_backends' rccl-thrust/src/macros/program.rs \
   || ! rg -q '__device_transform_repeat_in_place' rccl-thrust/src/macros/transform.rs; then
   printf '%s\n' 'Thrust declarative macros must lower through CUB and never own CUDA kernels' >&2
+  exit 1
+fi
+if ! rg -q 'pub trait DeviceSortExt' rccl-thrust/src/ordering.rs \
+  || ! rg -q 'pub trait DeviceMergeExt' rccl-thrust/src/merge.rs \
+  || ! rg -q 'pub trait DeviceSetUnionExt' rccl-thrust/src/set.rs \
+  || ! rg -q 'pub trait DeviceSetIntersectionExt' rccl-thrust/src/set.rs \
+  || ! rg -q 'pub trait DeviceSetDifferenceExt' rccl-thrust/src/set.rs \
+  || ! rg -q 'pub trait DeviceSetSymmetricDifferenceExt' rccl-thrust/src/set.rs \
+  || ! rg -q 'pub trait DeviceRangeExt' rccl-thrust/src/range.rs \
+  || rg -n 'macro_rules! (sort|sort_by|stable_sort|merge|merge_by|set_union|set_intersection|set_difference|set_symmetric_difference)' rccl-thrust/src; then
+  printf '%s\n' 'Thrust ordering, merge, sets, and fancy ranges must remain ordinary Rust method APIs' >&2
   exit 1
 fi
 
@@ -207,6 +221,9 @@ expected_rust_examples=(
   rccl-thrust/examples/constant_iterator_benchmark.rs
   rccl-thrust/examples/merge.rs
   rccl-thrust/examples/ordering_benchmark.rs
+  rccl-thrust/examples/set_operations.rs
+  rccl-thrust/examples/set_operations_benchmark.rs
+  rccl-thrust/examples/set_operations_tests.rs
   rccl-thrust/examples/sort.rs
 )
 if ! diff -u \
@@ -226,6 +243,7 @@ RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
 scripts/test-warp-reduce.sh
 scripts/test-thrust-constant-iterator.sh
 scripts/test-ordering-results.sh
+scripts/test-set-operations.sh
 scripts/test-current-performance-parity.sh
 scripts/test-ordering-performance-parity.sh
 

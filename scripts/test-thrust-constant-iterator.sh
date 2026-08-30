@@ -22,7 +22,7 @@ printf '%s  %s\n' \
 
 for required in \
   'rccl_thrust::thrust_program!(&context)' \
-  'RepeatN::new(10_i32, data.len())' \
+  'repeat_n(10_i32, data.len())' \
   'rccl_thrust::transform!(&exec, &mut data, repeated' \
   '[13, 17, 12, 15]'; do
   if ! rg -q -F "$required" rccl-thrust/examples/constant_iterator.rs; then

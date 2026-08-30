@@ -105,6 +105,42 @@ impl<const ALIGN: usize> AlignedBlockSharedMemory<ALIGN> {
         }
     }
 
+    /// Bind the current block's slice of CCCL virtual shared memory.
+    ///
+    /// The host allocates `bytes * gridDim.x` bytes when the pinned agent's
+    /// storage exceeds the device's portable shared-memory limit.  Every
+    /// block selects one disjoint byte range; threads in that block then use
+    /// the same barrier-governed capability as the physical shared path.
+    #[inline(always)]
+    pub fn from_virtual_block(
+        mut storage: DisjointSlice<'_, u8>,
+        block_index: u32,
+        bytes: usize,
+    ) -> Self {
+        if bytes == 0 || !bytes.is_multiple_of(ALIGN) {
+            cuda_device::debug::trap();
+        }
+        let Some(begin) = (block_index as usize).checked_mul(bytes) else {
+            cuda_device::debug::trap();
+        };
+        if begin > storage.len() || bytes > storage.len() - begin {
+            cuda_device::debug::trap();
+        }
+        // SAFETY: the checked multiplication and range test prove this
+        // block's complete region lies in the exclusive kernel allocation.
+        // `bytes` is macro-selected and alignment-preserving, so distinct
+        // block indices select disjoint, equally aligned regions.
+        let base = unsafe { storage.as_mut_ptr().add(begin) };
+        if !base.addr().is_multiple_of(ALIGN) {
+            cuda_device::debug::trap();
+        }
+        Self {
+            base,
+            bytes,
+            _not_send_or_sync: PhantomData,
+        }
+    }
+
     /// Bind a proc-macro-sized static shared allocation to the same safe
     /// region vocabulary used by dynamic collectives.
     ///
@@ -522,6 +558,28 @@ impl DeviceRegion<'_, u64> {
 #[inline(always)]
 pub fn threadfence_block() {
     fence::threadfence_block();
+}
+
+/// Pinned `TilePrefixCallbackOp` construction delay for primitive scan words.
+#[inline(always)]
+pub fn set_lookback_initial_delay<const SM70: bool>() {
+    if SM70 {
+        // SAFETY: `nanosleep` has no memory or pointer precondition. This safe
+        // wrapper fixes the exact primitive lookback delay selected by CCCL.
+        unsafe { cuda_device::barrier::nanosleep(450) };
+    }
+}
+
+/// Pinned primitive lookback retry delay/anti-hoisting operation.
+#[inline(always)]
+pub fn set_lookback_retry_delay<const SM70: bool>() {
+    if !SM70 || thread::gridDim_x() < 500 {
+        fence::threadfence_block();
+    } else {
+        // SAFETY: as above; the SM70+ pinned policy uses a 350-cycle sleep
+        // for grids at or above the threshold.
+        unsafe { cuda_device::barrier::nanosleep(350) };
+    }
 }
 
 #[inline(always)]
