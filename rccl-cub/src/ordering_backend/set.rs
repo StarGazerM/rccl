@@ -25,6 +25,12 @@ const TILE_STATUS_PADDING: usize = 32;
 #[doc(hidden)]
 pub trait SetReadRange<K>: Copy {
     fn len(self) -> usize;
+
+    #[inline(always)]
+    fn is_empty(self) -> bool {
+        self.len() == 0
+    }
+
     fn read(self, index: usize) -> K;
 }
 
@@ -586,7 +592,10 @@ impl SerialSetOperation for SetIntersection {
     const READS_SECOND_VALUES: bool = false;
 
     #[inline(always)]
-    #[allow(unused_assignments)]
+    #[expect(
+        unused_assignments,
+        reason = "the final cursor loads are part of CCCL's fully unrolled serial operation"
+    )]
     fn apply<K, F, const ITEMS: usize>(
         keys: &SharedRegion<MaybeUninit<K>>,
         first_begin: i32,
@@ -634,7 +643,10 @@ impl SerialSetOperation for SetSymmetricDifference {
     const READS_SECOND_VALUES: bool = true;
 
     #[inline(always)]
-    #[allow(unused_assignments)]
+    #[expect(
+        unused_assignments,
+        reason = "the final cursor loads are part of CCCL's fully unrolled serial operation"
+    )]
     fn apply<K, F, const ITEMS: usize>(
         keys: &SharedRegion<MaybeUninit<K>>,
         first_begin: i32,
@@ -694,7 +706,10 @@ impl SerialSetOperation for SetDifference {
     const READS_SECOND_VALUES: bool = true;
 
     #[inline(always)]
-    #[allow(unused_assignments)]
+    #[expect(
+        unused_assignments,
+        reason = "the final cursor loads are part of CCCL's fully unrolled serial operation"
+    )]
     fn apply<K, F, const ITEMS: usize>(
         keys: &SharedRegion<MaybeUninit<K>>,
         first_begin: i32,
@@ -748,7 +763,10 @@ impl SerialSetOperation for SetUnion {
     const READS_SECOND_VALUES: bool = true;
 
     #[inline(always)]
-    #[allow(unused_assignments)]
+    #[expect(
+        unused_assignments,
+        reason = "the final cursor loads are part of CCCL's fully unrolled serial operation"
+    )]
     fn apply<K, F, const ITEMS: usize>(
         keys: &SharedRegion<MaybeUninit<K>>,
         first_begin: i32,
@@ -828,8 +846,9 @@ fn tail_segmented_sum<I: SetIndex>(value: I, inclusive_status: bool, lane: u32) 
     let mut output = value;
     macro_rules! step {
         ($offset:expr) => {{
-            let other = I::shuffle_down(output, $offset);
-            if lane + $offset <= last_lane {
+            let offset = $offset;
+            let other = I::shuffle_down(output, offset);
+            if lane + offset <= last_lane {
                 output = output + other;
             }
         }};
@@ -989,6 +1008,46 @@ struct TileResult<K, I, const ITEMS: usize> {
     second_count: usize,
 }
 
+/// Per-launch coordination storage shared by every set-operation agent.
+#[doc(hidden)]
+pub struct SetAgentState<'a, I: SetIndex> {
+    partitions: &'a [I::Transaction],
+    tile_state: DisjointSlice<'a, I::Transaction>,
+    output_count: DisjointSlice<'a, usize>,
+    shared: BlockSharedMemory,
+}
+
+impl<'a, I: SetIndex> SetAgentState<'a, I> {
+    #[inline(always)]
+    pub fn new(
+        partitions: &'a [I::Transaction],
+        tile_state: DisjointSlice<'a, I::Transaction>,
+        output_count: DisjointSlice<'a, usize>,
+        shared: BlockSharedMemory,
+    ) -> Self {
+        Self {
+            partitions,
+            tile_state,
+            output_count,
+            shared,
+        }
+    }
+}
+
+/// Affine key/value destinations consumed by a set-operation agent.
+#[doc(hidden)]
+pub struct SetPairOutput<'a, K, V> {
+    keys: DisjointSlice<'a, K>,
+    values: DisjointSlice<'a, V>,
+}
+
+impl<'a, K, V> SetPairOutput<'a, K, V> {
+    #[inline(always)]
+    pub fn new(keys: DisjointSlice<'a, K>, values: DisjointSlice<'a, V>) -> Self {
+        Self { keys, values }
+    }
+}
+
 trait SetOutput<T> {
     fn write(&mut self, index: usize, value: T);
 }
@@ -1007,28 +1066,32 @@ impl<T> SetOutput<T> for DiscardOutput {
     fn write(&mut self, _index: usize, _value: T) {}
 }
 
-#[inline(always)]
-fn scatter<T, I, O, const THREADS: usize, const ITEMS: usize>(
-    output: &mut O,
-    values: &[T; ITEMS],
+struct ScatterContext<'a, I> {
     active: u32,
     thread_prefix: I,
     tile_prefix: I,
     tile_count: I,
-    shared: &BlockSharedMemory,
+    shared: &'a BlockSharedMemory,
     shared_offset: usize,
+}
+
+#[inline(always)]
+fn scatter<T, I, O, const THREADS: usize, const ITEMS: usize>(
+    output: &mut O,
+    values: &[T; ITEMS],
+    context: ScatterContext<'_, I>,
 ) where
     T: Copy,
     I: SetIndex,
     O: SetOutput<T>,
 {
-    let mut shared_values = shared.region::<MaybeUninit<T>>(
-        shared_offset,
-        shared.bytes().saturating_sub(shared_offset) / core::mem::size_of::<T>(),
+    let mut shared_values = context.shared.region::<MaybeUninit<T>>(
+        context.shared_offset,
+        context.shared.bytes().saturating_sub(context.shared_offset) / core::mem::size_of::<T>(),
     );
-    let mut local = (thread_prefix - tile_prefix).to_usize();
+    let mut local = (context.thread_prefix - context.tile_prefix).to_usize();
     for_each_thread_item!(ITEMS, item, {
-        if active & (1u32 << item) != 0 {
+        if context.active & (1u32 << item) != 0 {
             shared_values.write(local, MaybeUninit::new(values[item]));
             local += 1;
         }
@@ -1036,9 +1099,9 @@ fn scatter<T, I, O, const THREADS: usize, const ITEMS: usize>(
     let _ = local;
     thread::sync_threads();
     let mut item = thread::threadIdx_x() as usize;
-    while item < tile_count.to_usize() {
+    while item < context.tile_count.to_usize() {
         output.write(
-            tile_prefix.to_usize() + item,
+            context.tile_prefix.to_usize() + item,
             shared_values.read_initialized(item),
         );
         item += THREADS;
@@ -1049,23 +1112,18 @@ fn scatter<T, I, O, const THREADS: usize, const ITEMS: usize>(
 fn scatter_initialized<T, I, const THREADS: usize, const ITEMS: usize>(
     output: &mut DeviceRegion<'_, T>,
     values: &[MaybeUninit<T>; ITEMS],
-    active: u32,
-    thread_prefix: I,
-    tile_prefix: I,
-    tile_count: I,
-    shared: &BlockSharedMemory,
-    shared_offset: usize,
+    context: ScatterContext<'_, I>,
 ) where
     T: Copy,
     I: SetIndex,
 {
-    let mut shared_values = shared.region::<MaybeUninit<T>>(
-        shared_offset,
-        shared.bytes().saturating_sub(shared_offset) / core::mem::size_of::<T>(),
+    let mut shared_values = context.shared.region::<MaybeUninit<T>>(
+        context.shared_offset,
+        context.shared.bytes().saturating_sub(context.shared_offset) / core::mem::size_of::<T>(),
     );
-    let mut local = (thread_prefix - tile_prefix).to_usize();
+    let mut local = (context.thread_prefix - context.tile_prefix).to_usize();
     for_each_thread_item!(ITEMS, item, {
-        if active & (1u32 << item) != 0 {
+        if context.active & (1u32 << item) != 0 {
             // The serial set operation marks a slot active only when its
             // selected source element was loaded in the value phase.
             shared_values.write(
@@ -1078,9 +1136,9 @@ fn scatter_initialized<T, I, const THREADS: usize, const ITEMS: usize>(
     let _ = local;
     thread::sync_threads();
     let mut item = thread::threadIdx_x() as usize;
-    while item < tile_count.to_usize() {
+    while item < context.tile_count.to_usize() {
         output.write(
-            tile_prefix.to_usize() + item,
+            context.tile_prefix.to_usize() + item,
             shared_values.read_initialized(item),
         );
         item += THREADS;
@@ -1216,12 +1274,14 @@ where
     scatter::<K, I, O, THREADS, ITEMS>(
         output,
         &keys,
-        active,
-        thread_prefix,
-        tile_prefix,
-        tile_count,
-        shared,
-        union_offset,
+        ScatterContext {
+            active,
+            thread_prefix,
+            tile_prefix,
+            tile_count,
+            shared,
+            shared_offset: union_offset,
+        },
     );
     TileResult {
         keys,
@@ -1252,12 +1312,9 @@ fn run_set_keys_agent<
 >(
     first: R1,
     second: R2,
-    partitions: &[I::Transaction],
     order: F,
-    tile_state: DisjointSlice<I::Transaction>,
-    output_count: DisjointSlice<usize>,
+    state: SetAgentState<'_, I>,
     output: &mut O,
-    shared: BlockSharedMemory,
 ) where
     K: Copy,
     I: SetIndex,
@@ -1267,6 +1324,12 @@ fn run_set_keys_agent<
     R2: SetReadRange<K>,
     O: SetOutput<K>,
 {
+    let SetAgentState {
+        partitions,
+        tile_state,
+        output_count,
+        shared,
+    } = state;
     let tile_index = thread::blockIdx_x() as usize;
     let last = tile_index + 1 == thread::gridDim_x() as usize;
     let mut tile_state = DeviceRegion::new(tile_state);
@@ -1303,12 +1366,9 @@ fn run_set_keys_agent<
 pub fn set_keys_agent<K, I, F, Op, const THREADS: usize, const ITEMS: usize, const SM70: bool>(
     first: &[K],
     second: &[K],
-    partitions: &[I::Transaction],
     order: F,
-    tile_state: DisjointSlice<I::Transaction>,
-    output_count: DisjointSlice<usize>,
+    state: SetAgentState<'_, I>,
     output: DisjointSlice<K>,
-    shared: BlockSharedMemory,
 ) where
     K: Copy,
     I: SetIndex,
@@ -1319,12 +1379,9 @@ pub fn set_keys_agent<K, I, F, Op, const THREADS: usize, const ITEMS: usize, con
     run_set_keys_agent::<K, I, F, Op, _, _, _, THREADS, ITEMS, SM70>(
         first,
         second,
-        partitions,
         order,
-        tile_state,
-        output_count,
+        state,
         &mut output,
-        shared,
     );
 }
 
@@ -1342,12 +1399,9 @@ pub fn set_arithmetic_keys_agent<
 >(
     first: ArithmeticSetRange<K>,
     second: ArithmeticSetRange<K>,
-    partitions: &[I::Transaction],
     order: F,
-    tile_state: DisjointSlice<I::Transaction>,
-    output_count: DisjointSlice<usize>,
+    state: SetAgentState<'_, I>,
     output: DisjointSlice<K>,
-    shared: BlockSharedMemory,
 ) where
     K: Copy + TryFrom<usize> + Add<Output = K> + Mul<Output = K>,
     I: SetIndex,
@@ -1358,12 +1412,9 @@ pub fn set_arithmetic_keys_agent<
     run_set_keys_agent::<K, I, F, Op, _, _, _, THREADS, ITEMS, SM70>(
         first,
         second,
-        partitions,
         order,
-        tile_state,
-        output_count,
+        state,
         &mut output,
-        shared,
     );
 }
 
@@ -1381,11 +1432,8 @@ pub fn set_keys_discard_agent<
 >(
     first: &[K],
     second: &[K],
-    partitions: &[I::Transaction],
     order: F,
-    tile_state: DisjointSlice<I::Transaction>,
-    output_count: DisjointSlice<usize>,
-    shared: BlockSharedMemory,
+    state: SetAgentState<'_, I>,
 ) where
     K: Copy,
     I: SetIndex,
@@ -1396,31 +1444,23 @@ pub fn set_keys_discard_agent<
     run_set_keys_agent::<K, I, F, Op, _, _, _, THREADS, ITEMS, SM70>(
         first,
         second,
-        partitions,
         order,
-        tile_state,
-        output_count,
+        state,
         &mut output,
-        shared,
     );
 }
 
 /// Key/value set-operation block agent.
 #[doc(hidden)]
 #[inline(always)]
-#[allow(clippy::too_many_arguments)]
 pub fn set_pairs_agent<K, V, I, F, Op, const THREADS: usize, const ITEMS: usize, const SM70: bool>(
     first_keys: &[K],
     second_keys: &[K],
     first_values: &[V],
     second_values: &[V],
-    partitions: &[I::Transaction],
     order: F,
-    tile_state: DisjointSlice<I::Transaction>,
-    output_count: DisjointSlice<usize>,
-    output_keys: DisjointSlice<K>,
-    output_values: DisjointSlice<V>,
-    shared: BlockSharedMemory,
+    state: SetAgentState<'_, I>,
+    output: SetPairOutput<'_, K, V>,
 ) where
     K: Copy,
     V: Copy,
@@ -1428,6 +1468,16 @@ pub fn set_pairs_agent<K, V, I, F, Op, const THREADS: usize, const ITEMS: usize,
     F: Fn(&K, &K) -> Ordering + Copy,
     Op: SerialSetOperation,
 {
+    let SetAgentState {
+        partitions,
+        tile_state,
+        output_count,
+        shared,
+    } = state;
+    let SetPairOutput {
+        keys: output_keys,
+        values: output_values,
+    } = output;
     let tile_index = thread::blockIdx_x() as usize;
     let last = tile_index + 1 == thread::gridDim_x() as usize;
     let mut tile_state = DeviceRegion::new(tile_state);
@@ -1500,12 +1550,14 @@ pub fn set_pairs_agent<K, V, I, F, Op, const THREADS: usize, const ITEMS: usize,
     scatter_initialized::<V, I, THREADS, ITEMS>(
         &mut output_values,
         &local,
-        result.active,
-        result.thread_prefix,
-        result.tile_prefix,
-        result.tile_count,
-        &shared,
-        union_offset,
+        ScatterContext {
+            active: result.active,
+            thread_prefix: result.thread_prefix,
+            tile_prefix: result.tile_prefix,
+            tile_count: result.tile_count,
+            shared: &shared,
+            shared_offset: union_offset,
+        },
     );
 
     if last && thread::threadIdx_x() == 0 {

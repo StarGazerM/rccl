@@ -59,26 +59,27 @@ let exec = thrust.par(&stream)?;
 
 keys.sort_unstable_by(&exec, |left, right| right.cmp(left))?;
 
-keys.with_values_mut(&mut values)?
+keys.view_mut().with_values(values.view_mut())?
     .sort_by(&exec, |left, right| left.cmp(right))?;
 
-exec.merge_into(&first, &second, &mut output)?;
+first
+    .view()
+    .merge(second.view())
+    .write_into(output.view_mut(), &exec)?;
 
-let initialized = exec.union_by_into(
-    &first,
-    &second,
-    &mut output,
-    |left, right| left.cmp(right),
-)?;
-let intersection_size = exec.intersection_into(
-    &first,
-    &second,
-    rccl_thrust::discard::<i32>(first.len().min(second.len())),
-)?;
+let initialized = first
+    .view()
+    .union_by(second.view(), |left, right| left.cmp(right))
+    .write_into(output.view_mut(), &exec)?;
+let intersection_size = first
+    .view()
+    .intersection(second.view())
+    .count(&exec)?;
 ```
 
-The method allocates the same private workspace and calls a statically
-selected backend trait implementation. `thrust_program!` is the item
+`view()` and `view_mut()` carry the input and output borrows through the
+composed expression. The terminal method allocates the same private workspace
+and calls a statically selected backend trait implementation. `thrust_program!` is the item
 generation boundary: declarative scaffolding implements those traits for its
 cuda-oxide module, and the nested CUB proc macros emit the exact policy and
 launch graphs. Architecture/type policy therefore remains compile time

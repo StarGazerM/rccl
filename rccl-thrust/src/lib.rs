@@ -18,7 +18,7 @@ pub mod range;
 
 pub use cuda_core::DeviceCopy;
 pub use error::TransformError;
-pub use merge::DeviceMergeExt;
+pub use merge::{Merge, MergeBy};
 pub use ordering::{DeviceKeyValueSortExt, DeviceSortExt};
 pub use rccl_cub::{
     ContiguousRange, DeviceAlgorithmError, DeviceRange, DoubleBuffer, KeyValue, RandomAccessRange,
@@ -26,20 +26,16 @@ pub use rccl_cub::{
 };
 pub use rccl_memory as memory;
 pub use set::{
-    DeviceSetDifferenceExt, DeviceSetIntersectionExt, DeviceSetSymmetricDifferenceExt,
-    DeviceSetUnionExt,
+    Difference, DifferenceBy, Intersection, IntersectionBy, SymmetricDifference,
+    SymmetricDifferenceBy, Union, UnionBy,
 };
 
 /// Extension traits used by ordinary Rust method syntax.
 pub mod prelude {
-    pub use crate::{
-        DeviceKeyValueExt, DeviceKeyValueSortExt, DeviceMergeExt, DeviceRangeExt,
-        DeviceSetDifferenceExt, DeviceSetIntersectionExt, DeviceSetSymmetricDifferenceExt,
-        DeviceSetUnionExt, DeviceSortExt,
-    };
+    pub use crate::{DeviceBufferExt, DeviceKeyValueSortExt, DeviceRangeExt, DeviceSortExt};
 }
 
 pub use range::{
-    DeviceKeyValueExt, DeviceRangeExt, KeyValueRange, KeyValueRangeMut, RangeError,
-    arithmetic_range, discard, indexed_output, repeat_n,
+    DeviceBufferExt, DeviceRangeExt, DeviceView, DeviceViewMut, KeyValueRange, KeyValueRangeMut,
+    RangeError, arithmetic_range, discard, indexed_output, repeat_n,
 };

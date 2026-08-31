@@ -131,7 +131,9 @@ fn device_transform_kernel_is_owned_by_cub() {
     let kernel_text = kernels.to_string();
     assert!(kernel_text.contains("transform_repeat_in_place"));
     assert!(kernel_text.contains("grid_stride_runs32"));
-    assert!(kernel_text.contains("allow (clippy :: too_many_arguments)"));
+    assert!(kernel_text.contains("expect (clippy :: too_many_arguments"));
+    assert!(kernel_text.contains("CUDA entry points preserve the pinned CUB launch ABI"));
+    assert!(!kernel_text.contains("allow (clippy :: too_many_arguments)"));
 }
 
 #[test]

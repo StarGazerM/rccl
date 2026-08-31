@@ -6,6 +6,13 @@ Reference: CCCL `571f2fc3bc53cd710e306ad43d58995c1fe4219f`
 Backend: pinned cuda-oxide `6bc513bbcdda781b13a328cf692df86f2215acf9`
 Runtime device: SM89
 
+Refresh status (2026-08-31): no replacement timing row is recorded while PID
+2614460 (`VLLM::EngineCore`, owned by another user) holds 46,392 MiB on the
+only GPU. The current-subset and ordering scripts now reject that state before
+building or sampling, just as the set-operation gate already does. The older
+isolated measurements below remain failure evidence; a shared-device run is
+not used to overwrite them or manufacture a pass.
+
 `scripts/test-current-performance-parity.sh` builds the Rust programs through
 the standard cuda-oxide workflow and independently compiles the two pinned
 CCCL reference programs. Each pair has identical element type, element count,

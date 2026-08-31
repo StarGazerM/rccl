@@ -166,21 +166,22 @@ where
         let expected = host_set_by(&first, &second, operation, order);
         let mut output = DeviceBuffer::<KeyValue<T, T>>::zeroed(stream, expected.len())?;
         let len = match operation {
-            Operation::Union => {
-                execution.union_by_into(&device_first, &device_second, &mut output, order)?
-            }
-            Operation::Intersection => {
-                execution.intersection_by_into(&device_first, &device_second, &mut output, order)?
-            }
-            Operation::Difference => {
-                execution.difference_by_into(&device_first, &device_second, &mut output, order)?
-            }
-            Operation::SymmetricDifference => execution.symmetric_difference_by_into(
-                &device_first,
-                &device_second,
-                &mut output,
-                order,
-            )?,
+            Operation::Union => device_first
+                .view()
+                .union_by(device_second.view(), order)
+                .write_into(output.view_mut(), execution)?,
+            Operation::Intersection => device_first
+                .view()
+                .intersection_by(device_second.view(), order)
+                .write_into(output.view_mut(), execution)?,
+            Operation::Difference => device_first
+                .view()
+                .difference_by(device_second.view(), order)
+                .write_into(output.view_mut(), execution)?,
+            Operation::SymmetricDifference => device_first
+                .view()
+                .symmetric_difference_by(device_second.view(), order)
+                .write_into(output.view_mut(), execution)?,
         };
         assert_eq!(prefix(&output, stream, len)?, expected);
     }
@@ -192,7 +193,10 @@ where
     let descending = move |left: &KeyValue<T, T>, right: &KeyValue<T, T>| order(right, left);
     let expected = host_set_by(&first, &second, Operation::Union, descending);
     let mut output = DeviceBuffer::<KeyValue<T, T>>::zeroed(stream, expected.len())?;
-    let len = execution.union_by_into(&device_first, &device_second, &mut output, descending)?;
+    let len = device_first
+        .view()
+        .union_by(device_second.view(), descending)
+        .write_into(output.view_mut(), execution)?;
     assert_eq!(prefix(&output, stream, len)?, expected);
     Ok(())
 }
@@ -260,8 +264,8 @@ where
         let first_values = DeviceBuffer::from_host(stream, &first_values_host)?;
         let second_keys = DeviceBuffer::from_host(stream, &second_keys_host)?;
         let second_values = DeviceBuffer::from_host(stream, &second_values_host)?;
-        let first_range = first_keys.with_values(&first_values)?;
-        let second_range = second_keys.with_values(&second_values)?;
+        let first_range = first_keys.view().with_values(first_values.view())?;
+        let second_range = second_keys.view().with_values(second_values.view())?;
 
         for operation in [
             Operation::Union,
@@ -272,23 +276,22 @@ where
             let expected = host_set_by(&first, &second, operation, record_order);
             let mut output_keys = DeviceBuffer::<T>::zeroed(stream, expected.len())?;
             let mut output_values = DeviceBuffer::<T>::zeroed(stream, expected.len())?;
-            let mut output = output_keys.with_values_mut(&mut output_values)?;
+            let mut output = output_keys
+                .view_mut()
+                .with_values(output_values.view_mut())?;
             let len = match operation {
-                Operation::Union => {
-                    execution.union_by_into(first_range, second_range, &mut output, order)?
-                }
-                Operation::Intersection => {
-                    execution.intersection_by_into(first_range, &second_keys, &mut output, order)?
-                }
-                Operation::Difference => {
-                    execution.difference_by_into(first_range, second_range, &mut output, order)?
-                }
-                Operation::SymmetricDifference => execution.symmetric_difference_by_into(
-                    first_range,
-                    second_range,
-                    &mut output,
-                    order,
-                )?,
+                Operation::Union => first_range
+                    .union_by(second_range, order)
+                    .write_into(output.reborrow(), execution)?,
+                Operation::Intersection => first_range
+                    .intersection_by(second_keys.view(), order)
+                    .write_into(output.reborrow(), execution)?,
+                Operation::Difference => first_range
+                    .difference_by(second_range, order)
+                    .write_into(output.reborrow(), execution)?,
+                Operation::SymmetricDifference => first_range
+                    .symmetric_difference_by(second_range, order)
+                    .write_into(output.reborrow(), execution)?,
             };
             let actual_keys = prefix(&output_keys, stream, len)?;
             let actual_values = prefix(&output_values, stream, len)?;
@@ -313,21 +316,33 @@ fn main() -> Result<(), Box<dyn Error>> {
     let union_a = DeviceBuffer::from_host(&stream, &[0_i32, 2, 2])?;
     let union_b = DeviceBuffer::from_host(&stream, &[0_i32, 2, 2, 2, 3])?;
     let mut union_out = DeviceBuffer::<i32>::zeroed(&stream, 5)?;
-    let union_len = exec.union_into(&union_a, &union_b, &mut union_out)?;
+    let union_len = union_a
+        .view()
+        .union(union_b.view())
+        .write_into(union_out.view_mut(), &exec)?;
     assert_eq!(prefix(&union_out, &stream, union_len)?, [0, 2, 2, 2, 3]);
 
     let first = DeviceBuffer::from_host(&stream, &[0_i32, 2, 4, 6])?;
     let second = DeviceBuffer::from_host(&stream, &[0_i32, 3, 3, 4, 7])?;
     let mut intersection = DeviceBuffer::<i32>::zeroed(&stream, 2)?;
-    let intersection_len = exec.intersection_into(&first, &second, &mut intersection)?;
+    let intersection_len = first
+        .view()
+        .intersection(second.view())
+        .write_into(intersection.view_mut(), &exec)?;
     assert_eq!(prefix(&intersection, &stream, intersection_len)?, [0, 4]);
 
     let mut difference = DeviceBuffer::<i32>::zeroed(&stream, 2)?;
-    let difference_len = exec.difference_into(&first, &second, &mut difference)?;
+    let difference_len = first
+        .view()
+        .difference(second.view())
+        .write_into(difference.view_mut(), &exec)?;
     assert_eq!(prefix(&difference, &stream, difference_len)?, [2, 6]);
 
     let mut symmetric = DeviceBuffer::<i32>::zeroed(&stream, 5)?;
-    let symmetric_len = exec.symmetric_difference_into(&first, &second, &mut symmetric)?;
+    let symmetric_len = first
+        .view()
+        .symmetric_difference(second.view())
+        .write_into(symmetric.view_mut(), &exec)?;
     assert_eq!(prefix(&symmetric, &stream, symmetric_len)?, [2, 3, 3, 6, 7]);
 
     // The descending overload families use the same inferred Rust closure
@@ -336,42 +351,34 @@ fn main() -> Result<(), Box<dyn Error>> {
     let descending_second = DeviceBuffer::from_host(&stream, &[7_i32, 4, 3, 3, 0])?;
     let descending = |left: &i32, right: &i32| right.cmp(left);
     let mut descending_union = DeviceBuffer::<i32>::zeroed(&stream, 7)?;
-    let len = exec.union_by_into(
-        &descending_first,
-        &descending_second,
-        &mut descending_union,
-        descending,
-    )?;
+    let len = descending_first
+        .view()
+        .union_by(descending_second.view(), descending)
+        .write_into(descending_union.view_mut(), &exec)?;
     assert_eq!(
         prefix(&descending_union, &stream, len)?,
         [7, 6, 4, 3, 3, 2, 0]
     );
 
     let mut descending_intersection = DeviceBuffer::<i32>::zeroed(&stream, 2)?;
-    let len = exec.intersection_by_into(
-        &descending_first,
-        &descending_second,
-        &mut descending_intersection,
-        descending,
-    )?;
+    let len = descending_first
+        .view()
+        .intersection_by(descending_second.view(), descending)
+        .write_into(descending_intersection.view_mut(), &exec)?;
     assert_eq!(prefix(&descending_intersection, &stream, len)?, [4, 0]);
 
     let mut descending_difference = DeviceBuffer::<i32>::zeroed(&stream, 2)?;
-    let len = exec.difference_by_into(
-        &descending_first,
-        &descending_second,
-        &mut descending_difference,
-        descending,
-    )?;
+    let len = descending_first
+        .view()
+        .difference_by(descending_second.view(), descending)
+        .write_into(descending_difference.view_mut(), &exec)?;
     assert_eq!(prefix(&descending_difference, &stream, len)?, [6, 2]);
 
     let mut descending_symmetric = DeviceBuffer::<i32>::zeroed(&stream, 5)?;
-    let len = exec.symmetric_difference_by_into(
-        &descending_first,
-        &descending_second,
-        &mut descending_symmetric,
-        descending,
-    )?;
+    let len = descending_first
+        .view()
+        .symmetric_difference_by(descending_second.view(), descending)
+        .write_into(descending_symmetric.view_mut(), &exec)?;
     assert_eq!(
         prefix(&descending_symmetric, &stream, len)?,
         [7, 6, 3, 3, 2]
@@ -386,12 +393,14 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut out_keys = DeviceBuffer::<i32>::zeroed(&stream, 7)?;
     let mut out_values = DeviceBuffer::<i32>::zeroed(&stream, out_keys.len())?;
-    let mut output = out_keys.with_values_mut(&mut out_values)?;
-    let len = exec.union_into(
-        a_keys.with_values(&a_values)?,
-        b_keys.with_values(&b_values)?,
-        &mut output,
-    )?;
+    let len = a_keys
+        .view()
+        .with_values(a_values.view())?
+        .union(b_keys.view().with_values(b_values.view())?)
+        .write_into(
+            out_keys.view_mut().with_values(out_values.view_mut())?,
+            &exec,
+        )?;
     assert_eq!(prefix(&out_keys, &stream, len)?, [0, 2, 3, 3, 4, 6, 7]);
     assert_eq!(
         prefix(&out_values, &stream, len)?,
@@ -400,30 +409,40 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut out_keys = DeviceBuffer::<i32>::zeroed(&stream, 2)?;
     let mut out_values = DeviceBuffer::<i32>::zeroed(&stream, out_keys.len())?;
-    let mut output = out_keys.with_values_mut(&mut out_values)?;
-    let len = exec.intersection_into(a_keys.with_values(&a_values)?, &b_keys, &mut output)?;
+    let len = a_keys
+        .view()
+        .with_values(a_values.view())?
+        .intersection(b_keys.view())
+        .write_into(
+            out_keys.view_mut().with_values(out_values.view_mut())?,
+            &exec,
+        )?;
     assert_eq!(prefix(&out_keys, &stream, len)?, [0, 4]);
     assert_eq!(prefix(&out_values, &stream, len)?, [10, 14]);
 
     let mut out_keys = DeviceBuffer::<i32>::zeroed(&stream, 2)?;
     let mut out_values = DeviceBuffer::<i32>::zeroed(&stream, out_keys.len())?;
-    let mut output = out_keys.with_values_mut(&mut out_values)?;
-    let len = exec.difference_into(
-        a_keys.with_values(&a_values)?,
-        b_keys.with_values(&b_values)?,
-        &mut output,
-    )?;
+    let len = a_keys
+        .view()
+        .with_values(a_values.view())?
+        .difference(b_keys.view().with_values(b_values.view())?)
+        .write_into(
+            out_keys.view_mut().with_values(out_values.view_mut())?,
+            &exec,
+        )?;
     assert_eq!(prefix(&out_keys, &stream, len)?, [2, 6]);
     assert_eq!(prefix(&out_values, &stream, len)?, [12, 16]);
 
     let mut out_keys = DeviceBuffer::<i32>::zeroed(&stream, 5)?;
     let mut out_values = DeviceBuffer::<i32>::zeroed(&stream, out_keys.len())?;
-    let mut output = out_keys.with_values_mut(&mut out_values)?;
-    let len = exec.symmetric_difference_into(
-        a_keys.with_values(&a_values)?,
-        b_keys.with_values(&b_values)?,
-        &mut output,
-    )?;
+    let len = a_keys
+        .view()
+        .with_values(a_values.view())?
+        .symmetric_difference(b_keys.view().with_values(b_values.view())?)
+        .write_into(
+            out_keys.view_mut().with_values(out_values.view_mut())?,
+            &exec,
+        )?;
     assert_eq!(prefix(&out_keys, &stream, len)?, [2, 3, 3, 6, 7]);
     assert_eq!(prefix(&out_values, &stream, len)?, [12, 23, 23, 16, 27]);
 
@@ -432,36 +451,42 @@ fn main() -> Result<(), Box<dyn Error>> {
     // overloads.
     let descending_a_values = DeviceBuffer::from_host(&stream, &[16_i32, 14, 12, 10])?;
     let descending_b_values = DeviceBuffer::from_host(&stream, &[27_i32, 24, 23, 33, 20])?;
-    let descending_a = descending_first.with_values(&descending_a_values)?;
-    let descending_b = descending_second.with_values(&descending_b_values)?;
+    let descending_a = descending_first
+        .view()
+        .with_values(descending_a_values.view())?;
+    let descending_b = descending_second
+        .view()
+        .with_values(descending_b_values.view())?;
 
     let mut keys = DeviceBuffer::<i32>::zeroed(&stream, 7)?;
     let mut values = DeviceBuffer::<i32>::zeroed(&stream, keys.len())?;
-    let mut output = keys.with_values_mut(&mut values)?;
-    let len = exec.union_by_into(descending_a, descending_b, &mut output, descending)?;
+    let len = descending_a
+        .union_by(descending_b, descending)
+        .write_into(keys.view_mut().with_values(values.view_mut())?, &exec)?;
     assert_eq!(prefix(&keys, &stream, len)?, [7, 6, 4, 3, 3, 2, 0]);
     assert_eq!(prefix(&values, &stream, len)?, [27, 16, 14, 23, 33, 12, 10]);
 
     let mut keys = DeviceBuffer::<i32>::zeroed(&stream, 2)?;
     let mut values = DeviceBuffer::<i32>::zeroed(&stream, keys.len())?;
-    let mut output = keys.with_values_mut(&mut values)?;
-    let len =
-        exec.intersection_by_into(descending_a, &descending_second, &mut output, descending)?;
+    let len = descending_a
+        .intersection_by(descending_second.view(), descending)
+        .write_into(keys.view_mut().with_values(values.view_mut())?, &exec)?;
     assert_eq!(prefix(&keys, &stream, len)?, [4, 0]);
     assert_eq!(prefix(&values, &stream, len)?, [14, 10]);
 
     let mut keys = DeviceBuffer::<i32>::zeroed(&stream, 2)?;
     let mut values = DeviceBuffer::<i32>::zeroed(&stream, keys.len())?;
-    let mut output = keys.with_values_mut(&mut values)?;
-    let len = exec.difference_by_into(descending_a, descending_b, &mut output, descending)?;
+    let len = descending_a
+        .difference_by(descending_b, descending)
+        .write_into(keys.view_mut().with_values(values.view_mut())?, &exec)?;
     assert_eq!(prefix(&keys, &stream, len)?, [6, 2]);
     assert_eq!(prefix(&values, &stream, len)?, [16, 12]);
 
     let mut keys = DeviceBuffer::<i32>::zeroed(&stream, 5)?;
     let mut values = DeviceBuffer::<i32>::zeroed(&stream, keys.len())?;
-    let mut output = keys.with_values_mut(&mut values)?;
-    let len =
-        exec.symmetric_difference_by_into(descending_a, descending_b, &mut output, descending)?;
+    let len = descending_a
+        .symmetric_difference_by(descending_b, descending)
+        .write_into(keys.view_mut().with_values(values.view_mut())?, &exec)?;
     assert_eq!(prefix(&keys, &stream, len)?, [7, 6, 3, 3, 2]);
     assert_eq!(prefix(&values, &stream, len)?, [27, 16, 23, 33, 12]);
 
@@ -472,7 +497,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let evens = DeviceBuffer::from_host(&stream, &even_host)?;
     let odds = DeviceBuffer::from_host(&stream, &odd_host)?;
     let mut large = DeviceBuffer::<i32>::zeroed(&stream, 2 * n)?;
-    let len = exec.union_into(&evens, &odds, &mut large)?;
+    let len = evens
+        .view()
+        .union(odds.view())
+        .write_into(large.view_mut(), &exec)?;
     assert_eq!(len, 2 * n);
     assert_eq!(
         prefix(&large, &stream, len)?,
@@ -481,31 +509,34 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut empty_intersection = DeviceBuffer::<i32>::zeroed(&stream, n)?;
     assert_eq!(
-        exec.intersection_into(&evens, &odds, &mut empty_intersection)?,
+        evens
+            .view()
+            .intersection(odds.view())
+            .write_into(empty_intersection.view_mut(), &exec)?,
         0
     );
 
     // Direct ports of the pinned discard_iterator tests: the Rust output
     // range has a finite logical extent, but the generated set agent removes
     // only the final global write and returns the same output position.
-    assert_eq!(
-        exec.union_into(&evens, &odds, rccl_thrust::discard::<i32>(2 * n))?,
-        2 * n
-    );
-    assert_eq!(
-        exec.intersection_into(&evens, &odds, rccl_thrust::discard::<i32>(n))?,
-        0
-    );
+    assert_eq!(evens.view().union(odds.view()).count(&exec)?, 2 * n);
+    assert_eq!(evens.view().intersection(odds.view()).count(&exec)?, 0);
 
     let equal = DeviceBuffer::from_host(&stream, &even_host)?;
     let mut equal_union = DeviceBuffer::<i32>::zeroed(&stream, 2 * n)?;
-    let len = exec.union_into(&evens, &equal, &mut equal_union)?;
+    let len = evens
+        .view()
+        .union(equal.view())
+        .write_into(equal_union.view_mut(), &exec)?;
     assert_eq!(len, n);
     assert_eq!(prefix(&equal_union, &stream, len)?, even_host);
 
     let mut equal_difference = DeviceBuffer::<i32>::zeroed(&stream, n)?;
     assert_eq!(
-        exec.difference_into(&evens, &equal, &mut equal_difference)?,
+        evens
+            .view()
+            .difference(equal.view())
+            .write_into(equal_difference.view_mut(), &exec)?,
         0
     );
 
@@ -513,10 +544,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     // all four pinned key-only test files. The host side is the reference
     // system in those files; every result is compared, not merely sortedness.
     let first_host = (0..4097)
-        .map(|index| ((index * 37 + 11) % 13) as i32 - 6)
+        .map(|index| ((index * 37 + 11) % 13) - 6)
         .collect::<Vec<_>>();
     let second_host = (0..8194)
-        .map(|index| ((index * 29 + 7) % 13) as i32 - 6)
+        .map(|index| ((index * 29 + 7) % 13) - 6)
         .collect::<Vec<_>>();
     let mut first_host = first_host;
     let mut second_host = second_host;
@@ -529,28 +560,46 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         let expected = host_set(&first_host, second_part, Operation::Union);
         let mut output = DeviceBuffer::<i32>::zeroed(&stream, first.len() + second.len())?;
-        let len = exec.union_into(&first, &second, &mut output)?;
+        let len = first
+            .view()
+            .union(second.view())
+            .write_into(output.view_mut(), &exec)?;
         assert_eq!(prefix(&output, &stream, len)?, expected);
 
         let expected = host_set(&first_host, second_part, Operation::Intersection);
         let mut output = DeviceBuffer::<i32>::zeroed(&stream, first.len().min(second.len()))?;
-        let len = exec.intersection_into(&first, &second, &mut output)?;
+        let len = first
+            .view()
+            .intersection(second.view())
+            .write_into(output.view_mut(), &exec)?;
         assert_eq!(prefix(&output, &stream, len)?, expected);
 
         let expected = host_set(&first_host, second_part, Operation::Difference);
         let mut output = DeviceBuffer::<i32>::zeroed(&stream, first.len())?;
-        let len = exec.difference_into(&first, &second, &mut output)?;
+        let len = first
+            .view()
+            .difference(second.view())
+            .write_into(output.view_mut(), &exec)?;
         assert_eq!(prefix(&output, &stream, len)?, expected);
 
         let expected = host_set(&first_host, second_part, Operation::SymmetricDifference);
         let mut output = DeviceBuffer::<i32>::zeroed(&stream, first.len() + second.len())?;
-        let len = exec.symmetric_difference_into(&first, &second, &mut output)?;
+        let len = first
+            .view()
+            .symmetric_difference(second.view())
+            .write_into(output.view_mut(), &exec)?;
         assert_eq!(prefix(&output, &stream, len)?, expected);
     }
 
     let empty = DeviceBuffer::<i32>::from_host(&stream, &[])?;
     let mut empty_output = DeviceBuffer::<i32>::from_host(&stream, &[])?;
-    assert_eq!(exec.union_into(&empty, &empty, &mut empty_output)?, 0);
+    assert_eq!(
+        empty
+            .view()
+            .union(empty.view())
+            .write_into(empty_output.view_mut(), &exec)?,
+        0
+    );
 
     // Direct Rust counterpart of every pinned `key_value<U, U>` instantiation.
     // CCCL orders only by `key` but compares whole records for test equality;
@@ -581,7 +630,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let first = rccl_thrust::arithmetic_range(0_i64, 1_i64, 10_001);
     let second = rccl_thrust::arithmetic_range(0_i64, 1_i64, 10_000);
     let mut output = DeviceBuffer::<i64>::zeroed(&stream, 1)?;
-    let len = exec.difference_into(first, second, &mut output)?;
+    let len = first
+        .difference(second)
+        .write_into(output.view_mut(), &exec)?;
     assert_eq!(len, 1);
     assert_eq!(prefix(&output, &stream, len)?, [10_000]);
 
@@ -595,13 +646,17 @@ fn main() -> Result<(), Box<dyn Error>> {
             let count = 1usize << magnitude;
             let first = rccl_thrust::arithmetic_range(0_i64, 1_i64, count + 1);
             let second = rccl_thrust::arithmetic_range(0_i64, 1_i64, count);
-            let len = exec.difference_into(first, second, &mut output)?;
+            let len = first
+                .difference(second)
+                .write_into(output.view_mut(), &exec)?;
             assert_eq!(len, 1);
             assert_eq!(prefix(&output, &stream, len)?, [count as i64]);
 
             let first = rccl_thrust::arithmetic_range(0_i64, 1_i64, count + 1);
             let second = rccl_thrust::arithmetic_range(count as i64, 1_i64, count);
-            let len = exec.intersection_into(first, second, &mut output)?;
+            let len = first
+                .intersection(second)
+                .write_into(output.view_mut(), &exec)?;
             assert_eq!(len, 1);
             assert_eq!(prefix(&output, &stream, len)?, [count as i64]);
         }

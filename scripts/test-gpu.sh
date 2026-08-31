@@ -143,14 +143,22 @@ if rg -n '#\[kernel|cuda_module' \
   exit 1
 fi
 if ! rg -q 'pub trait DeviceSortExt' rccl-thrust/src/ordering.rs \
-  || ! rg -q 'pub trait DeviceMergeExt' rccl-thrust/src/merge.rs \
-  || ! rg -q 'pub trait DeviceSetUnionExt' rccl-thrust/src/set.rs \
-  || ! rg -q 'pub trait DeviceSetIntersectionExt' rccl-thrust/src/set.rs \
-  || ! rg -q 'pub trait DeviceSetDifferenceExt' rccl-thrust/src/set.rs \
-  || ! rg -q 'pub trait DeviceSetSymmetricDifferenceExt' rccl-thrust/src/set.rs \
+  || ! rg -q 'pub struct Merge<' rccl-thrust/src/merge.rs \
+  || ! rg -q 'define_key_set_expression!\(Union,' rccl-thrust/src/set.rs \
+  || ! rg -q '^define_key_set_expression!\($' rccl-thrust/src/set.rs \
+  || ! rg -q '^    Intersection,$' rccl-thrust/src/set.rs \
+  || ! rg -q '^    Difference,$' rccl-thrust/src/set.rs \
+  || ! rg -q '^    SymmetricDifference,$' rccl-thrust/src/set.rs \
+  || ! rg -q 'pub trait DeviceBufferExt' rccl-thrust/src/range.rs \
   || ! rg -q 'pub trait DeviceRangeExt' rccl-thrust/src/range.rs \
+  || rg -n 'pub trait Device(Merge|Set)' rccl-thrust/src \
   || rg -n 'macro_rules! (sort|sort_by|stable_sort|merge|merge_by|set_union|set_intersection|set_difference|set_symmetric_difference)' rccl-thrust/src; then
-  printf '%s\n' 'Thrust ordering, merge, sets, and fancy ranges must remain ordinary Rust method APIs' >&2
+  printf '%s\n' 'Thrust ordering, merge, sets, and fancy ranges must remain borrowed Rust expression APIs' >&2
+  exit 1
+fi
+if rg -n '(exec|execution)\.(merge|union|intersection|difference|symmetric)|\.with_values_mut\(' \
+  rccl-thrust/examples --glob '*.rs'; then
+  printf '%s\n' 'Thrust examples regressed to execution-receiver or cursor-like range APIs' >&2
   exit 1
 fi
 

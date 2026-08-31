@@ -27,8 +27,17 @@ if rg -n '\bunsafe\b|\*mut|\*const|\bArc\b' \
   printf '%s\n' 'set algorithms and generated lowering must retain the safe Rust boundary' >&2
   exit 1
 fi
+if rg -n '#\[allow\(' \
+  rccl-cub/src/ordering_backend/set.rs rccl-cub-macros/src/kernels.rs rccl-thrust/src/set.rs \
+  || ! rg -q 'reason = "the final cursor loads are part of CCCL' \
+    rccl-cub/src/ordering_backend/set.rs \
+  || ! rg -q 'reason = "CUDA entry points preserve the pinned CUB launch ABI' \
+    rccl-cub-macros/src/kernels.rs; then
+  printf '%s\n' 'set lint exceptions must be checked CCCL algorithm or CUDA ABI expectations, never broad allows' >&2
+  exit 1
+fi
 if rg -n 'F: Fn\([^;]*\+ Copy[,;]' rccl-thrust/src/set.rs \
-  || ! rg -q "F: Fn\(&Self::Key, &Self::Key\) -> Ordering \+ Copy \+ 'static" rccl-thrust/src/set.rs \
+  || ! rg -q "F: Fn\(&K, &K\) -> Ordering \+ Copy \+ 'static" rccl-thrust/src/set.rs \
   || ! rg -q 'let order = move |' rccl-thrust/examples/set_operations_tests.rs; then
   printf '%s\n' 'set comparators must own captures; borrowed host closures may not cross the kernel ABI' >&2
   exit 1

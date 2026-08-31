@@ -41,7 +41,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut pair_keys = DeviceBuffer::from_host(&stream, &input)?;
     let mut pair_values = DeviceBuffer::from_host(&stream, &input)?;
     pair_keys
-        .with_values_mut(&mut pair_values)?
+        .view_mut()
+        .with_values(pair_values.view_mut())?
         .sort_unstable_by(&exec, |left: &u32, right: &u32| right.cmp(left))?;
     let descending_expected = (0..input.len() as u32).rev().collect::<Vec<_>>();
     assert_eq!(pair_keys.to_host_vec(&stream)?, descending_expected);
@@ -61,7 +62,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut stable_keys = DeviceBuffer::from_host(&stream, &stable_keys_host)?;
     let mut stable_values = DeviceBuffer::from_host(&stream, &stable_values_host)?;
     stable_keys
-        .with_values_mut(&mut stable_values)?
+        .view_mut()
+        .with_values(stable_values.view_mut())?
         .sort_by(&exec, |left: &u32, right: &u32| left.cmp(right))?;
     let actual = stable_keys
         .to_host_vec(&stream)?

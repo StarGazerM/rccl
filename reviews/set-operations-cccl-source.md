@@ -107,12 +107,14 @@ the operation and schedule without introducing an invalid Rust value.
 ## Corresponding evidence and open gate
 
 `rccl-thrust/examples/set_operations.rs` ports the pinned example's merge,
-four set operations, and discard-output intersection-size case. The focused
-GPU test ports ascending/descending, duplicate/multiset, equivalent-range,
-discard, by-key source selection, all eight `key_value` types, and counting
-iterator magnitudes 30 through 33. Exact-result buffers deliberately use the
-known result length in the simple cases so an accidental worst-case-capacity
-restriction fails the suite.
+four set operations, and count-only intersection case. The latter still uses
+the pinned discard-output kernel path, but the Rust API terminates the borrowed
+set expression with `count(&exec)` instead of manufacturing a finite discard
+cursor. The focused GPU test ports ascending/descending, duplicate/multiset,
+equivalent-range, discard-kernel, by-key source selection, all eight
+`key_value` types, and counting iterator magnitudes 30 through 33. Exact-result
+buffers deliberately use the known result length in the simple cases so an
+accidental worst-case-capacity restriction fails the suite.
 
 The proc-macro test pins SM52 and SM89 record item counts and shared-byte
 layouts, including the rule that value size changes the shared union but not
@@ -140,10 +142,21 @@ entropy-1.000, ratio-50, `2^24` row. `RCCL_SET_FULL_MATRIX=1` expands this to
 the upstream signed 8/16/32/64-bit key types, 8/64-bit values, both entropy
 rows, all three input ratios, and sizes `2^16`, `2^20`, `2^24`, and `2^28`.
 Correctness, memcheck, and racecheck are passing, but performance is not
-recorded as passing while PID
-1128380 (`VLLM::EngineCore`) occupies the GPU; this external exclusivity
-condition is intentionally not masked by relaxed thresholds or selected
-samples.
+recorded as passing while PID 2614460 (`VLLM::EngineCore`, owned by another
+user) occupies 46,392 MiB of the SM89 GPU. This external exclusivity condition
+is intentionally not masked by relaxed thresholds or selected samples. The
+current-subset and ordering timing scripts now enforce the same early
+exclusive-device check as the set benchmark.
+
+The Rust API/lint cleanup was also checked below the source level. The
+pre-cleanup and post-cleanup SM89 set artifacts have identical normalized
+device payloads, and offline assembly produces the same cubin SHA-256
+`c67e13667aea029f18047c093961bdec753f0ff34790e97bfb238a3a6587574b`.
+Every entry retains the same register, spill, stack, shared-memory, constant-
+memory, and barrier report. The final wide-matrix executable then passed the
+pinned result suite, memcheck with zero errors, and racecheck with zero
+hazards. Thus grouping launch state and affine pair outputs into Rust structs
+does not turn a host-side cleanup into an unmeasured device-code change.
 
 The compiler-resource comparison is also intentionally recorded as a gap,
 not converted into a parity claim.  For the isolated SM89 `i32` key-only

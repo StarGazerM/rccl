@@ -219,6 +219,12 @@ already provide.
   `cuda::Execution` values borrowing that program and a stream. Ordinary
   `par` supplies the default temporary allocator; `par_in` is the explicit
   resource form. Public code never loads or passes a module or architecture.
+  Contiguous inputs enter composition through copyable `DeviceView<'a, T>`
+  borrows and outputs through affine `DeviceViewMut<'a, T>` borrows. Merge and
+  set operations retain both inputs in one fluent expression and execute only
+  at `write_into(output, execution)`; count-only set operations terminate at
+  `count(execution)` rather than exposing a discard cursor. Independent
+  begin/end handles and execution-policy receiver methods are rejected.
   Set-only programs may request the declarative `set_operations` capability
   catalog so unrelated backends do not constrain the target; target/type
   policy remains exclusively inside the nested CUB proc macros.
@@ -488,7 +494,7 @@ masking, not closure.
 | Phase | Deliverable | Unlocks | Exit evidence |
 |---|---|---|---|
 | 0 | Machine-readable coverage ledger, exact pinned example/API-test inventory, typed CUB policy catalog, shallow call boundary, and declarative/procedural macro classification | honest progress, drift checks, and one compile-time owner for every later primitive | every inventory item has an owner/status; all 19 programs, 378 embedded regions, 49 API tests, and 105 exercised CUB methods are pinned; runtime crates contain no closed compiler metadata; quote-only public proc macros are rejected; no RCCL-owned compiler or loader route exists |
-| 1 | Read/write/random-access range traits, callable bounds, product/key-value types, double buffer, offset selection, temp-storage layout; rely on native cuda-oxide slices | all general algorithms and CUB public forms | compile-fail alias/lifetime tests, host/device ABI tests, and zero-copy ownership checks |
+| 1 | Single borrowed sequence/view API; read/write/random-access range traits, callable bounds, product/key-value types, double buffer, offset selection, temp-storage layout; rely on native cuda-oxide slices | all general algorithms and CUB public forms | fluent composition retains every input lifetime; mutable output views are affine; compile-fail alias/lifetime tests, host/device ABI tests, and zero-copy ownership checks |
 | 2 | Thrust adaptors: counting, constant, discard, offset, reverse, strided, transform, transform-output, transform-in/out, zip, permutation, shuffle, tabulate-output, retag/capability conversion | fancy-iterator parity for later algorithms | adaptor composition matrix on device, including read/write zip and non-contiguous outputs |
 | 3 | CUB thread then warp then block load/store/exchange/reduce/scan/search/sort/radix/histogram building blocks | reusable implementation base for device-wide algorithms | upstream example/test matrices, exact temp-storage sizes/alignment, and GPU synchronization stress tests |
 | 4 | CUB agents, grid partitioning/lookback, public temp-storage query/resource forms, 32/64-bit offset selection | complete device-wide API contracts | query/execute parity, insufficient-storage errors, large-count boundary tests |

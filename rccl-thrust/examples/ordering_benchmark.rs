@@ -110,7 +110,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             iterations,
             &mut (),
             |_| Ok(()),
-            |_| exec.merge_into(&first, &second, &mut merged),
+            |_| {
+                first
+                    .view()
+                    .merge(second.view())
+                    .write_into(merged.view_mut(), &exec)
+            },
         )?;
         let merged_host = merged.to_host_vec(&stream)?;
         assert!(
@@ -131,16 +136,22 @@ fn main() -> Result<(), Box<dyn Error>> {
         let second_values = DeviceBuffer::from_host(&stream, &second_values_host)?;
         let mut merged_pair_keys = DeviceBuffer::<u32>::zeroed(&stream, count * 2)?;
         let mut merged_pair_values = DeviceBuffer::<u64>::zeroed(&stream, count * 2)?;
-        let first_pairs = first.with_values(&first_values)?;
-        let second_pairs = second.with_values(&second_values)?;
-        let mut merged_pairs = merged_pair_keys.with_values_mut(&mut merged_pair_values)?;
+        let first_pairs = first.view().with_values(first_values.view())?;
+        let second_pairs = second.view().with_values(second_values.view())?;
+        let mut merged_pairs = merged_pair_keys
+            .view_mut()
+            .with_values(merged_pair_values.view_mut())?;
         let pair_merge_timing = timed(
             &stream,
             0,
             iterations,
             &mut merged_pairs,
             |_| Ok(()),
-            |output| exec.merge_into(first_pairs, second_pairs, output),
+            |output| {
+                first_pairs
+                    .merge(second_pairs)
+                    .write_into(output.reborrow(), &exec)
+            },
         )?;
         let (_, merged_pair_values) = merged_pairs.into_parts();
         assert!(
@@ -180,7 +191,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         let pair_sort_source_values = DeviceBuffer::from_host(&stream, &sort_input_host)?;
         let mut pair_sort_keys = DeviceBuffer::from_host(&stream, &sort_input_host)?;
         let mut pair_sort_values = DeviceBuffer::from_host(&stream, &sort_input_host)?;
-        let mut pair_sort = pair_sort_keys.with_values_mut(&mut pair_sort_values)?;
+        let mut pair_sort = pair_sort_keys
+            .view_mut()
+            .with_values(pair_sort_values.view_mut())?;
         let pair_sort_timing = timed(
             &stream,
             3,

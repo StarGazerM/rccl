@@ -28,6 +28,8 @@ struct Timing {
     end_to_end_ms: f64,
 }
 
+type SplitBuffers<K> = (DeviceBuffer<K>, DeviceBuffer<K>, usize);
+
 fn timed(
     stream: &CudaStream,
     iterations: usize,
@@ -110,7 +112,7 @@ fn sorted_inputs<K: BenchKey>(
     count: usize,
     ratio: usize,
     entropy: &str,
-) -> Result<(DeviceBuffer<K>, DeviceBuffer<K>, usize), Box<dyn Error>> {
+) -> Result<SplitBuffers<K>, Box<dyn Error>> {
     let first_count = count
         .checked_mul(ratio)
         .ok_or("SizeRatio multiplication overflowed")?
@@ -169,16 +171,28 @@ where
     let (first, second, _) = sorted_inputs::<K>(stream, count, ratio, entropy)?;
     let mut output = DeviceBuffer::<K>::zeroed(stream, count)?;
     let (union, _) = timed(stream, iterations, || {
-        execution.union_into(&first, &second, &mut output)
+        first
+            .view()
+            .union(second.view())
+            .write_into(output.view_mut(), execution)
     })?;
     let (intersection, _) = timed(stream, iterations, || {
-        execution.intersection_into(&first, &second, &mut output)
+        first
+            .view()
+            .intersection(second.view())
+            .write_into(output.view_mut(), execution)
     })?;
     let (difference, _) = timed(stream, iterations, || {
-        execution.difference_into(&first, &second, &mut output)
+        first
+            .view()
+            .difference(second.view())
+            .write_into(output.view_mut(), execution)
     })?;
     let (symmetric, _) = timed(stream, iterations, || {
-        execution.symmetric_difference_into(&first, &second, &mut output)
+        first
+            .view()
+            .symmetric_difference(second.view())
+            .write_into(output.view_mut(), execution)
     })?;
     print_timings(
         "keys",
@@ -213,22 +227,30 @@ where
     let second_count = count - first_count;
     let first_values = DeviceBuffer::<V>::zeroed(stream, first_count)?;
     let second_values = DeviceBuffer::<V>::zeroed(stream, second_count)?;
-    let first = first_keys.with_values(&first_values)?;
-    let second = second_keys.with_values(&second_values)?;
+    let first = first_keys.view().with_values(first_values.view())?;
+    let second = second_keys.view().with_values(second_values.view())?;
     let mut output_keys = DeviceBuffer::<K>::zeroed(stream, count)?;
     let mut output_values = DeviceBuffer::<V>::zeroed(stream, count)?;
-    let mut output = output_keys.with_values_mut(&mut output_values)?;
+    let mut output = output_keys
+        .view_mut()
+        .with_values(output_values.view_mut())?;
     let (union, _) = timed(stream, iterations, || {
-        execution.union_into(first, second, &mut output)
+        first.union(second).write_into(output.reborrow(), execution)
     })?;
     let (intersection, _) = timed(stream, iterations, || {
-        execution.intersection_into(first, &second_keys, &mut output)
+        first
+            .intersection(second_keys.view())
+            .write_into(output.reborrow(), execution)
     })?;
     let (difference, _) = timed(stream, iterations, || {
-        execution.difference_into(first, second, &mut output)
+        first
+            .difference(second)
+            .write_into(output.reborrow(), execution)
     })?;
     let (symmetric, _) = timed(stream, iterations, || {
-        execution.symmetric_difference_into(first, second, &mut output)
+        first
+            .symmetric_difference(second)
+            .write_into(output.reborrow(), execution)
     })?;
     print_timings(
         "pairs",

@@ -14,18 +14,21 @@ fn main() -> Result<(), Box<dyn Error>> {
     let first = DeviceBuffer::from_host(&stream, &[0_i32, 2, 4])?;
     let second = DeviceBuffer::from_host(&stream, &[0_i32, 3, 3, 4])?;
     let mut merged = DeviceBuffer::<i32>::zeroed(&stream, 7)?;
-    exec.merge_into(&first, &second, &mut merged)?;
+    first
+        .view()
+        .merge(second.view())
+        .write_into(merged.view_mut(), &exec)?;
     assert_eq!(merged.to_host_vec(&stream)?, [0, 0, 2, 3, 3, 4, 4]);
 
     let descending_first = DeviceBuffer::from_host(&stream, &[9_i32, 7, 3, 1])?;
     let descending_second = DeviceBuffer::from_host(&stream, &[8_i32, 7, 2, 0])?;
     let mut descending_output = DeviceBuffer::<i32>::zeroed(&stream, 8)?;
-    exec.merge_by_into(
-        &descending_first,
-        &descending_second,
-        &mut descending_output,
-        |left: &i32, right: &i32| right.cmp(left),
-    )?;
+    descending_first
+        .view()
+        .merge_by(descending_second.view(), |left: &i32, right: &i32| {
+            right.cmp(left)
+        })
+        .write_into(descending_output.view_mut(), &exec)?;
     assert_eq!(
         descending_output.to_host_vec(&stream)?,
         [9, 8, 7, 7, 3, 2, 1, 0]
@@ -35,12 +38,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     let second_values = DeviceBuffer::from_host(&stream, &[42_i32, 42, 7, 13])?;
     let mut output_keys = DeviceBuffer::<i32>::zeroed(&stream, 7)?;
     let mut output_values = DeviceBuffer::<i32>::zeroed(&stream, 7)?;
-    let mut output = output_keys.with_values_mut(&mut output_values)?;
-    exec.merge_into(
-        first.with_values(&first_values)?,
-        second.with_values(&second_values)?,
-        &mut output,
-    )?;
+    first
+        .view()
+        .with_values(first_values.view())?
+        .merge(second.view().with_values(second_values.view())?)
+        .write_into(
+            output_keys
+                .view_mut()
+                .with_values(output_values.view_mut())?,
+            &exec,
+        )?;
     assert_eq!(output_keys.to_host_vec(&stream)?, [0, 0, 2, 3, 3, 4, 4]);
     assert_eq!(
         output_values.to_host_vec(&stream)?,
@@ -51,14 +58,21 @@ fn main() -> Result<(), Box<dyn Error>> {
     let descending_second_values = DeviceBuffer::from_host(&stream, &[80_i32, 71, 20, 0])?;
     let mut descending_output_keys = DeviceBuffer::<i32>::zeroed(&stream, 8)?;
     let mut descending_output_values = DeviceBuffer::<i32>::zeroed(&stream, 8)?;
-    let mut descending_output =
-        descending_output_keys.with_values_mut(&mut descending_output_values)?;
-    exec.merge_by_into(
-        descending_first.with_values(&descending_first_values)?,
-        descending_second.with_values(&descending_second_values)?,
-        &mut descending_output,
-        |left: &i32, right: &i32| right.cmp(left),
-    )?;
+    descending_first
+        .view()
+        .with_values(descending_first_values.view())?
+        .merge_by(
+            descending_second
+                .view()
+                .with_values(descending_second_values.view())?,
+            |left: &i32, right: &i32| right.cmp(left),
+        )
+        .write_into(
+            descending_output_keys
+                .view_mut()
+                .with_values(descending_output_values.view_mut())?,
+            &exec,
+        )?;
     assert_eq!(
         descending_output_keys.to_host_vec(&stream)?,
         [9, 8, 7, 7, 3, 2, 1, 0]

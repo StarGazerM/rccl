@@ -46,6 +46,12 @@ fn set_kernels_for_index(
                 Op: ::rccl_cub::__private::SerialSetOperation,
             {
                 let shared = ::rccl_cub::__private::BlockSharedMemory::new(SHARED_BYTES);
+                let state = ::rccl_cub::__private::SetAgentState::new(
+                    partitions,
+                    tile_state,
+                    output_count,
+                    shared,
+                );
                 ::rccl_cub::__private::set_keys_agent::<
                     K,
                     #index,
@@ -57,12 +63,9 @@ fn set_kernels_for_index(
                 >(
                     first,
                     second,
-                    partitions,
                     order,
-                    tile_state,
-                    output_count,
+                    state,
                     output,
-                    shared,
                 );
             }
 
@@ -95,6 +98,12 @@ fn set_kernels_for_index(
                     thread::blockIdx_x(),
                     SHARED_BYTES,
                 );
+                let state = ::rccl_cub::__private::SetAgentState::new(
+                    partitions,
+                    tile_state,
+                    output_count,
+                    shared,
+                );
                 ::rccl_cub::__private::set_keys_agent::<
                     K,
                     #index,
@@ -106,12 +115,9 @@ fn set_kernels_for_index(
                 >(
                     first,
                     second,
-                    partitions,
                     order,
-                    tile_state,
-                    output_count,
+                    state,
                     output,
-                    shared,
                 );
             }
 
@@ -144,6 +150,12 @@ fn set_kernels_for_index(
                 Op: ::rccl_cub::__private::SerialSetOperation,
             {
                 let shared = ::rccl_cub::__private::BlockSharedMemory::new(SHARED_BYTES);
+                let state = ::rccl_cub::__private::SetAgentState::new(
+                    partitions,
+                    tile_state,
+                    output_count,
+                    shared,
+                );
                 ::rccl_cub::__private::set_keys_discard_agent::<
                     K,
                     #index,
@@ -155,11 +167,8 @@ fn set_kernels_for_index(
                 >(
                     first,
                     second,
-                    partitions,
                     order,
-                    tile_state,
-                    output_count,
-                    shared,
+                    state,
                 );
             }
 
@@ -191,6 +200,12 @@ fn set_kernels_for_index(
                     thread::blockIdx_x(),
                     SHARED_BYTES,
                 );
+                let state = ::rccl_cub::__private::SetAgentState::new(
+                    partitions,
+                    tile_state,
+                    output_count,
+                    shared,
+                );
                 ::rccl_cub::__private::set_keys_discard_agent::<
                     K,
                     #index,
@@ -202,11 +217,8 @@ fn set_kernels_for_index(
                 >(
                     first,
                     second,
-                    partitions,
                     order,
-                    tile_state,
-                    output_count,
-                    shared,
+                    state,
                 );
             }
 
@@ -253,10 +265,16 @@ fn set_kernels_for_index(
                 let second = ::rccl_cub::__private::ArithmeticSetRange::new(
                     second_start.get(), second_step.get(), second_len.get(),
                 );
+                let state = ::rccl_cub::__private::SetAgentState::new(
+                    partitions,
+                    tile_state,
+                    output_count,
+                    shared,
+                );
                 ::rccl_cub::__private::set_arithmetic_keys_agent::<
                     K, #index, F, Op, #threads, ITEMS, SM70,
                 >(
-                    first, second, partitions, order, tile_state, output_count, output, shared,
+                    first, second, order, state, output,
                 );
             }
 
@@ -300,10 +318,16 @@ fn set_kernels_for_index(
                 let second = ::rccl_cub::__private::ArithmeticSetRange::new(
                     second_start.get(), second_step.get(), second_len.get(),
                 );
+                let state = ::rccl_cub::__private::SetAgentState::new(
+                    partitions,
+                    tile_state,
+                    output_count,
+                    shared,
+                );
                 ::rccl_cub::__private::set_arithmetic_keys_agent::<
                     K, #index, F, Op, #threads, ITEMS, SM70,
                 >(
-                    first, second, partitions, order, tile_state, output_count, output, shared,
+                    first, second, order, state, output,
                 );
             }
 
@@ -342,6 +366,16 @@ fn set_kernels_for_index(
                 Op: ::rccl_cub::__private::SerialSetOperation,
             {
                 let shared = ::rccl_cub::__private::BlockSharedMemory::new(SHARED_BYTES);
+                let state = ::rccl_cub::__private::SetAgentState::new(
+                    partitions,
+                    tile_state,
+                    output_count,
+                    shared,
+                );
+                let output = ::rccl_cub::__private::SetPairOutput::new(
+                    output_keys,
+                    output_values,
+                );
                 ::rccl_cub::__private::set_pairs_agent::<
                     K,
                     V,
@@ -356,13 +390,9 @@ fn set_kernels_for_index(
                     second_keys,
                     first_values,
                     second_values,
-                    partitions,
                     order,
-                    tile_state,
-                    output_count,
-                    output_keys,
-                    output_values,
-                    shared,
+                    state,
+                    output,
                 );
             }
 
@@ -400,6 +430,16 @@ fn set_kernels_for_index(
                     thread::blockIdx_x(),
                     SHARED_BYTES,
                 );
+                let state = ::rccl_cub::__private::SetAgentState::new(
+                    partitions,
+                    tile_state,
+                    output_count,
+                    shared,
+                );
+                let output = ::rccl_cub::__private::SetPairOutput::new(
+                    output_keys,
+                    output_values,
+                );
                 ::rccl_cub::__private::set_pairs_agent::<
                     K,
                     V,
@@ -414,13 +454,9 @@ fn set_kernels_for_index(
                     second_keys,
                     first_values,
                     second_values,
-                    partitions,
                     order,
-                    tile_state,
-                    output_count,
-                    output_keys,
-                    output_values,
-                    shared,
+                    state,
+                    output,
                 );
             }
         }
@@ -649,10 +685,10 @@ pub(super) fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macr
 
         #[::rccl_cub::__private::cuda_device::cuda_module]
         #[doc(hidden)]
-        // Device entry points preserve the pinned CUB agent ABI. Grouping
-        // unrelated launch operands into a host-style options struct would
-        // change that ABI and obscure which values are uniform kernel inputs.
-        #[allow(clippy::too_many_arguments)]
+        #[expect(
+            clippy::too_many_arguments,
+            reason = "CUDA entry points preserve the pinned CUB launch ABI as separate uniform parameters"
+        )]
         mod #module {
             use ::rccl_cub::__private::cuda_device::{
                 DisjointSlice, LinearTiles, Uniform, kernel, launch_bounds, launch_contract, thread,

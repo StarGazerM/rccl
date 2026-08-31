@@ -12,6 +12,16 @@ if [[ "$(git -C "$cccl_root" rev-parse HEAD)" != "$cccl_revision" ]]; then
   exit 1
 fi
 
+foreign_compute="$(
+  nvidia-smi --query-compute-apps=pid,process_name --format=csv,noheader,nounits 2>/dev/null \
+    | sed '/^[[:space:]]*$/d' || true
+)"
+if [[ -n "$foreign_compute" ]]; then
+  printf '%s\n' 'ordering performance parity requires an exclusive GPU; active compute processes:' >&2
+  printf '%s\n' "$foreign_compute" >&2
+  exit 1
+fi
+
 build_dir="$(mktemp -d "${TMPDIR:-/tmp}/rccl-ordering-parity.XXXXXX")"
 cleanup() {
   rm -rf -- "$build_dir"

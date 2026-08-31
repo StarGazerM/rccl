@@ -55,7 +55,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         &[0_i32, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
     )?;
     upstream_pair_keys
-        .with_values_mut(&mut upstream_pair_values)?
+        .view_mut()
+        .with_values(upstream_pair_values.view_mut())?
         .sort_unstable(&exec)?;
     assert_eq!(
         upstream_pair_keys.to_host_vec(&stream)?,
@@ -74,7 +75,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         &[0_i32, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
     )?;
     upstream_pair_keys_descending
-        .with_values_mut(&mut upstream_pair_values_descending)?
+        .view_mut()
+        .with_values(upstream_pair_values_descending.view_mut())?
         .sort_unstable_by(&exec, |left: &i32, right: &i32| right.cmp(left))?;
     assert_eq!(
         upstream_pair_keys_descending.to_host_vec(&stream)?,
@@ -117,14 +119,18 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut pair_keys = DeviceBuffer::from_host(&stream, &[1_i32, 3, 6, 5, 2, 0, 4])?;
     let mut pair_values = DeviceBuffer::from_host(&stream, &[0_i32, 1, 2, 3, 4, 5, 6])?;
-    pair_keys.with_values_mut(&mut pair_values)?.sort(&exec)?;
+    pair_keys
+        .view_mut()
+        .with_values(pair_values.view_mut())?
+        .sort(&exec)?;
     assert_eq!(pair_keys.to_host_vec(&stream)?, [0, 1, 2, 3, 4, 5, 6]);
     assert_eq!(pair_values.to_host_vec(&stream)?, [5, 0, 4, 1, 6, 3, 2]);
 
     let mut descending_keys = DeviceBuffer::from_host(&stream, &[1_i32, 3, 6, 5, 2, 0, 4])?;
     let mut descending_values = DeviceBuffer::from_host(&stream, &[0_i32, 1, 2, 3, 4, 5, 6])?;
     descending_keys
-        .with_values_mut(&mut descending_values)?
+        .view_mut()
+        .with_values(descending_values.view_mut())?
         .sort_unstable_by(&exec, |left: &i32, right: &i32| right.cmp(left))?;
     assert_eq!(descending_keys.to_host_vec(&stream)?, [6, 5, 4, 3, 2, 1, 0]);
     assert_eq!(
@@ -135,7 +141,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut unstable_keys = DeviceBuffer::from_host(&stream, &[1_i32, 3, 6, 5, 2, 0, 4])?;
     let mut unstable_values = DeviceBuffer::from_host(&stream, &[0_i32, 1, 2, 3, 4, 5, 6])?;
     unstable_keys
-        .with_values_mut(&mut unstable_values)?
+        .view_mut()
+        .with_values(unstable_values.view_mut())?
         .sort_unstable(&exec)?;
     assert_eq!(unstable_keys.to_host_vec(&stream)?, [0, 1, 2, 3, 4, 5, 6]);
     assert_eq!(unstable_values.to_host_vec(&stream)?, [5, 0, 4, 1, 6, 3, 2]);
@@ -143,7 +150,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut stable_keys = DeviceBuffer::from_host(&stream, &stable_input)?;
     let mut stable_values = DeviceBuffer::from_host(&stream, &[0_i32, 1, 2, 3, 4, 5, 6, 7, 8])?;
     stable_keys
-        .with_values_mut(&mut stable_values)?
+        .view_mut()
+        .with_values(stable_values.view_mut())?
         .sort_by(&exec, |left: &i32, right: &i32| {
             (left / 10).cmp(&(right / 10))
         })?;
@@ -161,7 +169,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         &[1.25_f32, -0.0, f32::INFINITY, -3.5, 0.0, f32::NEG_INFINITY],
     )?;
     let mut float_values = DeviceBuffer::from_host(&stream, &[4_i32, 2, 5, 1, 3, 0])?;
-    float_keys.with_values_mut(&mut float_values)?.sort(&exec)?;
+    float_keys
+        .view_mut()
+        .with_values(float_values.view_mut())?
+        .sort(&exec)?;
     assert_eq!(
         float_keys
             .to_host_vec(&stream)?

@@ -82,7 +82,7 @@ architecture token rather than ignoring it.
 |---|---|---|
 | `thrust::cuda::par.on(stream)` | `let exec = thrust.par(&stream)?` | the typed `Program` owns the cuda-oxide program artifact; the execution value contains only runtime stream/allocation state |
 | `thrust::sort(policy, first, last, comp)` | `range.sort_by(&exec, closure)` | one mutable device range replaces the iterator pair; inference replaces explicit template/type arguments; a Rust closure replaces the comparator object |
-| `thrust::merge(policy, first1, last1, first2, last2, result, comp)` | `exec.merge_by_into(&first, &second, &mut output, closure)` | range lengths and output exclusivity come from borrows |
+| `thrust::merge(policy, first1, last1, first2, last2, result, comp)` | `first.view().merge_by(second.view(), closure).write_into(output.view_mut(), &exec)` | one expression retains both input borrows and the output is exclusively borrowed only by the terminal operation |
 | CUB query/execute with one `d_temp_storage` and `temp_storage_bytes` pair | one `device_*_workspace!` construction followed by `device_*!(..., &mut workspace, ...)` | a typed opaque owner replaces the byte pointer/size pair; internal scratch and agent state are private |
 | CUB stream/environment operand | `let launch = cub.on(&stream)?`, then `&launch` | the stream binding is reusable runtime state; no invented CUB execution policy, module argument, or architecture token |
 | CUB block/warp primitive inside a user `__global__` kernel | `#[rccl_cub::program] mod kernels { #[kernel] fn ... { warp_reduce!(...) } }`, then one `kernels::program!(&context)` bind | cuda-oxide requires an explicit Rust program boundary; the paired item/expression macros prove artifact provenance and keep its unsafe loader out of user code |
@@ -93,6 +93,21 @@ neither the benchmarked operation nor its comparator receives a module.
 
 ## Result masking review
 
+- The public API pass removes independent execution-receiver operands for
+  merge and set operations. `DeviceView<'a, T>` retains each shared input
+  borrow, `DeviceViewMut<'a, T>` carries the exclusive output borrow, and the
+  terminal `write_into` remains synchronous. Compile-fail documentation proves
+  that a view cannot escape its allocation and that two mutable views cannot
+  alias. The aggregate source gate rejects the former `exec.merge_*`,
+  `exec.{union,intersection,difference,symmetric_difference}_*`, and
+  `with_values_mut` call shapes in public examples.
+- A checkpoint build and the rewritten build of the same SM89 set/merge
+  program produced the same normalized PTX instruction multiset
+  (`a588d48d9f459bcb8375a6250792384009afd672874d228373662c57dab638c7`).
+  Rust symbol names and function ordering changed with the host API, but
+  device instructions did not. This supplements, rather than replaces, the
+  result and sanitizer gates; throughput remains unclaimed while a foreign
+  GPU process prevents exclusive measurement.
 - `rccl-cub/examples/device_ordering_probe.rs` uses cuda-oxide GPU launches
   and checks complete outputs. It contains the exact `MergeKeys` and
   `MergePairs` example input/output from pinned CCCL.
@@ -216,9 +231,10 @@ select the entry; neither a runtime type registry nor a maximum-sized fallback
 exists. Histogram and exclusive-sum storage are likewise static at 4,096 or
 8,192 bytes and 2,336 bytes. The operation macros end `DoubleBuffer` borrows
 with lexical scopes; a forced `drop` on a non-`Drop` carrier is
-source-rejected. Generated CUDA entry points carry only the exact
-`clippy::too_many_arguments` ABI annotation; source checks reject broader lint
-suppression such as `clippy::all`.
+source-rejected. Generated CUDA entry points carry only a checked
+`clippy::too_many_arguments` expectation with the pinned launch ABI as its
+reason; ordinary Rust helpers are not hidden by that expectation. Source
+checks reject broader lint suppression such as `clippy::all`.
 
 Two further code-shape experiments were measured and removed: constructing
 the register key array with `core::array::from_fn`, and narrowing the uniform

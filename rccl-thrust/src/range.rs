@@ -60,6 +60,134 @@ pub fn indexed_output<F, T>(len: usize, write: F) -> IndexedOutput<F, T> {
     IndexedOutput::new(len, write)
 }
 
+/// A shared borrow of one complete device buffer.
+///
+/// This is the device counterpart of a slice iterator's borrowed source: it
+/// may be copied and composed freely, but it cannot outlive the allocation it
+/// reads.  Algorithms consume the view expression rather than accepting an
+/// unrelated pair of cursors.
+///
+/// ```compile_fail
+/// use cuda_core::{DeviceBuffer, DeviceCopy};
+/// use rccl_thrust::{DeviceBufferExt, DeviceView};
+///
+/// fn escape<T: DeviceCopy>(buffer: &DeviceBuffer<T>) -> DeviceView<'static, T> {
+///     buffer.view()
+/// }
+/// ```
+#[derive(Clone, Copy)]
+pub struct DeviceView<'a, T: DeviceCopy> {
+    buffer: &'a DeviceBuffer<T>,
+}
+
+impl<'a, T: DeviceCopy> DeviceView<'a, T> {
+    fn new(buffer: &'a DeviceBuffer<T>) -> Self {
+        Self { buffer }
+    }
+
+    pub(crate) fn into_buffer(self) -> &'a DeviceBuffer<T> {
+        self.buffer
+    }
+
+    /// Combine two equally-sized borrowed buffers as one structure-of-arrays
+    /// sequence.
+    pub fn with_values<V: DeviceCopy>(
+        self,
+        values: DeviceView<'a, V>,
+    ) -> Result<KeyValueRange<'a, T, V>, RangeError> {
+        KeyValueRange::new(self, values)
+    }
+}
+
+impl<T: DeviceCopy> DeviceRange for DeviceView<'_, T> {
+    fn len(&self) -> usize {
+        self.buffer.len()
+    }
+}
+
+impl<T: DeviceCopy> ReadRange for DeviceView<'_, T> {
+    type Item = T;
+}
+
+impl<T: DeviceCopy> RandomAccessRange for DeviceView<'_, T> {}
+impl<T: DeviceCopy> ContiguousRange for DeviceView<'_, T> {}
+
+/// An exclusive borrow of one complete device buffer.
+///
+/// Unlike a C++ output iterator this value is affine: moving it transfers the
+/// exclusive borrow, and no second writer can be constructed while it lives.
+///
+/// ```compile_fail
+/// use cuda_core::{DeviceBuffer, DeviceCopy};
+/// use rccl_thrust::DeviceBufferExt;
+///
+/// fn alias<T: DeviceCopy>(buffer: &mut DeviceBuffer<T>) {
+///     let first = buffer.view_mut();
+///     let second = buffer.view_mut();
+///     drop((first, second));
+/// }
+/// ```
+pub struct DeviceViewMut<'a, T: DeviceCopy> {
+    buffer: &'a mut DeviceBuffer<T>,
+}
+
+impl<'a, T: DeviceCopy> DeviceViewMut<'a, T> {
+    fn new(buffer: &'a mut DeviceBuffer<T>) -> Self {
+        Self { buffer }
+    }
+
+    pub fn as_view(&self) -> DeviceView<'_, T> {
+        DeviceView::new(self.buffer)
+    }
+
+    pub(crate) fn into_buffer(self) -> &'a mut DeviceBuffer<T> {
+        self.buffer
+    }
+
+    /// Combine two equally-sized exclusive borrows as one writable
+    /// structure-of-arrays sequence.
+    pub fn with_values<V: DeviceCopy>(
+        self,
+        values: DeviceViewMut<'a, V>,
+    ) -> Result<KeyValueRangeMut<'a, T, V>, RangeError> {
+        KeyValueRangeMut::new(self, values)
+    }
+}
+
+impl<T: DeviceCopy> DeviceRange for DeviceViewMut<'_, T> {
+    fn len(&self) -> usize {
+        self.buffer.len()
+    }
+}
+
+impl<T: DeviceCopy> ReadRange for DeviceViewMut<'_, T> {
+    type Item = T;
+}
+
+impl<T: DeviceCopy> WriteRange for DeviceViewMut<'_, T> {
+    type Item = T;
+}
+
+impl<T: DeviceCopy> RandomAccessRange for DeviceViewMut<'_, T> {}
+impl<T: DeviceCopy> ContiguousRange for DeviceViewMut<'_, T> {}
+
+/// Borrowing entry points for device-sequence composition.
+pub trait DeviceBufferExt<T: DeviceCopy> {
+    fn view(&self) -> DeviceView<'_, T>;
+
+    fn view_mut(&mut self) -> DeviceViewMut<'_, T>;
+}
+
+impl<T: DeviceCopy> DeviceBufferExt<T> for DeviceBuffer<T> {
+    fn view(&self) -> DeviceView<'_, T> {
+        DeviceView::new(self)
+    }
+
+    fn view_mut(&mut self) -> DeviceViewMut<'_, T> {
+        DeviceViewMut::new(self)
+    }
+}
+
 /// A finite constant device-range expression.
 #[derive(Clone, Copy, Debug)]
 pub struct RepeatN<T> {
@@ -162,7 +290,9 @@ pub struct KeyValueRange<'a, K: DeviceCopy, V: DeviceCopy> {
 }
 
 impl<'a, K: DeviceCopy, V: DeviceCopy> KeyValueRange<'a, K, V> {
-    pub fn new(keys: &'a DeviceBuffer<K>, values: &'a DeviceBuffer<V>) -> Result<Self, RangeError> {
+    pub fn new(keys: DeviceView<'a, K>, values: DeviceView<'a, V>) -> Result<Self, RangeError> {
+        let keys = keys.into_buffer();
+        let values = values.into_buffer();
         if keys.len() != values.len() {
             return Err(RangeError::LengthMismatch {
                 first: keys.len(),
@@ -201,9 +331,11 @@ pub struct KeyValueRangeMut<'a, K: DeviceCopy, V: DeviceCopy> {
 
 impl<'a, K: DeviceCopy, V: DeviceCopy> KeyValueRangeMut<'a, K, V> {
     pub fn new(
-        keys: &'a mut DeviceBuffer<K>,
-        values: &'a mut DeviceBuffer<V>,
+        keys: DeviceViewMut<'a, K>,
+        values: DeviceViewMut<'a, V>,
     ) -> Result<Self, RangeError> {
+        let keys = keys.into_buffer();
+        let values = values.into_buffer();
         if keys.len() != values.len() {
             return Err(RangeError::LengthMismatch {
                 first: keys.len(),
@@ -215,6 +347,14 @@ impl<'a, K: DeviceCopy, V: DeviceCopy> KeyValueRangeMut<'a, K, V> {
 
     pub fn parts_mut(&mut self) -> (&mut DeviceBuffer<K>, &mut DeviceBuffer<V>) {
         (&mut *self.keys, &mut *self.values)
+    }
+
+    /// Create a shorter exclusive view for one synchronous operation.
+    pub fn reborrow(&mut self) -> KeyValueRangeMut<'_, K, V> {
+        KeyValueRangeMut {
+            keys: &mut *self.keys,
+            values: &mut *self.values,
+        }
     }
 
     pub fn into_parts(self) -> (&'a mut DeviceBuffer<K>, &'a mut DeviceBuffer<V>) {
@@ -711,35 +851,6 @@ pub trait DeviceRangeExt: DeviceRange + Sized {
 }
 
 impl<R: DeviceRange> DeviceRangeExt for R {}
-
-/// Safe construction of structure-of-arrays key/value ranges.
-pub trait DeviceKeyValueExt<K: DeviceCopy> {
-    fn with_values<'a, V: DeviceCopy>(
-        &'a self,
-        values: &'a DeviceBuffer<V>,
-    ) -> Result<KeyValueRange<'a, K, V>, RangeError>;
-
-    fn with_values_mut<'a, V: DeviceCopy>(
-        &'a mut self,
-        values: &'a mut DeviceBuffer<V>,
-    ) -> Result<KeyValueRangeMut<'a, K, V>, RangeError>;
-}
-
-impl<K: DeviceCopy> DeviceKeyValueExt<K> for DeviceBuffer<K> {
-    fn with_values<'a, V: DeviceCopy>(
-        &'a self,
-        values: &'a DeviceBuffer<V>,
-    ) -> Result<KeyValueRange<'a, K, V>, RangeError> {
-        KeyValueRange::new(self, values)
-    }
-
-    fn with_values_mut<'a, V: DeviceCopy>(
-        &'a mut self,
-        values: &'a mut DeviceBuffer<V>,
-    ) -> Result<KeyValueRangeMut<'a, K, V>, RangeError> {
-        KeyValueRangeMut::new(self, values)
-    }
-}
 
 #[cfg(test)]
 mod tests {

@@ -30,12 +30,13 @@ use rccl_thrust::prelude::*;
 keys.sort_unstable(&exec)?;
 keys.sort_by(&exec, |left, right| right.cmp(left))?;
 
-keys.with_values_mut(&mut values)?
+keys.view_mut().with_values(values.view_mut())?
     .sort_by(&exec, |left, right| left.cmp(right))?;
 
-exec.merge_by_into(&first, &second, &mut output, |left, right| {
-    left.cmp(right)
-})?;
+first
+    .view()
+    .merge_by(second.view(), |left, right| left.cmp(right))
+    .write_into(output.view_mut(), &exec)?;
 
 let aggregate = rccl_cub::warp_reduce!(::<i32, 32>(
     thread_value,
@@ -45,8 +46,9 @@ let aggregate = rccl_cub::warp_reduce!(::<i32, 32>(
 
 Rust expressions, closures, paths, and borrows remain Rust syntax. The macros
 do not introduce a C++ iterator-pair facade or comparator object hierarchy.
-Key/value shape is expressed by `with_values_mut`, not a C++-derived suffix.
-`sort_by` and `merge_by_into` accept an ordinary Rust ordering closure.
+Key/value shape is expressed by composing borrowed views with `with_values`,
+not a C++-derived suffix. `sort_by` and `merge_by` accept an ordinary Rust
+ordering closure.
 
 ## The three semantic layers
 

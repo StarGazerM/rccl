@@ -1,139 +1,192 @@
 use core::cmp::Ordering;
 
-use cuda_core::DeviceBuffer;
+use cuda_core::DeviceCopy;
 use rccl_memory::{DeviceAllocator, TemporaryValue};
 
 use crate::{
     DeviceAlgorithmError,
     backend::{MergeBackend, MergePairsBackend},
     cuda::Execution,
-    range::{KeyValueRange, KeyValueRangeMut},
+    range::{DeviceView, DeviceViewMut, KeyValueRange, KeyValueRangeMut},
 };
 
-/// Merge two symmetric sorted inputs into a distinct output range.
+/// A lazy merge of two sorted device sequences.
 ///
-/// The execution environment is the receiver because neither input is the
-/// natural owner of a merge operation.
-pub trait DeviceMergeExt<First, Second, Output> {
-    type Key;
-
-    fn merge_into(
-        &self,
-        first: First,
-        second: Second,
-        output: Output,
-    ) -> Result<(), DeviceAlgorithmError>
-    where
-        Self::Key: PartialOrd;
-
-    fn merge_by_into<F>(
-        &self,
-        first: First,
-        second: Second,
-        output: Output,
-        order: F,
-    ) -> Result<(), DeviceAlgorithmError>
-    where
-        F: Fn(&Self::Key, &Self::Key) -> Ordering + Copy;
+/// The expression owns both borrowed views, so the inputs cannot disappear
+/// between composition and execution. No CUDA work occurs until `write_into`.
+pub struct Merge<First, Second> {
+    first: First,
+    second: Second,
 }
 
-impl<'a, 'b, 'c, K, A, M>
-    DeviceMergeExt<&'a DeviceBuffer<K>, &'b DeviceBuffer<K>, &'c mut DeviceBuffer<K>>
-    for Execution<'_, '_, A, M>
-where
-    K: TemporaryValue,
-    A: DeviceAllocator,
-    M: MergeBackend<K>,
-{
-    type Key = K;
+/// A lazy merge carrying a Rust ordering closure.
+pub struct MergeBy<First, Second, F> {
+    first: First,
+    second: Second,
+    order: F,
+}
 
-    fn merge_into(
-        &self,
-        first: &'a DeviceBuffer<K>,
-        second: &'b DeviceBuffer<K>,
-        output: &'c mut DeviceBuffer<K>,
-    ) -> Result<(), DeviceAlgorithmError>
-    where
-        K: PartialOrd,
-    {
-        merge_by(self, first, second, output, |left, right| {
-            if left < right {
-                Ordering::Less
-            } else if right < left {
-                Ordering::Greater
-            } else {
-                Ordering::Equal
-            }
-        })
+impl<'a, K: DeviceCopy> DeviceView<'a, K> {
+    /// Compose a naturally ordered merge with another borrowed sequence.
+    pub fn merge<'b>(self, second: DeviceView<'b, K>) -> Merge<Self, DeviceView<'b, K>> {
+        Merge {
+            first: self,
+            second,
+        }
     }
 
-    fn merge_by_into<F>(
-        &self,
-        first: &'a DeviceBuffer<K>,
-        second: &'b DeviceBuffer<K>,
-        output: &'c mut DeviceBuffer<K>,
+    /// Compose a merge whose ordering is selected by a Rust closure.
+    pub fn merge_by<'b, F>(
+        self,
+        second: DeviceView<'b, K>,
         order: F,
-    ) -> Result<(), DeviceAlgorithmError>
+    ) -> MergeBy<Self, DeviceView<'b, K>, F>
     where
         F: Fn(&K, &K) -> Ordering + Copy,
     {
-        merge_by(self, first, second, output, order)
+        MergeBy {
+            first: self,
+            second,
+            order,
+        }
     }
 }
 
-impl<'a, 'b, 'view, 'borrow, K, V, A, M>
-    DeviceMergeExt<
-        KeyValueRange<'a, K, V>,
-        KeyValueRange<'b, K, V>,
-        &'borrow mut KeyValueRangeMut<'view, K, V>,
-    > for Execution<'_, '_, A, M>
+impl<'a, K: DeviceCopy, V: DeviceCopy> KeyValueRange<'a, K, V> {
+    /// Compose a naturally ordered structure-of-arrays merge.
+    pub fn merge<'b>(
+        self,
+        second: KeyValueRange<'b, K, V>,
+    ) -> Merge<Self, KeyValueRange<'b, K, V>> {
+        Merge {
+            first: self,
+            second,
+        }
+    }
+
+    /// Compose a structure-of-arrays merge with a key comparator.
+    pub fn merge_by<'b, F>(
+        self,
+        second: KeyValueRange<'b, K, V>,
+        order: F,
+    ) -> MergeBy<Self, KeyValueRange<'b, K, V>, F>
+    where
+        F: Fn(&K, &K) -> Ordering + Copy,
+    {
+        MergeBy {
+            first: self,
+            second,
+            order,
+        }
+    }
+}
+
+impl<'a, 'b, K> Merge<DeviceView<'a, K>, DeviceView<'b, K>>
+where
+    K: TemporaryValue + PartialOrd,
+{
+    pub fn write_into<A, M>(
+        self,
+        output: DeviceViewMut<'_, K>,
+        execution: &Execution<'_, '_, A, M>,
+    ) -> Result<(), DeviceAlgorithmError>
+    where
+        A: DeviceAllocator,
+        M: MergeBackend<K>,
+    {
+        execute_merge_by(
+            execution,
+            self.first.into_buffer(),
+            self.second.into_buffer(),
+            output.into_buffer(),
+            natural_order,
+        )
+    }
+}
+
+impl<'a, 'b, K, F> MergeBy<DeviceView<'a, K>, DeviceView<'b, K>, F>
+where
+    K: TemporaryValue,
+    F: Fn(&K, &K) -> Ordering + Copy,
+{
+    pub fn write_into<A, M>(
+        self,
+        output: DeviceViewMut<'_, K>,
+        execution: &Execution<'_, '_, A, M>,
+    ) -> Result<(), DeviceAlgorithmError>
+    where
+        A: DeviceAllocator,
+        M: MergeBackend<K>,
+    {
+        execute_merge_by(
+            execution,
+            self.first.into_buffer(),
+            self.second.into_buffer(),
+            output.into_buffer(),
+            self.order,
+        )
+    }
+}
+
+impl<'a, 'b, K, V> Merge<KeyValueRange<'a, K, V>, KeyValueRange<'b, K, V>>
+where
+    K: TemporaryValue + PartialOrd,
+    V: TemporaryValue,
+{
+    pub fn write_into<A, M>(
+        self,
+        mut output: KeyValueRangeMut<'_, K, V>,
+        execution: &Execution<'_, '_, A, M>,
+    ) -> Result<(), DeviceAlgorithmError>
+    where
+        A: DeviceAllocator,
+        M: MergePairsBackend<K, V>,
+    {
+        execute_merge_pairs_by(
+            execution,
+            self.first,
+            self.second,
+            &mut output,
+            natural_order,
+        )
+    }
+}
+
+impl<'a, 'b, K, V, F> MergeBy<KeyValueRange<'a, K, V>, KeyValueRange<'b, K, V>, F>
 where
     K: TemporaryValue,
     V: TemporaryValue,
-    A: DeviceAllocator,
-    M: MergePairsBackend<K, V>,
+    F: Fn(&K, &K) -> Ordering + Copy,
 {
-    type Key = K;
-
-    fn merge_into(
-        &self,
-        first: KeyValueRange<'a, K, V>,
-        second: KeyValueRange<'b, K, V>,
-        output: &'borrow mut KeyValueRangeMut<'view, K, V>,
+    pub fn write_into<A, M>(
+        self,
+        mut output: KeyValueRangeMut<'_, K, V>,
+        execution: &Execution<'_, '_, A, M>,
     ) -> Result<(), DeviceAlgorithmError>
     where
-        K: PartialOrd,
+        A: DeviceAllocator,
+        M: MergePairsBackend<K, V>,
     {
-        merge_pairs_by(self, first, second, output, |left, right| {
-            if left < right {
-                Ordering::Less
-            } else if right < left {
-                Ordering::Greater
-            } else {
-                Ordering::Equal
-            }
-        })
-    }
-
-    fn merge_by_into<F>(
-        &self,
-        first: KeyValueRange<'a, K, V>,
-        second: KeyValueRange<'b, K, V>,
-        output: &'borrow mut KeyValueRangeMut<'view, K, V>,
-        order: F,
-    ) -> Result<(), DeviceAlgorithmError>
-    where
-        F: Fn(&K, &K) -> Ordering + Copy,
-    {
-        merge_pairs_by(self, first, second, output, order)
+        execute_merge_pairs_by(execution, self.first, self.second, &mut output, self.order)
     }
 }
 
-fn merge_by<K, A, M, F>(
+#[inline]
+fn natural_order<K: PartialOrd>(left: &K, right: &K) -> Ordering {
+    if left < right {
+        Ordering::Less
+    } else if right < left {
+        Ordering::Greater
+    } else {
+        Ordering::Equal
+    }
+}
+
+fn execute_merge_by<K, A, M, F>(
     execution: &Execution<'_, '_, A, M>,
-    first: &DeviceBuffer<K>,
-    second: &DeviceBuffer<K>,
-    output: &mut DeviceBuffer<K>,
+    first: &cuda_core::DeviceBuffer<K>,
+    second: &cuda_core::DeviceBuffer<K>,
+    output: &mut cuda_core::DeviceBuffer<K>,
     order: F,
 ) -> Result<(), DeviceAlgorithmError>
 where
@@ -159,7 +212,7 @@ where
     execution.__synchronize(result)
 }
 
-fn merge_pairs_by<K, V, A, M, F>(
+fn execute_merge_pairs_by<K, V, A, M, F>(
     execution: &Execution<'_, '_, A, M>,
     first: KeyValueRange<'_, K, V>,
     second: KeyValueRange<'_, K, V>,
@@ -199,4 +252,23 @@ where
         order,
     );
     execution.__synchronize(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use cuda_core::DeviceBuffer;
+
+    use crate::DeviceBufferExt;
+
+    fn compose_without_launching<'a, 'b>(
+        first: &'a DeviceBuffer<i32>,
+        second: &'b DeviceBuffer<i32>,
+    ) -> super::Merge<crate::DeviceView<'a, i32>, crate::DeviceView<'b, i32>> {
+        first.view().merge(second.view())
+    }
+
+    #[test]
+    fn merge_composition_preserves_both_input_lifetimes() {
+        let _ = compose_without_launching;
+    }
 }
