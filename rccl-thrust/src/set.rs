@@ -435,8 +435,8 @@ macro_rules! define_key_set_expression {
             {
                 set_keys_by::<K, A, M, _, $operation>(
                     execution,
-                    self.first.into_buffer(),
-                    self.second.into_buffer(),
+                    self.first.__into_buffer(),
+                    self.second.__into_buffer(),
                     Some(output.into_buffer()),
                     natural_order,
                 )
@@ -453,8 +453,8 @@ macro_rules! define_key_set_expression {
             {
                 set_keys_by::<K, A, M, _, $operation>(
                     execution,
-                    self.first.into_buffer(),
-                    self.second.into_buffer(),
+                    self.first.__into_buffer(),
+                    self.second.__into_buffer(),
                     None,
                     natural_order,
                 )
@@ -477,8 +477,8 @@ macro_rules! define_key_set_expression {
             {
                 set_keys_by::<K, A, M, F, $operation>(
                     execution,
-                    self.first.into_buffer(),
-                    self.second.into_buffer(),
+                    self.first.__into_buffer(),
+                    self.second.__into_buffer(),
                     Some(output.into_buffer()),
                     self.order,
                 )
@@ -494,8 +494,8 @@ macro_rules! define_key_set_expression {
             {
                 set_keys_by::<K, A, M, F, $operation>(
                     execution,
-                    self.first.into_buffer(),
-                    self.second.into_buffer(),
+                    self.first.__into_buffer(),
+                    self.second.__into_buffer(),
                     None,
                     self.order,
                 )
@@ -907,7 +907,7 @@ where
     set_pairs_by::<K, V, A, M, F, CubSetIntersection>(
         execution,
         first,
-        (second.into_buffer(), first_values),
+        (second.__into_buffer(), first_values),
         output,
         order,
     )

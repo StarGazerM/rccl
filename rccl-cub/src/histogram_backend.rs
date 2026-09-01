@@ -103,6 +103,72 @@ pub trait HistogramRead<S>: Copy {
     fn sample_at(self, index: usize) -> Option<S>;
 }
 
+/// Signed or pointer-sized image-offset arithmetic selected by the histogram
+/// host dispatch.
+///
+/// The pinned CUB entry point instantiates its agent with `int` whenever the
+/// complete pitched image fits that domain, and retains the caller's wide
+/// offset type otherwise.  This trait is the Rust generic equivalent of that
+/// `OffsetT`; it is monomorphized into distinct kernels rather than erased or
+/// selected inside the device code.
+#[doc(hidden)]
+pub trait HistogramOffset:
+    Copy
+    + PartialOrd
+    + core::ops::Add<Output = Self>
+    + core::ops::Sub<Output = Self>
+    + core::ops::Mul<Output = Self>
+{
+    fn from_i32(value: i32) -> Self;
+    fn from_usize(value: usize) -> Self;
+    fn as_usize(self) -> usize;
+    fn as_i32(self) -> i32;
+}
+
+impl HistogramOffset for i32 {
+    #[inline(always)]
+    fn from_i32(value: i32) -> Self {
+        value
+    }
+
+    #[inline(always)]
+    fn from_usize(value: usize) -> Self {
+        value as Self
+    }
+
+    #[inline(always)]
+    fn as_usize(self) -> usize {
+        self as usize
+    }
+
+    #[inline(always)]
+    fn as_i32(self) -> i32 {
+        self
+    }
+}
+
+impl HistogramOffset for usize {
+    #[inline(always)]
+    fn from_i32(value: i32) -> Self {
+        value as Self
+    }
+
+    #[inline(always)]
+    fn from_usize(value: usize) -> Self {
+        value
+    }
+
+    #[inline(always)]
+    fn as_usize(self) -> usize {
+        self
+    }
+
+    #[inline(always)]
+    fn as_i32(self) -> i32 {
+        self as i32
+    }
+}
+
 impl<S: Copy> HistogramRead<S> for &[S] {
     #[inline(always)]
     fn sample_at(self, index: usize) -> Option<S> {
@@ -147,7 +213,7 @@ where
 /// policy and launch-schedule selection.
 #[doc(hidden)]
 pub trait HistogramSample<L>: Copy + Default {
-    fn even_bin(self, lower: L, upper: L, bins: usize) -> i32;
+    fn even_bin(self, lower: L, upper: L, bins: i32) -> i32;
     fn even_may_overflow(lower: L, upper: L, bins: usize) -> bool;
     fn byte_bin(self) -> i32;
     fn from_byte_bin(bin: usize) -> Self;
@@ -158,12 +224,12 @@ macro_rules! integral_histogram_sample {
     ($sample:ty, $level:ty, $common:ty, $wide:ty, signed) => {
         impl HistogramSample<$level> for $sample {
             #[inline(always)]
-            fn even_bin(self, lower: $level, upper: $level, bins: usize) -> i32 {
+            fn even_bin(self, lower: $level, upper: $level, bins: i32) -> i32 {
                 let sample = self as $common;
                 let lower = lower as $common;
                 let upper = upper as $common;
                 if sample >= lower && sample < upper {
-                    (((sample.wrapping_sub(lower) as $wide) * (bins as $wide))
+                    (((sample.wrapping_sub(lower) as $wide) * bins as $wide)
                         / (upper.wrapping_sub(lower) as $wide)) as i32
                 } else {
                     -1
@@ -199,12 +265,12 @@ macro_rules! integral_histogram_sample {
     ($sample:ty, $level:ty, $common:ty, $wide:ty, unsigned) => {
         impl HistogramSample<$level> for $sample {
             #[inline(always)]
-            fn even_bin(self, lower: $level, upper: $level, bins: usize) -> i32 {
+            fn even_bin(self, lower: $level, upper: $level, bins: i32) -> i32 {
                 let sample = self as $common;
                 let lower = lower as $common;
                 let upper = upper as $common;
                 if sample >= lower && sample < upper {
-                    (((sample.wrapping_sub(lower) as $wide) * (bins as $wide))
+                    (((sample.wrapping_sub(lower) as $wide) * bins as $wide)
                         / (upper.wrapping_sub(lower) as $wide)) as i32
                 } else {
                     -1
@@ -243,7 +309,7 @@ macro_rules! floating_histogram_sample {
     ($sample:ty, $level:ty, $common:ty) => {
         impl HistogramSample<$level> for $sample {
             #[inline(always)]
-            fn even_bin(self, lower: $level, upper: $level, bins: usize) -> i32 {
+            fn even_bin(self, lower: $level, upper: $level, bins: i32) -> i32 {
                 let sample = self as $common;
                 let lower = lower as $common;
                 let upper = upper as $common;
@@ -392,7 +458,7 @@ floating_histogram_sample!(f64, f64, f64);
 #[inline(always)]
 pub fn histogram_init_agent<C, const ACTIVE_CHANNELS: usize>(
     output: DisjointSlice<'_, C>,
-    output_lengths: [usize; ACTIVE_CHANNELS],
+    output_lengths: [i32; ACTIVE_CHANNELS],
     output_offsets: [usize; ACTIVE_CHANNELS],
     queue: DisjointSlice<'_, i32>,
 ) where
@@ -407,7 +473,7 @@ pub fn histogram_init_agent<C, const ACTIVE_CHANNELS: usize>(
         queue.write(0, 0);
     }
     histogram_channels!(ACTIVE_CHANNELS, channel, {
-        if output_bin < output_lengths[channel] {
+        if (output_bin as i32) < output_lengths[channel] {
             output.write(output_offsets[channel] + output_bin, C::zero());
         }
     });
@@ -425,6 +491,7 @@ pub fn histogram_sweep_agent<
     Samples,
     S,
     C,
+    Offset,
     Decode,
     OutputDecode,
     const CHANNELS: usize,
@@ -437,9 +504,9 @@ pub fn histogram_sweep_agent<
     samples: Samples,
     output_storage: DisjointSlice<'_, C>,
     privatized_storage: DisjointSlice<'_, C>,
-    output_layout: ([usize; ACTIVE_CHANNELS], [usize; ACTIVE_CHANNELS]),
-    privatized_layout: ([usize; ACTIVE_CHANNELS], [usize; ACTIVE_CHANNELS]),
-    image: (usize, usize, usize, usize),
+    output_layout: ([i32; ACTIVE_CHANNELS], [usize; ACTIVE_CHANNELS]),
+    privatized_layout: ([i32; ACTIVE_CHANNELS], [usize; ACTIVE_CHANNELS]),
+    image: (Offset, Offset, Offset, i32),
     decode: Decode,
     output_decode: OutputDecode,
     shared_memory: BlockSharedMemory,
@@ -447,6 +514,7 @@ pub fn histogram_sweep_agent<
     Samples: HistogramRead<S>,
     S: Copy + Default,
     C: HistogramCounter,
+    Offset: HistogramOffset,
     Decode: Fn(S, usize) -> i32 + Copy,
     OutputDecode: Fn(usize, usize) -> i32 + Copy,
 {
@@ -454,18 +522,18 @@ pub fn histogram_sweep_agent<
     let (privatized_lengths, privatized_offsets) = privatized_layout;
     let (num_row_pixels, num_rows, row_stride_samples, blocks_per_row) = image;
     let thread_index = thread::threadIdx_x() as usize;
-    let block_index = thread::blockIdx_x() as usize;
+    let block_index = thread::blockIdx_x() as i32;
+    let block_storage_index = block_index as usize;
     let logical_block_x = block_index % blocks_per_row;
     let logical_block_y = block_index / blocks_per_row;
-    let blocks_per_col = thread::gridDim_x() as usize / blocks_per_row;
-    let tile_pixels = THREADS * PIXELS_PER_THREAD;
-    let tile_samples = tile_pixels * CHANNELS;
+    let blocks_per_col = thread::gridDim_x() as i32 / blocks_per_row;
+    let tile_samples = Offset::from_usize(THREADS * PIXELS_PER_THREAD * CHANNELS);
     let mut output = DeviceRegion::new(output_storage);
     let mut privatized = DeviceRegion::new(privatized_storage);
     if SHARED_PRIVATIZATION {
         let mut bins = shared_memory.region::<C>(0, ACTIVE_CHANNELS * PRIVATIZED_SMEM_STRIDE);
         histogram_channels!(ACTIVE_CHANNELS, channel, {
-            let count = privatized_lengths[channel];
+            let count = privatized_lengths[channel] as usize;
             let channel_base = channel * PRIVATIZED_SMEM_STRIDE;
             let mut bin = thread_index;
             while bin < count {
@@ -475,8 +543,8 @@ pub fn histogram_sweep_agent<
         });
     } else {
         histogram_channels!(ACTIVE_CHANNELS, channel, {
-            let count = privatized_lengths[channel];
-            let channel_base = privatized_offsets[channel] + block_index * count;
+            let count = privatized_lengths[channel] as usize;
+            let channel_base = privatized_offsets[channel] + block_storage_index * count;
             let mut bin = thread_index;
             while bin < count {
                 privatized.write(channel_base + bin, C::zero());
@@ -487,37 +555,61 @@ pub fn histogram_sweep_agent<
     thread::sync_threads();
 
     let mut row = logical_block_y;
-    while row < num_rows {
-        let row_begin = row * row_stride_samples;
-        let row_end = row_begin + num_row_pixels * CHANNELS;
-        let mut tile_offset = row_begin + logical_block_x * tile_samples;
+    while Offset::from_i32(row) < num_rows {
+        let row_begin = Offset::from_i32(row) * row_stride_samples;
+        let row_end = row_begin + num_row_pixels * Offset::from_usize(CHANNELS);
+        let mut tile_offset = row_begin + Offset::from_i32(logical_block_x) * tile_samples;
         while tile_offset < row_end {
             let remaining = row_end - tile_offset;
             if CHANNELS == 1 {
+                if remaining < tile_samples {
+                    consume_single_channel_tile::<
+                        Samples,
+                        S,
+                        C,
+                        Offset,
+                        Decode,
+                        ACTIVE_CHANNELS,
+                        PIXELS_PER_THREAD,
+                        RLE_COMPRESS,
+                        SHARED_PRIVATIZATION,
+                        false,
+                    >(
+                        samples,
+                        tile_offset,
+                        remaining.as_i32(),
+                        block_storage_index,
+                        privatized_lengths,
+                        privatized_offsets,
+                        decode,
+                        &shared_memory,
+                        &mut privatized,
+                    );
+                    break;
+                }
                 consume_single_channel_tile::<
                     Samples,
                     S,
                     C,
+                    Offset,
                     Decode,
                     ACTIVE_CHANNELS,
                     PIXELS_PER_THREAD,
                     RLE_COMPRESS,
                     SHARED_PRIVATIZATION,
+                    true,
                 >(
                     samples,
                     tile_offset,
-                    remaining.min(tile_samples),
-                    block_index,
+                    tile_samples.as_i32(),
+                    block_storage_index,
                     privatized_lengths,
                     privatized_offsets,
                     decode,
                     &shared_memory,
                     &mut privatized,
                 );
-                if remaining < tile_samples {
-                    break;
-                }
-                tile_offset += blocks_per_row * tile_samples;
+                tile_offset = tile_offset + Offset::from_i32(blocks_per_row) * tile_samples;
                 continue;
             }
             if remaining < tile_samples {
@@ -525,6 +617,7 @@ pub fn histogram_sweep_agent<
                     Samples,
                     S,
                     C,
+                    Offset,
                     Decode,
                     CHANNELS,
                     ACTIVE_CHANNELS,
@@ -535,8 +628,8 @@ pub fn histogram_sweep_agent<
                 >(
                     samples,
                     tile_offset,
-                    remaining,
-                    block_index,
+                    remaining.as_i32(),
+                    block_storage_index,
                     privatized_lengths,
                     privatized_offsets,
                     decode,
@@ -549,6 +642,7 @@ pub fn histogram_sweep_agent<
                 Samples,
                 S,
                 C,
+                Offset,
                 Decode,
                 CHANNELS,
                 ACTIVE_CHANNELS,
@@ -559,23 +653,23 @@ pub fn histogram_sweep_agent<
             >(
                 samples,
                 tile_offset,
-                tile_samples,
-                block_index,
+                tile_samples.as_i32(),
+                block_storage_index,
                 privatized_lengths,
                 privatized_offsets,
                 decode,
                 &shared_memory,
                 &mut privatized,
             );
-            tile_offset += blocks_per_row * tile_samples;
+            tile_offset = tile_offset + Offset::from_i32(blocks_per_row) * tile_samples;
         }
         row += blocks_per_col;
     }
 
     thread::sync_threads();
     histogram_channels!(ACTIVE_CHANNELS, channel, {
-        let private_count = privatized_lengths[channel];
-        let private_base = privatized_offsets[channel] + block_index * private_count;
+        let private_count = privatized_lengths[channel] as usize;
+        let private_base = privatized_offsets[channel] + block_storage_index * private_count;
         let shared_base = channel * PRIVATIZED_SMEM_STRIDE;
         let mut bin = thread_index;
         while bin < private_count {
@@ -588,7 +682,7 @@ pub fn histogram_sweep_agent<
             };
             if count.is_positive() {
                 let output_bin = output_decode(bin, channel);
-                if output_bin >= 0 && (output_bin as usize) < output_lengths[channel] {
+                if output_bin >= 0 && output_bin < output_lengths[channel] {
                     C::fetch_add_device(
                         &mut output,
                         output_offsets[channel] + output_bin as usize,
@@ -610,6 +704,7 @@ fn consume_tile<
     Samples,
     S,
     C,
+    Offset,
     Decode,
     const CHANNELS: usize,
     const ACTIVE_CHANNELS: usize,
@@ -619,10 +714,10 @@ fn consume_tile<
     const FULL_TILE: bool,
 >(
     samples: Samples,
-    tile_offset: usize,
-    valid_samples: usize,
+    tile_offset: Offset,
+    valid_samples: i32,
     block_index: usize,
-    privatized_lengths: [usize; ACTIVE_CHANNELS],
+    privatized_lengths: [i32; ACTIVE_CHANNELS],
     privatized_offsets: [usize; ACTIVE_CHANNELS],
     decode: Decode,
     shared_memory: &BlockSharedMemory,
@@ -631,14 +726,15 @@ fn consume_tile<
     Samples: HistogramRead<S>,
     S: Copy + Default,
     C: HistogramCounter,
+    Offset: HistogramOffset,
     Decode: Fn(S, usize) -> i32 + Copy,
 {
-    let thread_pixel = thread::threadIdx_x() as usize * PIXELS_PER_THREAD;
-    let thread_base = tile_offset + thread_pixel * CHANNELS;
+    let thread_pixel = thread::threadIdx_x() as i32 * PIXELS_PER_THREAD as i32;
+    let thread_base = tile_offset.as_usize() + thread_pixel as usize * CHANNELS;
     let mut thread_samples = [[S::default(); CHANNELS]; PIXELS_PER_THREAD];
     let mut is_valid = [false; PIXELS_PER_THREAD];
     histogram_pixels!(PIXELS_PER_THREAD, pixel, {
-        let valid = FULL_TILE || (thread_pixel + pixel) * CHANNELS < valid_samples;
+        let valid = FULL_TILE || ((thread_pixel + pixel as i32) * CHANNELS as i32) < valid_samples;
         is_valid[pixel] = valid;
         if valid {
             histogram_channels!(CHANNELS, channel, {
@@ -702,58 +798,71 @@ fn consume_single_channel_tile<
     Samples,
     S,
     C,
+    Offset,
     Decode,
     const ACTIVE_CHANNELS: usize,
     const PIXELS_PER_THREAD: usize,
     const RLE_COMPRESS: bool,
     const SHARED_PRIVATIZATION: bool,
+    const FULL_TILE: bool,
 >(
     samples: Samples,
-    tile_offset: usize,
-    valid_samples: usize,
+    tile_offset: Offset,
+    valid_samples: i32,
     block_index: usize,
-    privatized_lengths: [usize; ACTIVE_CHANNELS],
+    privatized_lengths: [i32; ACTIVE_CHANNELS],
     privatized_offsets: [usize; ACTIVE_CHANNELS],
     decode: Decode,
     shared_memory: &BlockSharedMemory,
     privatized: &mut DeviceRegion<'_, C>,
 ) where
     Samples: HistogramRead<S>,
-    S: Copy,
+    S: Copy + Default,
     C: HistogramCounter,
+    Offset: HistogramOffset,
     Decode: Fn(S, usize) -> i32 + Copy,
 {
-    let thread_base = tile_offset + thread::threadIdx_x() as usize * PIXELS_PER_THREAD;
+    let thread_pixel = thread::threadIdx_x() as i32 * PIXELS_PER_THREAD as i32;
+    let thread_base = tile_offset.as_usize() + thread_pixel as usize;
+    let mut thread_samples = [S::default(); PIXELS_PER_THREAD];
+    let mut is_valid = [false; PIXELS_PER_THREAD];
+    histogram_pixels!(PIXELS_PER_THREAD, pixel, {
+        let valid = FULL_TILE || (thread_pixel + pixel as i32) < valid_samples;
+        is_valid[pixel] = valid;
+        if valid {
+            if let Some(sample) = samples.sample_at(thread_base + pixel) {
+                thread_samples[pixel] = sample;
+            } else {
+                is_valid[pixel] = false;
+            }
+        }
+    });
     if RLE_COMPRESS {
         let mut bins = [-1i32; PIXELS_PER_THREAD];
-        let mut pixel = 0;
-        while pixel < PIXELS_PER_THREAD {
-            if thread::threadIdx_x() as usize * PIXELS_PER_THREAD + pixel < valid_samples
-                && let Some(sample) = samples.sample_at(thread_base + pixel)
-            {
-                bins[pixel] = decode(sample, 0);
+        histogram_pixels!(PIXELS_PER_THREAD, pixel, {
+            if is_valid[pixel] {
+                bins[pixel] = decode(thread_samples[pixel], 0);
             }
-            pixel += 1;
-        }
+        });
         let mut accumulator = 1u32;
-        let mut pixel = 0;
-        while pixel + 1 < PIXELS_PER_THREAD {
-            if bins[pixel] != bins[pixel + 1] {
-                add_private::<C, ACTIVE_CHANNELS, SHARED_PRIVATIZATION>(
-                    bins[pixel],
-                    accumulator,
-                    0,
-                    block_index,
-                    privatized_lengths,
-                    privatized_offsets,
-                    shared_memory,
-                    privatized,
-                );
-                accumulator = 0;
+        histogram_pixels!(PIXELS_PER_THREAD, pixel, {
+            if pixel + 1 < PIXELS_PER_THREAD {
+                if bins[pixel] != bins[pixel + 1] {
+                    add_private::<C, ACTIVE_CHANNELS, SHARED_PRIVATIZATION>(
+                        bins[pixel],
+                        accumulator,
+                        0,
+                        block_index,
+                        privatized_lengths,
+                        privatized_offsets,
+                        shared_memory,
+                        privatized,
+                    );
+                    accumulator = 0;
+                }
+                accumulator += 1;
             }
-            accumulator += 1;
-            pixel += 1;
-        }
+        });
         add_private::<C, ACTIVE_CHANNELS, SHARED_PRIVATIZATION>(
             bins[PIXELS_PER_THREAD - 1],
             accumulator,
@@ -765,13 +874,10 @@ fn consume_single_channel_tile<
             privatized,
         );
     } else {
-        let mut pixel = 0;
-        while pixel < PIXELS_PER_THREAD {
-            if thread::threadIdx_x() as usize * PIXELS_PER_THREAD + pixel < valid_samples
-                && let Some(sample) = samples.sample_at(thread_base + pixel)
-            {
+        histogram_pixels!(PIXELS_PER_THREAD, pixel, {
+            if is_valid[pixel] {
                 add_private::<C, ACTIVE_CHANNELS, SHARED_PRIVATIZATION>(
-                    decode(sample, 0),
+                    decode(thread_samples[pixel], 0),
                     1,
                     0,
                     block_index,
@@ -781,8 +887,7 @@ fn consume_single_channel_tile<
                     privatized,
                 );
             }
-            pixel += 1;
-        }
+        });
     }
 }
 
@@ -803,7 +908,7 @@ fn accumulate_rle<
     samples: &[[S; CHANNELS]; PIXELS_PER_THREAD],
     is_valid: &[bool; PIXELS_PER_THREAD],
     block_index: usize,
-    privatized_lengths: [usize; ACTIVE_CHANNELS],
+    privatized_lengths: [i32; ACTIVE_CHANNELS],
     privatized_offsets: [usize; ACTIVE_CHANNELS],
     decode: Decode,
     shared_memory: &BlockSharedMemory,
@@ -870,7 +975,7 @@ fn accumulate_direct<
     samples: &[[S; CHANNELS]; PIXELS_PER_THREAD],
     is_valid: &[bool; PIXELS_PER_THREAD],
     block_index: usize,
-    privatized_lengths: [usize; ACTIVE_CHANNELS],
+    privatized_lengths: [i32; ACTIVE_CHANNELS],
     privatized_offsets: [usize; ACTIVE_CHANNELS],
     decode: Decode,
     shared_memory: &BlockSharedMemory,
@@ -908,14 +1013,14 @@ fn add_private<C, const ACTIVE_CHANNELS: usize, const SHARED_PRIVATIZATION: bool
     run_length: u32,
     channel: usize,
     block_index: usize,
-    privatized_lengths: [usize; ACTIVE_CHANNELS],
+    privatized_lengths: [i32; ACTIVE_CHANNELS],
     privatized_offsets: [usize; ACTIVE_CHANNELS],
     shared_memory: &BlockSharedMemory,
     privatized: &mut DeviceRegion<'_, C>,
 ) where
     C: HistogramCounter,
 {
-    if bin < 0 || bin as usize >= privatized_lengths[channel] {
+    if bin < 0 || bin >= privatized_lengths[channel] {
         return;
     }
     let value = C::from_run_length(run_length);
@@ -929,7 +1034,9 @@ fn add_private<C, const ACTIVE_CHANNELS: usize, const SHARED_PRIVATIZATION: bool
     } else {
         C::fetch_add_device(
             privatized,
-            privatized_offsets[channel] + block_index * privatized_lengths[channel] + bin as usize,
+            privatized_offsets[channel]
+                + block_index * privatized_lengths[channel] as usize
+                + bin as usize,
             value,
         );
     }
@@ -938,18 +1045,21 @@ fn add_private<C, const ACTIVE_CHANNELS: usize, const SHARED_PRIVATIZATION: bool
 /// CUB's `UpperBound(levels, sample) - 1` range transform.
 #[inline(always)]
 pub fn histogram_range_bin<L: Copy + PartialOrd>(levels: &[L], sample: L) -> i32 {
-    let mut begin = 0usize;
-    let mut end = levels.len();
+    // The public call has already established CUB's signed level-count
+    // domain. Keep the device search in that same domain instead of widening
+    // every UpperBound control operation to Rust's host-sized `usize`.
+    let mut begin = 0i32;
+    let mut end = levels.len() as i32;
     while begin < end {
         let middle = begin + (end - begin) / 2;
-        if sample < levels[middle] {
+        if sample < levels[middle as usize] {
             end = middle;
         } else {
             begin = middle + 1;
         }
     }
-    let bin = begin as i32 - 1;
-    if bin >= 0 && (bin as usize) + 1 < levels.len() {
+    let bin = begin - 1;
+    if bin >= 0 && bin + 1 < levels.len() as i32 {
         bin
     } else {
         -1
@@ -965,7 +1075,7 @@ mod tests {
         let samples = [2_i32, 6, 7, 2, 3, 0, 2, 2, 6, 999];
         let mut histogram = [0_i32; 7];
         for sample in samples {
-            let bin = sample.even_bin(0_i32, 12_i32, histogram.len());
+            let bin = sample.even_bin(0_i32, 12_i32, histogram.len() as i32);
             if bin >= 0 {
                 histogram[bin as usize] += 1;
             }

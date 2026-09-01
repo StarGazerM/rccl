@@ -118,7 +118,9 @@ for declarative_macro in \
   fi
 done
 for declarative_macro in \
-  thrust_program transform __thrust_backends __thrust_selected_backends \
+  thrust_program transform histogram_even histogram_range \
+  histogram_even_arithmetic histogram_range_arithmetic \
+  __thrust_backends __thrust_selected_backends \
   __thrust_merge_backends __thrust_set_backends; do
   if ! rg -q "macro_rules! $declarative_macro" rccl-thrust/src/macros/*.rs; then
     printf '%s\n' "missing declarative Thrust macro $declarative_macro" >&2
@@ -236,6 +238,7 @@ expected_rust_examples=(
   rccl-thrust/examples/comparison_sort.rs
   rccl-thrust/examples/constant_iterator.rs
   rccl-thrust/examples/constant_iterator_benchmark.rs
+  rccl-thrust/examples/histogram.rs
   rccl-thrust/examples/merge.rs
   rccl-thrust/examples/ordering_benchmark.rs
   rccl-thrust/examples/set_operations.rs
@@ -259,6 +262,7 @@ RUSTFLAGS='-D warnings' cargo test --workspace --no-fail-fast
 RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
 scripts/test-warp-reduce.sh
 scripts/test-thrust-constant-iterator.sh
+scripts/test-thrust-histogram.sh
 scripts/test-histogram.sh
 scripts/test-ordering-results.sh
 scripts/test-set-operations.sh

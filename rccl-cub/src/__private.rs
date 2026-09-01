@@ -1,7 +1,8 @@
 pub use crate::histogram::DeviceHistogramWorkspaceParts;
+pub use crate::histogram::histogram_uses_i32_offsets;
 pub use crate::histogram_backend::{
-    ArithmeticHistogramRange, HistogramRead, HistogramSample, histogram_init_agent,
-    histogram_range_bin, histogram_sweep_agent,
+    ArithmeticHistogramRange, HistogramOffset, HistogramRead, HistogramSample,
+    histogram_init_agent, histogram_range_bin, histogram_sweep_agent,
 };
 /// Implementation details used by RCCL's operation macros.
 ///

@@ -261,6 +261,16 @@ impl HistogramRegion {
     }
 }
 
+/// Mirrors CUB's host-side `OffsetT -> int` narrowing guard for histogram
+/// image traversal. Overflow keeps the pointer-sized path.
+#[doc(hidden)]
+pub fn histogram_uses_i32_offsets<S>(num_rows: usize, row_stride_samples: usize) -> bool {
+    num_rows
+        .checked_mul(row_stride_samples)
+        .and_then(|samples| samples.checked_mul(core::mem::size_of::<S>()))
+        .is_some_and(|bytes| bytes < i32::MAX as usize)
+}
+
 /// Opaque CUB histogram privatization and queue storage.
 pub struct DeviceHistogramWorkspace<C: DeviceCopy, const ACTIVE_CHANNELS: usize> {
     privatized: DeviceBuffer<C>,
@@ -270,6 +280,7 @@ pub struct DeviceHistogramWorkspace<C: DeviceCopy, const ACTIVE_CHANNELS: usize>
     blocks_per_row: usize,
     blocks_per_col: usize,
     region: (usize, usize, usize),
+    narrow_offsets: bool,
 }
 
 /// Affine decomposition used only by the generated histogram launch.
@@ -282,6 +293,7 @@ pub struct DeviceHistogramWorkspaceParts<'a, C: DeviceCopy, const ACTIVE_CHANNEL
     pub blocks_per_row: usize,
     pub blocks_per_col: usize,
     pub region: (usize, usize, usize),
+    pub narrow_offsets: bool,
 }
 
 impl<C: DeviceCopy, const ACTIVE_CHANNELS: usize> DeviceHistogramWorkspace<C, ACTIVE_CHANNELS> {
@@ -292,6 +304,7 @@ impl<C: DeviceCopy, const ACTIVE_CHANNELS: usize> DeviceHistogramWorkspace<C, AC
         blocks_per_row: usize,
         blocks_per_col: usize,
         region: (usize, usize, usize),
+        narrow_offsets: bool,
     ) -> Result<Self, DeviceAlgorithmError> {
         let blocks = blocks_per_row
             .checked_mul(blocks_per_col)
@@ -314,6 +327,7 @@ impl<C: DeviceCopy, const ACTIVE_CHANNELS: usize> DeviceHistogramWorkspace<C, AC
             blocks_per_row,
             blocks_per_col,
             region,
+            narrow_offsets,
         })
     }
 
@@ -327,6 +341,7 @@ impl<C: DeviceCopy, const ACTIVE_CHANNELS: usize> DeviceHistogramWorkspace<C, AC
             blocks_per_row: self.blocks_per_row,
             blocks_per_col: self.blocks_per_col,
             region: self.region,
+            narrow_offsets: self.narrow_offsets,
         }
     }
 }
@@ -347,7 +362,7 @@ fn channel_layout<const CHANNELS: usize>(
 
 #[cfg(test)]
 mod tests {
-    use super::HistogramRegion;
+    use super::{HistogramRegion, histogram_uses_i32_offsets};
     use crate::DeviceAlgorithmError;
 
     #[test]
@@ -389,5 +404,13 @@ mod tests {
             HistogramRegion::rows(17, 0, 68).__resolve::<4>(0).unwrap(),
             (0, 1, 0)
         );
+    }
+
+    #[test]
+    fn offset_domain_matches_cub_byte_extent_guard() {
+        assert!(histogram_uses_i32_offsets::<u8>(1, 1_000_000));
+        assert!(histogram_uses_i32_offsets::<u32>(2, 1_000_000));
+        assert!(!histogram_uses_i32_offsets::<u32>(1, i32::MAX as usize));
+        assert!(!histogram_uses_i32_offsets::<u8>(usize::MAX, 2));
     }
 }

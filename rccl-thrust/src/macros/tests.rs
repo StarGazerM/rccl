@@ -1,4 +1,5 @@
 const BACKENDS: &str = include_str!("backends.rs");
+const HISTOGRAM: &str = include_str!("../histogram.rs");
 const PROGRAM: &str = include_str!("program.rs");
 const TRANSFORM: &str = include_str!("transform.rs");
 
@@ -7,6 +8,14 @@ fn body<'a>(source: &'a str, name: &str) -> &'a str {
     let start = source.find(&marker).expect("macro must exist");
     let rest = &source[start + marker.len()..];
     let end = rest.find("#[doc(hidden)]").unwrap_or(rest.len());
+    &rest[..end]
+}
+
+fn exported_body<'a>(source: &'a str, name: &str) -> &'a str {
+    let marker = format!("macro_rules! {name}");
+    let start = source.find(&marker).expect("macro must exist");
+    let rest = &source[start + marker.len()..];
+    let end = rest.find("#[macro_export]").unwrap_or(rest.len());
     &rest[..end]
 }
 
@@ -129,7 +138,7 @@ fn backend_catalog_covers_every_implemented_primitive_pair() {
 
 #[test]
 fn fixed_scaffolding_stays_declarative_policy_free_and_safe() {
-    let all = [BACKENDS, PROGRAM, TRANSFORM].join("\n");
+    let all = [BACKENDS, HISTOGRAM, PROGRAM, TRANSFORM].join("\n");
     for forbidden in [
         "quote!",
         "syn::",
@@ -145,10 +154,30 @@ fn fixed_scaffolding_stays_declarative_policy_free_and_safe() {
         assert!(!all.contains(forbidden), "found forbidden `{forbidden}`");
     }
     assert!(PROGRAM.contains("__device_kernels!"));
+    assert!(PROGRAM.contains("__rccl_thrust_kernels; histogram"));
     assert!(PROGRAM.contains("__rccl_thrust_kernels; set_operations"));
     assert!(PROGRAM.contains("__thrust_backends!"));
     assert!(PROGRAM.contains("__thrust_set_backends!"));
     assert!(PROGRAM.contains("__thrust_merge_backends!"));
     assert!(TRANSFORM.contains("__device_transform_repeat_in_place!"));
+    for (thrust, cub) in [
+        ("histogram_even", "device_histogram_even!"),
+        ("histogram_range", "device_histogram_range!"),
+        (
+            "histogram_even_arithmetic",
+            "device_histogram_even_arithmetic!",
+        ),
+        (
+            "histogram_range_arithmetic",
+            "device_histogram_range_arithmetic!",
+        ),
+    ] {
+        assert!(
+            exported_body(HISTOGRAM, thrust).contains(cub),
+            "{thrust} stopped lowering to {cub}"
+        );
+    }
+    assert_eq!(HISTOGRAM.matches("__synchronize(__rccl_result)").count(), 4);
+    assert!(!HISTOGRAM.contains("DeviceHistogramWorkspace"));
     assert_eq!(PROGRAM.matches("unsafe").count(), 1);
 }

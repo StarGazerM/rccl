@@ -98,6 +98,7 @@ fn histogram_kernels_for_input(threads: usize, arithmetic: bool) -> proc_macro2:
             S,
             C,
             L,
+            O,
             const CHANNELS: usize,
             const ACTIVE: usize,
             const PIXELS: usize,
@@ -111,18 +112,19 @@ fn histogram_kernels_for_input(threads: usize, arithmetic: bool) -> proc_macro2:
             privatized: DisjointSlice<C>,
             lower_levels: Uniform<[L; ACTIVE]>,
             upper_levels: Uniform<[L; ACTIVE]>,
-            output_lengths: Uniform<[usize; ACTIVE]>,
+            output_lengths: Uniform<[i32; ACTIVE]>,
             output_offsets: Uniform<[usize; ACTIVE]>,
-            privatized_lengths: Uniform<[usize; ACTIVE]>,
+            privatized_lengths: Uniform<[i32; ACTIVE]>,
             privatized_offsets: Uniform<[usize; ACTIVE]>,
-            num_row_pixels: Uniform<usize>,
-            num_rows: Uniform<usize>,
-            row_stride_samples: Uniform<usize>,
-            blocks_per_row: Uniform<usize>,
+            num_row_pixels: Uniform<O>,
+            num_rows: Uniform<O>,
+            row_stride_samples: Uniform<O>,
+            blocks_per_row: Uniform<i32>,
         ) where
             S: ::rccl_cub::__private::HistogramSample<L> #arithmetic_bounds,
             C: ::rccl_cub::__private::HistogramCounter,
             L: Copy,
+            O: ::rccl_cub::__private::HistogramOffset,
         {
             #sample_binding
             let output_lengths = output_lengths.get();
@@ -157,6 +159,7 @@ fn histogram_kernels_for_input(threads: usize, arithmetic: bool) -> proc_macro2:
                 _,
                 S,
                 C,
+                O,
                 _,
                 _,
                 CHANNELS,
@@ -196,6 +199,7 @@ fn histogram_kernels_for_input(threads: usize, arithmetic: bool) -> proc_macro2:
             S,
             C,
             L,
+            O,
             const CHANNELS: usize,
             const ACTIVE: usize,
             const PIXELS: usize,
@@ -208,20 +212,21 @@ fn histogram_kernels_for_input(threads: usize, arithmetic: bool) -> proc_macro2:
             output: DisjointSlice<C>,
             privatized: DisjointSlice<C>,
             levels: &[L],
-            level_lengths: Uniform<[usize; ACTIVE]>,
+            level_lengths: Uniform<[i32; ACTIVE]>,
             level_offsets: Uniform<[usize; ACTIVE]>,
-            output_lengths: Uniform<[usize; ACTIVE]>,
+            output_lengths: Uniform<[i32; ACTIVE]>,
             output_offsets: Uniform<[usize; ACTIVE]>,
-            privatized_lengths: Uniform<[usize; ACTIVE]>,
+            privatized_lengths: Uniform<[i32; ACTIVE]>,
             privatized_offsets: Uniform<[usize; ACTIVE]>,
-            num_row_pixels: Uniform<usize>,
-            num_rows: Uniform<usize>,
-            row_stride_samples: Uniform<usize>,
-            blocks_per_row: Uniform<usize>,
+            num_row_pixels: Uniform<O>,
+            num_rows: Uniform<O>,
+            row_stride_samples: Uniform<O>,
+            blocks_per_row: Uniform<i32>,
         ) where
             S: ::rccl_cub::__private::HistogramSample<L> #arithmetic_bounds,
             C: ::rccl_cub::__private::HistogramCounter,
             L: Copy + PartialOrd,
+            O: ::rccl_cub::__private::HistogramOffset,
         {
             #sample_binding
             let output_lengths = output_lengths.get();
@@ -232,7 +237,7 @@ fn histogram_kernels_for_input(threads: usize, arithmetic: bool) -> proc_macro2:
             let privatized_offsets = privatized_offsets.get();
             let find_bin = |sample: S, channel: usize| {
                 let begin = level_offsets[channel];
-                let Some(end) = begin.checked_add(level_lengths[channel]) else {
+                let Some(end) = begin.checked_add(level_lengths[channel] as usize) else {
                     return -1;
                 };
                 let Some(channel_levels) = levels.get(begin..end) else {
@@ -261,6 +266,7 @@ fn histogram_kernels_for_input(threads: usize, arithmetic: bool) -> proc_macro2:
                 _,
                 S,
                 C,
+                O,
                 _,
                 _,
                 CHANNELS,
@@ -964,7 +970,7 @@ fn histogram_init_kernel() -> proc_macro2::TokenStream {
         #[launch_contract(domain = 1, coordinates = u32, block = (256, 1, 1))]
         pub fn device_histogram_init<C, const ACTIVE: usize>(
             output: DisjointSlice<C>,
-            output_lengths: Uniform<[usize; ACTIVE]>,
+            output_lengths: Uniform<[i32; ACTIVE]>,
             output_offsets: Uniform<[usize; ACTIVE]>,
             queue: DisjointSlice<i32>,
         ) where
@@ -1076,7 +1082,7 @@ pub(super) fn expand_device_kernels(
             #[launch_contract(domain = 1, coordinates = u32, block = (256, 1, 1))]
             pub fn device_histogram_init<C, const ACTIVE: usize>(
                 output: DisjointSlice<C>,
-                output_lengths: Uniform<[usize; ACTIVE]>,
+                output_lengths: Uniform<[i32; ACTIVE]>,
                 output_offsets: Uniform<[usize; ACTIVE]>,
                 queue: DisjointSlice<i32>,
             ) where

@@ -13,6 +13,9 @@ macro_rules! __thrust_load_program {
 #[doc(hidden)]
 macro_rules! __thrust_selected_backends {
     ($module:ident;) => {};
+    ($module:ident; histogram $(, $rest:ident)*) => {
+        $crate::__thrust_selected_backends!($module; $($rest),*);
+    };
     ($module:ident; merge $(, $rest:ident)*) => {
         $crate::__thrust_merge_backends!($module);
         $crate::__thrust_selected_backends!($module; $($rest),*);
@@ -25,6 +28,12 @@ macro_rules! __thrust_selected_backends {
 
 #[macro_export]
 macro_rules! thrust_program {
+    ($context:expr; histogram $(,)?) => {{
+        $crate::__private::rccl_cub::__private::__device_kernels!(
+            __rccl_thrust_kernels; histogram
+        );
+        $crate::__thrust_load_program!($context, __rccl_thrust_kernels)
+    }};
     ($context:expr; set_operations $(,)?) => {{
         $crate::__private::rccl_cub::__private::__device_kernels!(
             __rccl_thrust_kernels; set_operations

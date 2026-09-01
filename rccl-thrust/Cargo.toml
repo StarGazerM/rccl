@@ -28,6 +28,12 @@ test = false
 required-features = ["cuda-oxide-example"]
 
 [[example]]
+name = "histogram"
+path = "examples/histogram.rs"
+test = false
+required-features = ["cuda-oxide-example"]
+
+[[example]]
 name = "sort"
 path = "examples/sort.rs"
 test = false

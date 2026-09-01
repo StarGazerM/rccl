@@ -96,8 +96,8 @@ where
     {
         execute_merge_by(
             execution,
-            self.first.into_buffer(),
-            self.second.into_buffer(),
+            self.first.__into_buffer(),
+            self.second.__into_buffer(),
             output.into_buffer(),
             natural_order,
         )
@@ -120,8 +120,8 @@ where
     {
         execute_merge_by(
             execution,
-            self.first.into_buffer(),
-            self.second.into_buffer(),
+            self.first.__into_buffer(),
+            self.second.__into_buffer(),
             output.into_buffer(),
             self.order,
         )

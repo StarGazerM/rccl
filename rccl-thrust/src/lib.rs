@@ -6,6 +6,7 @@
 
 mod backend;
 mod error;
+mod histogram;
 mod macros;
 mod merge;
 mod ordering;
@@ -21,8 +22,9 @@ pub use error::TransformError;
 pub use merge::{Merge, MergeBy};
 pub use ordering::{DeviceKeyValueSortExt, DeviceSortExt};
 pub use rccl_cub::{
-    ContiguousRange, DeviceAlgorithmError, DeviceRange, DoubleBuffer, KeyValue, RandomAccessRange,
-    ReadRange, WriteRange,
+    ArithmeticRange, ContiguousRange, DeviceAlgorithmError, DeviceHistogram, DeviceHistogramLevels,
+    DeviceHistogramLevelsView, DeviceRange, DoubleBuffer, HistogramRegion, KeyValue,
+    RandomAccessRange, ReadRange, WriteRange,
 };
 pub use rccl_memory as memory;
 pub use set::{

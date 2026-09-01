@@ -82,7 +82,8 @@ impl<'a, T: DeviceCopy> DeviceView<'a, T> {
         Self { buffer }
     }
 
-    pub(crate) fn into_buffer(self) -> &'a DeviceBuffer<T> {
+    #[doc(hidden)]
+    pub fn __into_buffer(self) -> &'a DeviceBuffer<T> {
         self.buffer
     }
 
@@ -251,8 +252,8 @@ pub struct KeyValueRange<'a, K: DeviceCopy, V: DeviceCopy> {
 
 impl<'a, K: DeviceCopy, V: DeviceCopy> KeyValueRange<'a, K, V> {
     pub fn new(keys: DeviceView<'a, K>, values: DeviceView<'a, V>) -> Result<Self, RangeError> {
-        let keys = keys.into_buffer();
-        let values = values.into_buffer();
+        let keys = keys.__into_buffer();
+        let values = values.__into_buffer();
         if keys.len() != values.len() {
             return Err(RangeError::LengthMismatch {
                 first: keys.len(),

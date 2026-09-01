@@ -202,6 +202,8 @@ fn workspace_branch(
     arithmetic: bool,
     shared: bool,
     policy: HistogramPolicy,
+    offset_type: proc_macro2::TokenStream,
+    narrow_offsets: bool,
 ) -> syn::Result<proc_macro2::TokenStream> {
     let CommonExpansion {
         sample_type,
@@ -222,6 +224,7 @@ fn workspace_branch(
         #sample_type,
         #counter_type,
         #level_type,
+        #offset_type,
         #channels,
         #active,
         #pixels,
@@ -269,6 +272,7 @@ fn workspace_branch(
                 __rccl_num_rows,
                 __rccl_row_stride_samples,
             ),
+            #narrow_offsets,
         )
     }})
 }
@@ -290,11 +294,32 @@ fn expand_workspace(
     let samples = &common.samples;
     let region = &common.region;
     let output = &common.output;
+    let sample_type = &common.sample_type;
     let channels = common.channels;
     let active = common.active;
     let byte = tmp_primitive_size(&common.sample_type)? == 1;
-    let shared = workspace_branch(&common, even, arithmetic, true, policy)?;
-    let global = workspace_branch(&common, even, arithmetic, false, policy)?;
+    let shared_narrow =
+        workspace_branch(&common, even, arithmetic, true, policy, quote!(i32), true)?;
+    let shared_wide = workspace_branch(
+        &common,
+        even,
+        arithmetic,
+        true,
+        policy,
+        quote!(usize),
+        false,
+    )?;
+    let global_narrow =
+        workspace_branch(&common, even, arithmetic, false, policy, quote!(i32), true)?;
+    let global_wide = workspace_branch(
+        &common,
+        even,
+        arithmetic,
+        false,
+        policy,
+        quote!(usize),
+        false,
+    )?;
     Ok(quote! {{
         (|| -> ::core::result::Result<
             ::rccl_cub::DeviceHistogramWorkspace<_, #active>,
@@ -330,10 +355,21 @@ fn expand_workspace(
             } else {
                 __rccl_output_lengths
             };
+            let __rccl_narrow_offsets =
+                ::rccl_cub::__private::histogram_uses_i32_offsets::<#sample_type>(
+                    __rccl_num_rows,
+                    __rccl_row_stride_samples,
+                );
             if #byte || __rccl_max_bins <= 256 {
-                #shared
+                if __rccl_narrow_offsets {
+                    #shared_narrow
+                } else {
+                    #shared_wide
+                }
+            } else if __rccl_narrow_offsets {
+                #global_narrow
             } else {
-                #global
+                #global_wide
             }
         })()
     }})
@@ -392,6 +428,8 @@ fn launch_common(
     even: bool,
     arithmetic: bool,
     shared: bool,
+    offset_type: proc_macro2::TokenStream,
+    narrow_offsets: bool,
     extra_launch_args: proc_macro2::TokenStream,
 ) -> syn::Result<proc_macro2::TokenStream> {
     let HistogramLaunchShape {
@@ -413,6 +451,7 @@ fn launch_common(
         #sample_type,
         #counter_type,
         #level_type,
+        #offset_type,
         #channels,
         #active,
         #pixels,
@@ -429,6 +468,21 @@ fn launch_common(
         }
     } else {
         quote! { __rccl_samples, }
+    };
+    let image_launch_args = if narrow_offsets {
+        quote! {
+            __rccl_num_row_pixels as i32,
+            __rccl_num_rows as i32,
+            __rccl_row_stride_samples as i32,
+            __rccl_blocks_per_row as i32,
+        }
+    } else {
+        quote! {
+            __rccl_num_row_pixels,
+            __rccl_num_rows,
+            __rccl_row_stride_samples,
+            __rccl_blocks_per_row as i32,
+        }
     };
     Ok(quote! {{
         let __rccl_workspace_blocks = __rccl_blocks_per_row
@@ -450,14 +504,11 @@ fn launch_common(
                 &mut *__rccl_output_storage,
                 &mut *__rccl_privatized_storage,
                 #extra_launch_args
-                __rccl_output_lengths,
+                __rccl_output_lengths.map(|length| length as i32),
                 __rccl_output_offsets,
-                __rccl_privatized_lengths,
+                __rccl_privatized_lengths.map(|length| length as i32),
                 __rccl_privatized_offsets,
-                __rccl_num_row_pixels,
-                __rccl_num_rows,
-                __rccl_row_stride_samples,
-                __rccl_blocks_per_row,
+                #image_launch_args
             ).map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
         }
     }})
@@ -484,7 +535,7 @@ fn init_launch(counter_type: &syn::Type, active: usize) -> proc_macro2::TokenStr
                 __rccl_execution.stream(),
                 &__rccl_init,
                 &mut *__rccl_output_storage,
-                __rccl_output_lengths,
+                __rccl_output_lengths.map(|length| length as i32),
                 __rccl_output_offsets,
                 &mut *__rccl_queue,
             )
@@ -527,20 +578,48 @@ fn expand_even(
         active,
         policy,
     };
-    let shared = launch_common(
+    let shared_narrow = launch_common(
         shape,
         true,
         arithmetic,
+        true,
+        quote!(i32),
         true,
         quote! {
             __rccl_lower_levels,
             __rccl_upper_levels,
         },
     )?;
-    let global = launch_common(
+    let shared_wide = launch_common(
         shape,
         true,
         arithmetic,
+        true,
+        quote!(usize),
+        false,
+        quote! {
+            __rccl_lower_levels,
+            __rccl_upper_levels,
+        },
+    )?;
+    let global_narrow = launch_common(
+        shape,
+        true,
+        arithmetic,
+        false,
+        quote!(i32),
+        true,
+        quote! {
+            __rccl_lower_levels,
+            __rccl_upper_levels,
+        },
+    )?;
+    let global_wide = launch_common(
+        shape,
+        true,
+        arithmetic,
+        false,
+        quote!(usize),
         false,
         quote! {
             __rccl_lower_levels,
@@ -569,6 +648,7 @@ fn expand_even(
                 blocks_per_row: __rccl_blocks_per_row,
                 blocks_per_col: __rccl_blocks_per_col,
                 region: __rccl_workspace_region,
+                narrow_offsets: __rccl_workspace_narrow_offsets,
             } = __rccl_workspace.__parts_mut();
             if __rccl_workspace_region
                 != (
@@ -580,6 +660,18 @@ fn expand_even(
                 return ::core::result::Result::Err(
                     ::rccl_cub::DeviceAlgorithmError::InvalidHistogramShape(
                         "histogram workspace does not match this image region",
+                    ),
+                );
+            }
+            let __rccl_narrow_offsets =
+                ::rccl_cub::__private::histogram_uses_i32_offsets::<#sample_type>(
+                    __rccl_num_rows,
+                    __rccl_row_stride_samples,
+                );
+            if __rccl_workspace_narrow_offsets != __rccl_narrow_offsets {
+                return ::core::result::Result::Err(
+                    ::rccl_cub::DeviceAlgorithmError::InvalidHistogramShape(
+                        "histogram workspace does not match the image offset domain",
                     ),
                 );
             }
@@ -611,9 +703,15 @@ fn expand_even(
             #init
             let __rccl_max_bins = __rccl_output_lengths.iter().copied().max().unwrap_or(0);
             if #byte || __rccl_max_bins <= 256 {
-                #shared
+                if __rccl_narrow_offsets {
+                    #shared_narrow
+                } else {
+                    #shared_wide
+                }
+            } else if __rccl_narrow_offsets {
+                #global_narrow
             } else {
-                #global
+                #global_wide
             }
             Ok(())
         })()
@@ -654,25 +752,55 @@ fn expand_range(
         active,
         policy,
     };
-    let shared = launch_common(
+    let shared_narrow = launch_common(
         shape,
         false,
         arithmetic,
         true,
+        quote!(i32),
+        true,
         quote! {
             __rccl_levels_storage,
-            __rccl_level_lengths,
+            __rccl_level_lengths.map(|length| length as i32),
             __rccl_level_offsets,
         },
     )?;
-    let global = launch_common(
+    let shared_wide = launch_common(
+        shape,
+        false,
+        arithmetic,
+        true,
+        quote!(usize),
+        false,
+        quote! {
+            __rccl_levels_storage,
+            __rccl_level_lengths.map(|length| length as i32),
+            __rccl_level_offsets,
+        },
+    )?;
+    let global_narrow = launch_common(
         shape,
         false,
         arithmetic,
         false,
+        quote!(i32),
+        true,
         quote! {
             __rccl_levels_storage,
-            __rccl_level_lengths,
+            __rccl_level_lengths.map(|length| length as i32),
+            __rccl_level_offsets,
+        },
+    )?;
+    let global_wide = launch_common(
+        shape,
+        false,
+        arithmetic,
+        false,
+        quote!(usize),
+        false,
+        quote! {
+            __rccl_levels_storage,
+            __rccl_level_lengths.map(|length| length as i32),
             __rccl_level_offsets,
         },
     )?;
@@ -713,6 +841,7 @@ fn expand_range(
                 blocks_per_row: __rccl_blocks_per_row,
                 blocks_per_col: __rccl_blocks_per_col,
                 region: __rccl_workspace_region,
+                narrow_offsets: __rccl_workspace_narrow_offsets,
             } = __rccl_workspace.__parts_mut();
             if __rccl_workspace_region
                 != (
@@ -724,6 +853,18 @@ fn expand_range(
                 return ::core::result::Result::Err(
                     ::rccl_cub::DeviceAlgorithmError::InvalidHistogramShape(
                         "histogram workspace does not match this image region",
+                    ),
+                );
+            }
+            let __rccl_narrow_offsets =
+                ::rccl_cub::__private::histogram_uses_i32_offsets::<#sample_type>(
+                    __rccl_num_rows,
+                    __rccl_row_stride_samples,
+                );
+            if __rccl_workspace_narrow_offsets != __rccl_narrow_offsets {
+                return ::core::result::Result::Err(
+                    ::rccl_cub::DeviceAlgorithmError::InvalidHistogramShape(
+                        "histogram workspace does not match the image offset domain",
                     ),
                 );
             }
@@ -742,9 +883,15 @@ fn expand_range(
             #init
             let __rccl_max_bins = __rccl_output_lengths.iter().copied().max().unwrap_or(0);
             if #byte || __rccl_max_bins <= 256 {
-                #shared
+                if __rccl_narrow_offsets {
+                    #shared_narrow
+                } else {
+                    #shared_wide
+                }
+            } else if __rccl_narrow_offsets {
+                #global_narrow
             } else {
-                #global
+                #global_wide
             }
             Ok(())
         })()

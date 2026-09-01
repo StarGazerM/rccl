@@ -34,10 +34,21 @@ impl<A: DeviceAllocator, M> Execution<'_, '_, A, M> {
         &self,
         result: Result<(), crate::DeviceAlgorithmError>,
     ) -> Result<(), crate::DeviceAlgorithmError> {
-        result?;
-        self.stream
-            .synchronize()
-            .map_err(crate::DeviceAlgorithmError::Driver)
+        match result {
+            Ok(()) => self
+                .stream
+                .synchronize()
+                .map_err(crate::DeviceAlgorithmError::Driver),
+            Err(error) => {
+                // A multi-kernel lowering can enqueue work successfully and
+                // then fail while preparing or launching a later kernel. The
+                // first error remains the operation result, but borrowed
+                // inputs and private temporary storage may not be released
+                // until the earlier enqueue has finished.
+                let _ = self.stream.synchronize();
+                Err(error)
+            }
+        }
     }
 }
 
