@@ -15,8 +15,9 @@ fn fixed_cub_wrappers_are_declarative_not_quote_only_proc_macros() {
 #[test]
 fn program_has_one_exact_provenance_bind_and_transform_stays_safe() {
     assert_eq!(PROGRAM.matches("unsafe").count(), 1);
-    assert!(PROGRAM.contains("__rccl_cub_kernels::load(__rccl_context)"));
+    assert!(PROGRAM.contains("$module::load(__rccl_context)"));
     assert!(PROGRAM.contains("__device_kernels!(__rccl_cub_kernels)"));
+    assert!(PROGRAM.contains("__device_kernels!(__rccl_cub_kernels; histogram)"));
     assert!(!TRANSFORM.contains("unsafe"));
     assert!(!TRANSFORM.contains("*mut"));
     assert!(!TRANSFORM.contains("*const"));

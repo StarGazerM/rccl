@@ -1,4 +1,293 @@
 use quote::{format_ident, quote};
+use syn::parse::{Parse, ParseStream};
+use syn::{Ident, Token};
+
+#[derive(Debug)]
+pub(super) struct DeviceKernelsCall {
+    module: Ident,
+    scope: DeviceKernelScope,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeviceKernelScope {
+    All,
+    Histogram,
+    SetOperations,
+}
+
+impl Parse for DeviceKernelsCall {
+    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+        let module = input.parse()?;
+        let scope = if input.is_empty() {
+            DeviceKernelScope::All
+        } else {
+            input.parse::<Token![;]>()?;
+            let capability: Ident = input.parse()?;
+            match capability.to_string().as_str() {
+                "histogram" => DeviceKernelScope::Histogram,
+                "set_operations" => DeviceKernelScope::SetOperations,
+                _ => {
+                    return Err(syn::Error::new(
+                        capability.span(),
+                        "expected `histogram` or `set_operations`",
+                    ));
+                }
+            }
+        };
+        if !input.is_empty() {
+            return Err(input.error("unexpected tokens after the CUB kernel capability"));
+        }
+        Ok(Self { module, scope })
+    }
+}
+
+fn histogram_kernels(threads: usize) -> proc_macro2::TokenStream {
+    let contiguous = histogram_kernels_for_input(threads, false);
+    let arithmetic = histogram_kernels_for_input(threads, true);
+    quote! {
+        #contiguous
+        #arithmetic
+    }
+}
+
+fn histogram_kernels_for_input(threads: usize, arithmetic: bool) -> proc_macro2::TokenStream {
+    let input = if arithmetic { "_arithmetic" } else { "" };
+    let even = format_ident!("device_histogram_even{input}_sweep_{threads}");
+    let range = format_ident!("device_histogram_range{input}_sweep_{threads}");
+    let threads_literal = proc_macro2::Literal::usize_unsuffixed(threads);
+    let sample_parameters = if arithmetic {
+        quote! {
+            sample_start: Uniform<S>,
+            sample_step: Uniform<S>,
+            sample_len: Uniform<usize>,
+        }
+    } else {
+        quote! { samples: &[S], }
+    };
+    let sample_binding = if arithmetic {
+        quote! {
+            let samples = ::rccl_cub::__private::ArithmeticHistogramRange::new(
+                sample_start.get(),
+                sample_step.get(),
+                sample_len.get(),
+            );
+        }
+    } else {
+        quote! {}
+    };
+    let arithmetic_bounds = if arithmetic {
+        quote! {
+            + ::core::convert::TryFrom<usize>
+            + ::core::ops::Add<Output = S>
+            + ::core::ops::Mul<Output = S>
+        }
+    } else {
+        quote! {}
+    };
+    quote! {
+        #[kernel]
+        #[launch_bounds(#threads_literal)]
+        #[launch_contract(
+            domain = 1,
+            coordinates = u32,
+            block = (#threads_literal, 1, 1),
+            dynamic_shared_range = (1, 16384),
+            dynamic_shared_alignment = 16,
+        )]
+        pub fn #even<
+            S,
+            C,
+            L,
+            const CHANNELS: usize,
+            const ACTIVE: usize,
+            const PIXELS: usize,
+            const RLE: bool,
+            const BYTE_SAMPLE: bool,
+            const SHARED: bool,
+            const SHARED_BYTES: usize,
+        >(
+            #sample_parameters
+            output: DisjointSlice<C>,
+            privatized: DisjointSlice<C>,
+            lower_levels: Uniform<[L; ACTIVE]>,
+            upper_levels: Uniform<[L; ACTIVE]>,
+            output_lengths: Uniform<[usize; ACTIVE]>,
+            output_offsets: Uniform<[usize; ACTIVE]>,
+            privatized_lengths: Uniform<[usize; ACTIVE]>,
+            privatized_offsets: Uniform<[usize; ACTIVE]>,
+            num_row_pixels: Uniform<usize>,
+            num_rows: Uniform<usize>,
+            row_stride_samples: Uniform<usize>,
+            blocks_per_row: Uniform<usize>,
+        ) where
+            S: ::rccl_cub::__private::HistogramSample<L> #arithmetic_bounds,
+            C: ::rccl_cub::__private::HistogramCounter,
+            L: Copy,
+        {
+            #sample_binding
+            let output_lengths = output_lengths.get();
+            let output_offsets = output_offsets.get();
+            let privatized_lengths = privatized_lengths.get();
+            let privatized_offsets = privatized_offsets.get();
+            let lower_levels = lower_levels.get();
+            let upper_levels = upper_levels.get();
+            let sample_decode = |sample: S, channel: usize| {
+                if BYTE_SAMPLE {
+                    sample.byte_bin()
+                } else {
+                    sample.even_bin(
+                        lower_levels[channel],
+                        upper_levels[channel],
+                        output_lengths[channel],
+                    )
+                }
+            };
+            let output_decode = |bin: usize, channel: usize| {
+                if BYTE_SAMPLE {
+                    S::from_byte_bin(bin).even_bin(
+                        lower_levels[channel],
+                        upper_levels[channel],
+                        output_lengths[channel],
+                    )
+                } else {
+                    bin as i32
+                }
+            };
+            ::rccl_cub::__private::histogram_sweep_agent::<
+                _,
+                S,
+                C,
+                _,
+                _,
+                CHANNELS,
+                ACTIVE,
+                #threads_literal,
+                PIXELS,
+                RLE,
+                SHARED,
+            >(
+                samples,
+                output,
+                privatized,
+                (output_lengths, output_offsets),
+                (privatized_lengths, privatized_offsets),
+                (
+                    num_row_pixels.get(),
+                    num_rows.get(),
+                    row_stride_samples.get(),
+                    blocks_per_row.get(),
+                ),
+                sample_decode,
+                output_decode,
+                ::rccl_cub::__private::BlockSharedMemory::new(SHARED_BYTES),
+            );
+        }
+
+        #[kernel]
+        #[launch_bounds(#threads_literal)]
+        #[launch_contract(
+            domain = 1,
+            coordinates = u32,
+            block = (#threads_literal, 1, 1),
+            dynamic_shared_range = (1, 16384),
+            dynamic_shared_alignment = 16,
+        )]
+        pub fn #range<
+            S,
+            C,
+            L,
+            const CHANNELS: usize,
+            const ACTIVE: usize,
+            const PIXELS: usize,
+            const RLE: bool,
+            const BYTE_SAMPLE: bool,
+            const SHARED: bool,
+            const SHARED_BYTES: usize,
+        >(
+            #sample_parameters
+            output: DisjointSlice<C>,
+            privatized: DisjointSlice<C>,
+            levels: &[L],
+            level_lengths: Uniform<[usize; ACTIVE]>,
+            level_offsets: Uniform<[usize; ACTIVE]>,
+            output_lengths: Uniform<[usize; ACTIVE]>,
+            output_offsets: Uniform<[usize; ACTIVE]>,
+            privatized_lengths: Uniform<[usize; ACTIVE]>,
+            privatized_offsets: Uniform<[usize; ACTIVE]>,
+            num_row_pixels: Uniform<usize>,
+            num_rows: Uniform<usize>,
+            row_stride_samples: Uniform<usize>,
+            blocks_per_row: Uniform<usize>,
+        ) where
+            S: ::rccl_cub::__private::HistogramSample<L> #arithmetic_bounds,
+            C: ::rccl_cub::__private::HistogramCounter,
+            L: Copy + PartialOrd,
+        {
+            #sample_binding
+            let output_lengths = output_lengths.get();
+            let output_offsets = output_offsets.get();
+            let level_lengths = level_lengths.get();
+            let level_offsets = level_offsets.get();
+            let privatized_lengths = privatized_lengths.get();
+            let privatized_offsets = privatized_offsets.get();
+            let find_bin = |sample: S, channel: usize| {
+                let begin = level_offsets[channel];
+                let Some(end) = begin.checked_add(level_lengths[channel]) else {
+                    return -1;
+                };
+                let Some(channel_levels) = levels.get(begin..end) else {
+                    return -1;
+                };
+                ::rccl_cub::__private::histogram_range_bin(
+                    channel_levels,
+                    sample.to_level(),
+                )
+            };
+            let sample_decode = |sample: S, channel: usize| {
+                if BYTE_SAMPLE {
+                    sample.byte_bin()
+                } else {
+                    find_bin(sample, channel)
+                }
+            };
+            let output_decode = |bin: usize, channel: usize| {
+                if BYTE_SAMPLE {
+                    find_bin(S::from_byte_bin(bin), channel)
+                } else {
+                    bin as i32
+                }
+            };
+            ::rccl_cub::__private::histogram_sweep_agent::<
+                _,
+                S,
+                C,
+                _,
+                _,
+                CHANNELS,
+                ACTIVE,
+                #threads_literal,
+                PIXELS,
+                RLE,
+                SHARED,
+            >(
+                samples,
+                output,
+                privatized,
+                (output_lengths, output_offsets),
+                (privatized_lengths, privatized_offsets),
+                (
+                    num_row_pixels.get(),
+                    num_rows.get(),
+                    row_stride_samples.get(),
+                    blocks_per_row.get(),
+                ),
+                sample_decode,
+                output_decode,
+                ::rccl_cub::__private::BlockSharedMemory::new(SHARED_BYTES),
+            );
+        }
+    }
+}
 
 fn set_kernels_for_index(
     index: &syn::Type,
@@ -668,7 +957,95 @@ fn radix_onesweep_pairs_kernel(shared_bytes: usize) -> proc_macro2::TokenStream 
     }
 }
 
-pub(super) fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macro2::TokenStream> {
+fn histogram_init_kernel() -> proc_macro2::TokenStream {
+    quote! {
+        #[kernel]
+        #[launch_bounds(256)]
+        #[launch_contract(domain = 1, coordinates = u32, block = (256, 1, 1))]
+        pub fn device_histogram_init<C, const ACTIVE: usize>(
+            output: DisjointSlice<C>,
+            output_lengths: Uniform<[usize; ACTIVE]>,
+            output_offsets: Uniform<[usize; ACTIVE]>,
+            queue: DisjointSlice<i32>,
+        ) where
+            C: ::rccl_cub::__private::HistogramCounter,
+        {
+            ::rccl_cub::__private::histogram_init_agent::<C, ACTIVE>(
+                output,
+                output_lengths.get(),
+                output_offsets.get(),
+                queue,
+            );
+        }
+    }
+}
+
+fn expand_histogram_device_kernels(module: Ident) -> proc_macro2::TokenStream {
+    let init = histogram_init_kernel();
+    let sweeps = [384usize, 448, 768, 928, 960]
+        .into_iter()
+        .map(histogram_kernels);
+    quote! {
+        #[doc(hidden)]
+        use ::rccl_cub::__private::cuda_core;
+        #[doc(hidden)]
+        use ::rccl_cub::__private::cuda_host;
+
+        #[::rccl_cub::__private::cuda_device::cuda_module]
+        #[doc(hidden)]
+        #[expect(
+            clippy::too_many_arguments,
+            reason = "CUDA entry points preserve the pinned CUB launch ABI as separate uniform parameters"
+        )]
+        mod #module {
+            use ::rccl_cub::__private::cuda_device::{
+                DisjointSlice, Uniform, kernel, launch_bounds, launch_contract,
+            };
+
+            #init
+            #(#sweeps)*
+        }
+    }
+}
+
+fn expand_set_device_kernels(module: Ident) -> proc_macro2::TokenStream {
+    let narrow = set_kernels_for_index(&syn::parse_quote!(i32), &syn::parse_quote!(u64), "i32");
+    let wide = set_kernels_for_index(&syn::parse_quote!(i64), &syn::parse_quote!(u128), "i64");
+    quote! {
+        #[doc(hidden)]
+        use ::rccl_cub::__private::cuda_core;
+        #[doc(hidden)]
+        use ::rccl_cub::__private::cuda_host;
+
+        #[::rccl_cub::__private::cuda_device::cuda_module]
+        #[doc(hidden)]
+        #[expect(
+            clippy::too_many_arguments,
+            reason = "CUDA entry points preserve the pinned CUB launch ABI as separate uniform parameters"
+        )]
+        mod #module {
+            use ::rccl_cub::__private::cuda_device::{
+                DisjointSlice, Uniform, kernel, launch_bounds, launch_contract, thread,
+            };
+
+            #narrow
+            #wide
+        }
+    }
+}
+
+pub(super) fn expand_device_kernels(
+    call: DeviceKernelsCall,
+) -> syn::Result<proc_macro2::TokenStream> {
+    let DeviceKernelsCall { module, scope } = call;
+    match scope {
+        DeviceKernelScope::Histogram => return Ok(expand_histogram_device_kernels(module)),
+        DeviceKernelScope::SetOperations => return Ok(expand_set_device_kernels(module)),
+        DeviceKernelScope::All => {}
+    }
+    let histogram = [384usize, 448, 768, 928, 960]
+        .into_iter()
+        .map(histogram_kernels);
     let radix_onesweep_keys = [34_304usize, 32_768usize]
         .into_iter()
         .map(radix_onesweep_keys_kernel);
@@ -693,6 +1070,27 @@ pub(super) fn expand_device_kernels(module: syn::Ident) -> syn::Result<proc_macr
             use ::rccl_cub::__private::cuda_device::{
                 DisjointSlice, LinearTiles, Uniform, kernel, launch_bounds, launch_contract, thread,
             };
+
+            #[kernel]
+            #[launch_bounds(256)]
+            #[launch_contract(domain = 1, coordinates = u32, block = (256, 1, 1))]
+            pub fn device_histogram_init<C, const ACTIVE: usize>(
+                output: DisjointSlice<C>,
+                output_lengths: Uniform<[usize; ACTIVE]>,
+                output_offsets: Uniform<[usize; ACTIVE]>,
+                queue: DisjointSlice<i32>,
+            ) where
+                C: ::rccl_cub::__private::HistogramCounter,
+            {
+                ::rccl_cub::__private::histogram_init_agent::<C, ACTIVE>(
+                    output,
+                    output_lengths.get(),
+                    output_offsets.get(),
+                    queue,
+                );
+            }
+
+            #(#histogram)*
 
             #set_narrow
             #set_wide

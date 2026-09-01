@@ -26,13 +26,16 @@ pub use rccl_cub::{
 };
 pub use rccl_memory as memory;
 pub use set::{
-    Difference, DifferenceBy, Intersection, IntersectionBy, SymmetricDifference,
-    SymmetricDifferenceBy, Union, UnionBy,
+    ArithmeticSetRangeExt, Difference, DifferenceBy, Intersection, IntersectionBy,
+    SymmetricDifference, SymmetricDifferenceBy, Union, UnionBy,
 };
 
 /// Extension traits used by ordinary Rust method syntax.
 pub mod prelude {
-    pub use crate::{DeviceBufferExt, DeviceKeyValueSortExt, DeviceRangeExt, DeviceSortExt};
+    pub use crate::{
+        ArithmeticSetRangeExt, DeviceBufferExt, DeviceKeyValueSortExt, DeviceRangeExt,
+        DeviceSortExt,
+    };
 }
 
 pub use range::{

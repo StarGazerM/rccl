@@ -145,6 +145,7 @@ fn fixed_scaffolding_stays_declarative_policy_free_and_safe() {
         assert!(!all.contains(forbidden), "found forbidden `{forbidden}`");
     }
     assert!(PROGRAM.contains("__device_kernels!"));
+    assert!(PROGRAM.contains("__rccl_thrust_kernels; set_operations"));
     assert!(PROGRAM.contains("__thrust_backends!"));
     assert!(PROGRAM.contains("__thrust_set_backends!"));
     assert!(PROGRAM.contains("__thrust_merge_backends!"));

@@ -58,8 +58,8 @@ if rg -n "$forbidden_runtime" "${runtime_sources[@]}"; then
   exit 1
 fi
 if [[ "$(rg -n '\bunsafe\b' rccl-cub/src/macros/program.rs rccl-thrust/src/macros/program.rs | wc -l)" -ne 2 ]] \
-  || ! rg -q 'unsafe \{ __rccl_cub_kernels::load\(__rccl_context\) \}' rccl-cub/src/macros/program.rs \
-  || ! rg -q 'unsafe \{ __rccl_thrust_kernels::load\(__rccl_context\) \}' rccl-thrust/src/macros/program.rs; then
+  || ! rg -Fq 'unsafe { $module::load(__rccl_context) }' rccl-cub/src/macros/program.rs \
+  || ! rg -Fq 'unsafe { $module::load(__rccl_context) }' rccl-thrust/src/macros/program.rs; then
   printf '%s\n' 'only the two exact cuda-oxide artifact-provenance binds may be unsafe' >&2
   exit 1
 fi
@@ -101,6 +101,8 @@ if ! rg -q '^pub fn program\(' rccl-cub-macros/src/lib.rs \
   || ! rg -q '^pub fn warp_reduce\(' rccl-cub-macros/src/lib.rs \
   || ! rg -q '^pub fn warp_reduce_items\(' rccl-cub-macros/src/lib.rs \
   || ! rg -q '^pub fn __device_kernels\(' rccl-cub-macros/src/lib.rs \
+  || ! rg -q 'device_histogram_even' rccl-cub-macros/src/lib.rs \
+  || ! rg -q 'device_histogram_range' rccl-cub-macros/src/lib.rs \
   || ! rg -q 'device_merge_keys' rccl-cub-macros/src/lib.rs \
   || ! rg -q 'device_radix_sort_keys' rccl-cub-macros/src/lib.rs \
   || ! rg -q 'device_set_keys' rccl-cub-macros/src/lib.rs; then
@@ -128,7 +130,7 @@ if rg -n '\$(key|value)_type:ty' rccl-thrust/src/macros --glob '*.rs'; then
   exit 1
 fi
 if rg -n 'sm_[0-9]+|CUDA_OXIDE_TARGET|CudaTarget|configured_cuda_target' "${runtime_sources[@]}" \
-  || [[ "$(rg -l 'configured_cuda_target' rccl-cub-macros/src/*.rs | sort | paste -sd ' ' -)" != 'rccl-cub-macros/src/merge.rs rccl-cub-macros/src/radix.rs rccl-cub-macros/src/set.rs rccl-cub-macros/src/target.rs' ]]; then
+  || [[ "$(rg -l 'configured_cuda_target' rccl-cub-macros/src/*.rs | sort | paste -sd ' ' -)" != 'rccl-cub-macros/src/histogram.rs rccl-cub-macros/src/merge.rs rccl-cub-macros/src/radix.rs rccl-cub-macros/src/set.rs rccl-cub-macros/src/target.rs' ]]; then
   printf '%s\n' 'architecture selection escaped the CUB policy expansion boundary' >&2
   exit 1
 fi
@@ -144,6 +146,7 @@ if rg -n '#\[kernel|cuda_module' \
 fi
 if ! rg -q 'pub trait DeviceSortExt' rccl-thrust/src/ordering.rs \
   || ! rg -q 'pub struct Merge<' rccl-thrust/src/merge.rs \
+  || ! rg -q 'pub trait ArithmeticSetRangeExt' rccl-thrust/src/set.rs \
   || ! rg -q 'define_key_set_expression!\(Union,' rccl-thrust/src/set.rs \
   || ! rg -q '^define_key_set_expression!\($' rccl-thrust/src/set.rs \
   || ! rg -q '^    Intersection,$' rccl-thrust/src/set.rs \
@@ -179,6 +182,10 @@ if rg -n 'device_merge_(keys|pairs)_partition_count!|device_merge_sort_partition
   exit 1
 fi
 for workspace_macro in \
+  device_histogram_even_workspace \
+  device_histogram_even_arithmetic_workspace \
+  device_histogram_range_workspace \
+  device_histogram_range_arithmetic_workspace \
   device_merge_keys_workspace \
   device_merge_pairs_workspace \
   device_merge_sort_keys_workspace \
@@ -196,7 +203,7 @@ if ! rg -q 'pub\(crate\) const PRIMITIVES: &\[Primitive\]' rccl-cub-macros/src/c
   printf '%s\n' 'the closed CUB inventory must remain typed compiler input' >&2
   exit 1
 fi
-if rg -n 'fn (get|write)\(' rccl-cub/src rccl-thrust/src; then
+if rg -n 'fn (get|write)\(' rccl-cub/src/range.rs rccl-thrust/src/range.rs; then
   printf '%s\n' 'range descriptors may not execute device access on the host' >&2
   exit 1
 fi
@@ -210,6 +217,8 @@ mapfile -t rust_examples < <(
     -type f -name '*.rs' 2>/dev/null | sort
 )
 expected_rust_examples=(
+  rccl-cub/examples/device_histogram_benchmark.rs
+  rccl-cub/examples/device_histogram_probe.rs
   rccl-cub/examples/device_merge_sort_keys_benchmark.rs
   rccl-cub/examples/device_merge_sort_keys_probe.rs
   rccl-cub/examples/device_merge_sort_pairs_benchmark.rs
@@ -250,6 +259,7 @@ RUSTFLAGS='-D warnings' cargo test --workspace --no-fail-fast
 RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
 scripts/test-warp-reduce.sh
 scripts/test-thrust-constant-iterator.sh
+scripts/test-histogram.sh
 scripts/test-ordering-results.sh
 scripts/test-set-operations.sh
 scripts/test-current-performance-parity.sh

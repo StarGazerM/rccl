@@ -1,4 +1,5 @@
 use super::*;
+use crate::kernels::DeviceKernelsCall;
 use crate::merge::{merge_load_to_shared_policy, merge_shared_bytes, nominal_4b_items};
 use crate::radix::reg_bound_policy;
 use crate::set::set_policy_for;
@@ -89,6 +90,33 @@ fn user_program_rejects_duplicate_or_uninspectable_module_ownership() {
             .to_string()
             .contains("inline module")
     );
+}
+
+#[test]
+fn device_kernel_capabilities_do_not_leak_unrelated_families() {
+    let histogram: DeviceKernelsCall = syn::parse_quote!(__kernels; histogram);
+    let histogram = expand_device_kernels(histogram)
+        .expect("histogram capability must lower")
+        .to_string();
+    assert!(histogram.contains("device_histogram_even_sweep_384"));
+    assert!(histogram.contains("device_histogram_range_arithmetic_sweep_960"));
+    assert!(!histogram.contains("device_set_keys"));
+    assert!(!histogram.contains("device_merge_keys_agent"));
+    assert!(!histogram.contains("device_radix_sort"));
+
+    let set: DeviceKernelsCall = syn::parse_quote!(__kernels; set_operations);
+    let set = expand_device_kernels(set)
+        .expect("set capability must lower")
+        .to_string();
+    assert!(set.contains("device_set_keys_i32_256"));
+    assert!(set.contains("device_set_pairs_virtual_i64_512"));
+    assert!(!set.contains("device_histogram"));
+    assert!(!set.contains("device_merge_keys_agent"));
+    assert!(!set.contains("device_radix_sort"));
+
+    let unknown = syn::parse2::<DeviceKernelsCall>(quote::quote!(__kernels; transform))
+        .expect_err("unknown capabilities must fail at macro time");
+    assert!(unknown.to_string().contains("expected `histogram`"));
 }
 
 #[test]

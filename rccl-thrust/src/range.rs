@@ -1,10 +1,11 @@
 use core::{
     fmt,
     marker::PhantomData,
-    ops::{Add, Bound, Mul, RangeBounds},
+    ops::{Bound, RangeBounds},
 };
 
 use cuda_core::{DeviceBuffer, DeviceCopy};
+pub use rccl_cub::{ArithmeticRange, arithmetic_range};
 use rccl_cub::{ContiguousRange, DeviceRange, RandomAccessRange, ReadRange, WriteRange};
 
 /// Invalid construction of a finite device-range expression.
@@ -46,10 +47,6 @@ impl std::error::Error for RangeError {}
 
 pub fn repeat_n<T>(value: T, len: usize) -> RepeatN<T> {
     RepeatN::new(value, len)
-}
-
-pub fn arithmetic_range<T>(start: T, step: T, len: usize) -> ArithmeticRange<T> {
-    ArithmeticRange::new(start, step, len)
 }
 
 pub fn discard<T>(len: usize) -> Discard<T> {
@@ -216,43 +213,6 @@ impl<T: DeviceCopy> ReadRange for RepeatN<T> {
 }
 
 impl<T> RandomAccessRange for RepeatN<T> {}
-
-/// A finite arithmetic device-range expression.
-#[derive(Clone, Copy, Debug)]
-pub struct ArithmeticRange<T> {
-    start: T,
-    step: T,
-    len: usize,
-}
-
-impl<T> ArithmeticRange<T> {
-    pub fn new(start: T, step: T, len: usize) -> Self {
-        Self { start, step, len }
-    }
-
-    pub fn start(&self) -> &T {
-        &self.start
-    }
-
-    pub fn step(&self) -> &T {
-        &self.step
-    }
-}
-
-impl<T> DeviceRange for ArithmeticRange<T> {
-    fn len(&self) -> usize {
-        self.len
-    }
-}
-
-impl<T> ReadRange for ArithmeticRange<T>
-where
-    T: DeviceCopy + TryFrom<usize> + Add<Output = T> + Mul<Output = T>,
-{
-    type Item = T;
-}
-
-impl<T> RandomAccessRange for ArithmeticRange<T> {}
 
 /// An output expression that intentionally discards device writes.
 #[derive(Clone, Copy, Debug)]

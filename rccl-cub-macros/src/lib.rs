@@ -3,6 +3,7 @@
 mod call;
 #[cfg(test)]
 mod catalog;
+mod histogram;
 mod kernels;
 mod merge;
 mod program;
@@ -14,6 +15,7 @@ mod target;
 mod tests;
 mod warp;
 
+use histogram::*;
 use kernels::expand_device_kernels;
 use merge::*;
 use proc_macro::TokenStream;
@@ -63,8 +65,8 @@ pub fn warp_reduce_items(input: TokenStream) -> TokenStream {
 #[doc(hidden)]
 #[proc_macro]
 pub fn __device_kernels(input: TokenStream) -> TokenStream {
-    let module = syn::parse_macro_input!(input as syn::Ident);
-    expand_device_kernels(module)
+    let call = syn::parse_macro_input!(input as kernels::DeviceKernelsCall);
+    expand_device_kernels(call)
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }
@@ -81,6 +83,46 @@ macro_rules! operation_macro {
     };
 }
 
+operation_macro!(
+    device_histogram_even_workspace,
+    call::DeviceHistogramWorkspaceCall,
+    expand_device_histogram_even_workspace
+);
+operation_macro!(
+    device_histogram_range_workspace,
+    call::DeviceHistogramWorkspaceCall,
+    expand_device_histogram_range_workspace
+);
+operation_macro!(
+    device_histogram_even_arithmetic_workspace,
+    call::DeviceHistogramWorkspaceCall,
+    expand_device_histogram_even_arithmetic_workspace
+);
+operation_macro!(
+    device_histogram_range_arithmetic_workspace,
+    call::DeviceHistogramWorkspaceCall,
+    expand_device_histogram_range_arithmetic_workspace
+);
+operation_macro!(
+    device_histogram_even,
+    call::DeviceHistogramEvenCall,
+    expand_device_histogram_even
+);
+operation_macro!(
+    device_histogram_range,
+    call::DeviceHistogramRangeCall,
+    expand_device_histogram_range
+);
+operation_macro!(
+    device_histogram_even_arithmetic,
+    call::DeviceHistogramEvenCall,
+    expand_device_histogram_even_arithmetic
+);
+operation_macro!(
+    device_histogram_range_arithmetic,
+    call::DeviceHistogramRangeCall,
+    expand_device_histogram_range_arithmetic
+);
 operation_macro!(
     device_merge_keys,
     call::DeviceMergeKeysCall,

@@ -211,7 +211,9 @@ already provide.
   one structural selector rather than synchronized C++ selector integers.
   Each direct device-wide call takes one caller-owned typed opaque workspace;
   partitions, ping-pong scratch, bins, lookback state, and counters are not
-  public operands.
+  public operands. Histogram-only programs select the declarative `histogram`
+  capability, so their generated cuda-oxide module contains no ordering or set
+  kernels; the default form deliberately owns the full implemented catalog.
   The old pointer-heavy registry implementations were removed rather than
   hidden behind a runtime loader; the current ordering kernels remain
   performance-incomplete.
@@ -329,6 +331,12 @@ transform_scan.h       uninitialized_copy.h
 uninitialized_fill.h   unique.h
 ```
 
+Pinned `thrust/examples/histogram.cu` is not a wrapper around CUB
+`DeviceHistogram`: it independently composes sort, `upper_bound`,
+`adjacent_difference`, `inner_product`, and `reduce_by_key`. It remains pending
+on those Thrust algorithm rows and must not be replaced by a CUB histogram call
+merely to make the example pass.
+
 ### Support headers
 
 | Family | Exact pinned entry points | Rust treatment |
@@ -409,7 +417,7 @@ uniform_real_distribution.h       xor_combine_engine.h
 | Device traversal/movement | `device_for`, `device_transform`, `device_copy`, `device_memcpy` | public CUB forms missing; a hidden device-transform lowering exists only as backend substrate for the implemented Thrust constant-range intersection |
 | Device queries/reduction | `device_find`, `device_reduce`, `device_scan`, `device_segmented_reduce`, `device_segmented_scan`, `device_adjacent_difference` | missing |
 | Device compaction | `device_select`, `device_partition`, `device_run_length_encode` | missing |
-| Device histogram | `device_histogram` | missing |
+| Device histogram | `device_histogram` | partial: contiguous `HistogramEven`, `HistogramRange`, `MultiHistogramEven`, and `MultiHistogramRange` support 1D/2D regions, 1--4 channels, unequal channel bins, all ten pinned primitive sample types, and i32/u32/i64/u64 counters; Rust-native arithmetic ranges cover the pinned CUB counting-iterator single/multi examples without materialization; the macro owns exact SM50/90/100 policy constants and occupancy geometry, while runtime code preserves CUB's tight-row collapse, complete/partial tiles, byte two-stage decoding, 256-bin shared/global privatization boundary, RLE, and output composition; the full matrix compiles for SM90/100, the fallback family compiles for SM80/89, and the pinned examples/type/channel/regression/fault matrix plus SM89 memcheck/racecheck pass; SM52 lowering is blocked before RCCL by cuda-oxide's current SM80 `Basic`-module floor; general custom random-access sample ranges, SM90 PDL, safe vec4 read-only loads, full large-memory cases, and exclusive performance parity remain |
 | Device ordered | `device_merge`, `device_merge_sort`, `device_radix_sort`, `device_segmented_radix_sort`, `device_segmented_sort` | contiguous merge/merge-sort and primitive integer/`f32`/`f64` radix result semantics are partial and performance-incomplete; direct calls use typed opaque workspaces, and the 32/64-bit Policy800 borrowed-DoubleBuffer path supports runtime bit windows and zero-width selection preservation; a byte-count-only storage query, pointer-output windows, range-specific storage sizing, small-key/other-architecture policies, and segmented families remain |
 | Device top-k | `device_topk`, `device_batched_topk` | missing |
 | CUB iterators | `arg_index_input_iterator`, `cache_modified_input_iterator`, `cache_modified_output_iterator`, `tex_obj_input_iterator` | missing; cache/texture semantics need cuda-oxide backend checks |
@@ -465,6 +473,7 @@ cannot be used to promote a `partial` row to `implemented`.
 | Gap | Affected public rows | Current evidence | Required closure |
 |---|---|---|---|
 | `ORDER-PERF-01`: ballot/complement NVPTX code generation | CUB Policy800 one-sweep `device_radix_sort` keys/pairs and every Thrust sort form that lowers through it | the pinned eight-ballot `MatchAny<8>` topology is present, but cuda-oxide/LLVM 22 lowers each Rust ballot plus conditional complement through duplicated predicate extraction and `selp`/`xor` rather than CUB's same-predicate predicated `not`; SM89 one-sweep keys use 99 registers versus CUB's 75 and pairs use 80 versus 65, with identical static shared sizes and zero spills | repair the cuda-oxide/LLVM compiler boundary without RCCL inline PTX, JIT, PTX post-processing, a different radix algorithm, unsafe/raw-pointer escape hatches, or relaxed tests; then retain exact result/permutation/stability checks and pass the unchanged PTX/SASS, register, occupancy, and equal-work large-input gates |
+| `HISTOGRAM-PERF-01`: safe vec4 read-only loads | CUB `device_histogram` even/range and multi-channel forms | after removing an erroneous exported-device-function boundary, the SM89 single-channel i32 sweep kernels have zero stack/spills and use 48 registers for even and 50--51 for range; the exact 4/3 pixel load shape also has zero stack/spills for even, but uses 54--56 registers, and one range specialization retains 16 stack bytes plus 12-byte spill traffic. Pinned SM50-family CUB uses aligned vec4 `LOAD_LDG`/read-only loads for full tiles while current cuda-oxide safe array lane access scalarizes the load; staging through shared memory, inline PTX, raw pointers, or a different tile algorithm would violate the implementation contract. The unchanged equal-work benchmark validates every complete bin vector, but cannot produce valid performance evidence while a foreign VLLM process owns the GPU | add or repair a safe cuda-oxide vectorized read-only load representation for every required primitive layout, retain the exact CUB full/partial-tile branches and cache modifier, then pass the unchanged 1.001 even/range/single/multi performance gate on an exclusive GPU |
 | `THRUST-PAR-PERF-02`: synchronous policy timing tail | Thrust merge and merge-by-key | after the method/view refactor retained the one-allocation graph and moved persistent view validation outside the measured interval, the latest-oxide five-round gate measures 1.005818 and 0.999848; all complete outputs pass, and earlier runs moved both Thrust rows across 1.001 | retain the exact allocation and synchronization graph, isolate the remaining host/runtime-policy interval without adding warmups, caching, caller scratch, or a threshold exception, and pass the unchanged five-round gate |
 
 `THRUST-TEMP-01` is closed. The pinned cuda-oxide host/macro crates are patched

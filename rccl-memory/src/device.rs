@@ -11,8 +11,11 @@ use core::{
     mem::{MaybeUninit, align_of, size_of},
 };
 use cuda_device::{
-    DisjointSlice, DynamicSharedArray, LinearTiles, SharedArray,
-    atomic::{AtomicOrdering, BlockAtomicI32, BlockAtomicU32, DeviceAtomicI32, DeviceAtomicU64},
+    DisjointSlice, DynamicSharedArray, LinearTiles, SharedArray, SpaceLayout,
+    atomic::{
+        AtomicOrdering, BlockAtomicI32, BlockAtomicI64, BlockAtomicU32, BlockAtomicU64,
+        DeviceAtomicI32, DeviceAtomicI64, DeviceAtomicU32, DeviceAtomicU64,
+    },
     fence,
     thread::{self, __internal, LaunchContextRef},
 };
@@ -472,13 +475,13 @@ pub fn initialized_value<T: Copy>(slot: &MaybeUninit<T>) -> T {
 /// index produced by a data-dependent permutation. This wrapper keeps that
 /// escape hatch at the memory boundary while retaining the exclusive
 /// allocation borrow and bounds extent as ordinary Rust state.
-pub struct DeviceRegion<'a, T> {
-    storage: DisjointSlice<'a, T>,
+pub struct DeviceRegion<'a, T, IndexSpace: SpaceLayout = cuda_device::thread::Index1D> {
+    storage: DisjointSlice<'a, T, IndexSpace>,
 }
 
-impl<'a, T> DeviceRegion<'a, T> {
+impl<'a, T, IndexSpace: SpaceLayout> DeviceRegion<'a, T, IndexSpace> {
     #[inline(always)]
-    pub fn new(storage: DisjointSlice<'a, T>) -> Self {
+    pub fn new(storage: DisjointSlice<'a, T, IndexSpace>) -> Self {
         Self { storage }
     }
 
@@ -535,7 +538,7 @@ impl<'a, T> DeviceRegion<'a, T> {
     }
 }
 
-impl DeviceRegion<'_, i32> {
+impl<IndexSpace: SpaceLayout> DeviceRegion<'_, i32, IndexSpace> {
     #[inline(always)]
     pub fn fetch_add_device(&mut self, index: usize, value: i32) -> i32 {
         // SAFETY: `checked` returns one aligned element in device memory.
@@ -544,7 +547,7 @@ impl DeviceRegion<'_, i32> {
     }
 }
 
-impl DeviceRegion<'_, u64> {
+impl<IndexSpace: SpaceLayout> DeviceRegion<'_, u64, IndexSpace> {
     #[inline(always)]
     pub fn fetch_add_device(&mut self, index: usize, value: u64) -> u64 {
         // SAFETY: `checked` returns one aligned element in device memory.
@@ -552,6 +555,69 @@ impl DeviceRegion<'_, u64> {
         atomic.fetch_add(value, AtomicOrdering::Relaxed)
     }
 }
+
+/// Counter operations required by CUB's device histogram agents.
+///
+/// This is a device-memory capability, not schedule metadata.  Architecture,
+/// channel, and loading-policy decisions remain in the proc-macro crate.
+#[doc(hidden)]
+pub trait HistogramCounter: Copy {
+    fn zero() -> Self;
+    fn from_run_length(value: u32) -> Self;
+    fn is_positive(self) -> bool;
+    fn fetch_add_block(region: &mut SharedRegion<Self>, index: usize, value: Self);
+    fn fetch_add_device<IndexSpace: SpaceLayout>(
+        region: &mut DeviceRegion<'_, Self, IndexSpace>,
+        index: usize,
+        value: Self,
+    );
+}
+
+macro_rules! histogram_counter {
+    ($counter:ty, $block_atomic:ty, $device_atomic:ty, $value:ident => $is_positive:expr) => {
+        impl HistogramCounter for $counter {
+            #[inline(always)]
+            fn zero() -> Self {
+                0
+            }
+
+            #[inline(always)]
+            fn from_run_length(value: u32) -> Self {
+                value as Self
+            }
+
+            #[inline(always)]
+            fn is_positive(self) -> bool {
+                let $value = self;
+                $is_positive
+            }
+
+            #[inline(always)]
+            fn fetch_add_block(region: &mut SharedRegion<Self>, index: usize, value: Self) {
+                // SAFETY: `checked` proves alignment and extent; histogram
+                // collisions are resolved by the block-scoped atomic.
+                let atomic = unsafe { <$block_atomic>::from_ptr(region.checked(index)) };
+                atomic.fetch_add(value, AtomicOrdering::Relaxed);
+            }
+
+            #[inline(always)]
+            fn fetch_add_device<IndexSpace: SpaceLayout>(
+                region: &mut DeviceRegion<'_, Self, IndexSpace>,
+                index: usize,
+                value: Self,
+            ) {
+                // SAFETY: as above, at device scope for cross-block updates.
+                let atomic = unsafe { <$device_atomic>::from_ptr(region.checked(index)) };
+                atomic.fetch_add(value, AtomicOrdering::Relaxed);
+            }
+        }
+    };
+}
+
+histogram_counter!(i32, BlockAtomicI32, DeviceAtomicI32, value => value > 0);
+histogram_counter!(u32, BlockAtomicU32, DeviceAtomicU32, value => value != 0);
+histogram_counter!(i64, BlockAtomicI64, DeviceAtomicI64, value => value > 0);
+histogram_counter!(u64, BlockAtomicU64, DeviceAtomicU64, value => value != 0);
 
 /// Preserve CUB's block-scoped anti-hoisting fence in a reviewed device-memory
 /// publication protocol.

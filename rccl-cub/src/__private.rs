@@ -1,3 +1,8 @@
+pub use crate::histogram::DeviceHistogramWorkspaceParts;
+pub use crate::histogram_backend::{
+    ArithmeticHistogramRange, HistogramRead, HistogramSample, histogram_init_agent,
+    histogram_range_bin, histogram_sweep_agent,
+};
 /// Implementation details used by RCCL's operation macros.
 ///
 /// This is public only because a proc-macro expansion is compiled in the
@@ -42,7 +47,7 @@ pub use rccl_cub_macros::{
     __device_set_keys_i64, __device_set_pairs_i32, __device_set_pairs_i64,
     __device_set_workspace_counts,
 };
-pub use rccl_memory::device::BlockSharedMemory;
+pub use rccl_memory::device::{BlockSharedMemory, HistogramCounter};
 pub use rccl_memory::{copy_device_range, static_block_shared_memory};
 /// Normalize cuda-oxide and RCCL allocator buffers for CUB's required
 /// stream-ordered lookback memset. Implemented only for the signed

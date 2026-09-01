@@ -98,3 +98,15 @@ name = "device_ordering_benchmark"
 path = "examples/device_ordering_benchmark.rs"
 test = false
 required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "device_histogram_probe"
+path = "examples/device_histogram_probe.rs"
+test = false
+required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "device_histogram_benchmark"
+path = "examples/device_histogram_benchmark.rs"
+test = false
+required-features = ["cuda-oxide-example"]

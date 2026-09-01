@@ -17,6 +17,136 @@ struct TypedExpressionList {
     expressions: Punctuated<Expr, Token![,]>,
 }
 
+fn parse_histogram_tmp(
+    input: ParseStream<'_>,
+    operation: &str,
+) -> Result<(Type, Type, Type, LitInt, LitInt)> {
+    input.parse::<Token![::]>().map_err(|_| {
+        input.error(format!(
+            "{operation} needs macro-visible sample/counter/level and channel arguments"
+        ))
+    })?;
+    input.parse::<Token![<]>()?;
+    let sample_type = input.parse::<Type>()?;
+    input.parse::<Token![,]>()?;
+    let counter_type = input.parse::<Type>()?;
+    input.parse::<Token![,]>()?;
+    let level_type = input.parse::<Type>()?;
+    input.parse::<Token![,]>()?;
+    let channels = input.parse::<LitInt>()?;
+    input.parse::<Token![,]>()?;
+    let active_channels = input.parse::<LitInt>()?;
+    if input.peek(Token![,]) {
+        input.parse::<Token![,]>()?;
+    }
+    input.parse::<Token![>]>()?;
+    let channels_value = channels.base10_parse::<usize>()?;
+    let active_value = active_channels.base10_parse::<usize>()?;
+    if !(1..=4).contains(&channels_value) {
+        return Err(syn::Error::new_spanned(
+            channels,
+            "DeviceHistogram supports 1 through 4 interleaved channels",
+        ));
+    }
+    if active_value == 0 || active_value > channels_value {
+        return Err(syn::Error::new_spanned(
+            active_channels,
+            "active histogram channels must be in 1..=CHANNELS",
+        ));
+    }
+    Ok((
+        sample_type,
+        counter_type,
+        level_type,
+        channels,
+        active_channels,
+    ))
+}
+
+fn parse_histogram_expressions(
+    input: ParseStream<'_>,
+    operation: &str,
+    expected: usize,
+) -> Result<Vec<Expr>> {
+    let content;
+    parenthesized!(content in input);
+    let expressions = Punctuated::<Expr, Token![,]>::parse_terminated(&content)?;
+    if !input.is_empty() {
+        return Err(input.error(format!("unexpected tokens after {operation} operands")));
+    }
+    if expressions.len() != expected {
+        return Err(input.error(format!(
+            "{operation} expects {expected} runtime operands but received {}",
+            expressions.len()
+        )));
+    }
+    Ok(expressions.into_iter().collect())
+}
+
+macro_rules! histogram_call {
+    ($name:ident, $operation:literal, $($field:ident),+ $(,)?) => {
+        #[derive(Debug)]
+        pub(crate) struct $name {
+            pub(crate) sample_type: Type,
+            pub(crate) counter_type: Type,
+            pub(crate) level_type: Type,
+            pub(crate) channels: LitInt,
+            pub(crate) active_channels: LitInt,
+            $(pub(crate) $field: Expr,)+
+        }
+
+        impl Parse for $name {
+            fn parse(input: ParseStream<'_>) -> Result<Self> {
+                let (sample_type, counter_type, level_type, channels, active_channels) =
+                    parse_histogram_tmp(input, $operation)?;
+                let expected = [$(stringify!($field)),+].len();
+                let mut expressions =
+                    parse_histogram_expressions(input, $operation, expected)?.into_iter();
+                Ok(Self {
+                    sample_type,
+                    counter_type,
+                    level_type,
+                    channels,
+                    active_channels,
+                    $($field: expressions.next().expect("validated histogram operand count"),)+
+                })
+            }
+        }
+    };
+}
+
+histogram_call!(
+    DeviceHistogramWorkspaceCall,
+    "device_histogram_workspace!",
+    execution,
+    samples,
+    region,
+    output,
+);
+
+histogram_call!(
+    DeviceHistogramEvenCall,
+    "device_histogram_even!",
+    execution,
+    samples,
+    region,
+    output,
+    lower_levels,
+    upper_levels,
+    workspace,
+);
+
+histogram_call!(
+    DeviceHistogramRangeCall,
+    "device_histogram_range!",
+    execution,
+    samples,
+    region,
+    output,
+    levels,
+    workspace,
+);
+
 impl Parse for TypedExpressionList {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
         input.parse::<Token![::]>().map_err(|_| {

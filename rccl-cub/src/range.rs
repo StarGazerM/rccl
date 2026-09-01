@@ -1,3 +1,4 @@
+use core::ops::{Add, Mul};
 use cuda_core::DeviceCopy;
 use rccl_memory::{DeviceAllocator, TemporaryValue};
 
@@ -38,6 +39,59 @@ pub trait RandomAccessRange: DeviceRange {}
 
 /// A random-access range with contiguous device representation.
 pub trait ContiguousRange: RandomAccessRange {}
+
+/// A finite arithmetic random-access device range.
+///
+/// This is the Rust-native replacement for a C++ counting iterator plus an
+/// end iterator. Algorithms lower the value expression directly; it does not
+/// allocate or materialize a device buffer.
+#[derive(Clone, Copy, Debug)]
+pub struct ArithmeticRange<T> {
+    start: T,
+    step: T,
+    len: usize,
+}
+
+impl<T> ArithmeticRange<T> {
+    pub const fn new(start: T, step: T, len: usize) -> Self {
+        Self { start, step, len }
+    }
+
+    pub const fn start(&self) -> &T {
+        &self.start
+    }
+
+    pub const fn step(&self) -> &T {
+        &self.step
+    }
+
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+pub const fn arithmetic_range<T>(start: T, step: T, len: usize) -> ArithmeticRange<T> {
+    ArithmeticRange::new(start, step, len)
+}
+
+impl<T> DeviceRange for ArithmeticRange<T> {
+    fn len(&self) -> usize {
+        self.len
+    }
+}
+
+impl<T> ReadRange for ArithmeticRange<T>
+where
+    T: DeviceCopy + TryFrom<usize> + Add<Output = T> + Mul<Output = T>,
+{
+    type Item = T;
+}
+
+impl<T> RandomAccessRange for ArithmeticRange<T> {}
 
 impl<R: DeviceRange + ?Sized> DeviceRange for &R {
     fn len(&self) -> usize {

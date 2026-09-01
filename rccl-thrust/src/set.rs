@@ -420,33 +420,6 @@ macro_rules! define_key_set_expression {
             }
         }
 
-        impl<K> ArithmeticRange<K> {
-            pub fn $method(
-                self,
-                second: ArithmeticRange<K>,
-            ) -> $expression<Self, ArithmeticRange<K>> {
-                $expression {
-                    first: self,
-                    second,
-                }
-            }
-
-            pub fn $method_by<F>(
-                self,
-                second: ArithmeticRange<K>,
-                order: F,
-            ) -> $expression_by<Self, ArithmeticRange<K>, F>
-            where
-                F: Fn(&K, &K) -> Ordering + Copy + 'static,
-            {
-                $expression_by {
-                    first: self,
-                    second,
-                    order,
-                }
-            }
-        }
-
         impl<'a, 'b, K> $expression<DeviceView<'a, K>, DeviceView<'b, K>>
         where
             K: DeviceCopy + PartialOrd + 'static,
@@ -609,6 +582,148 @@ define_key_set_expression!(
     symmetric_difference_by,
     CubSetSymmetricDifference
 );
+
+/// Fluent sorted-set operations for an unmaterialized arithmetic range.
+///
+/// The range itself is a CUB input abstraction. These Thrust methods live in
+/// an extension trait so the lower-level crate retains ownership of the type.
+pub trait ArithmeticSetRangeExt<K>: Sized {
+    fn union(self, second: ArithmeticRange<K>) -> Union<Self, ArithmeticRange<K>>;
+
+    fn union_by<F>(
+        self,
+        second: ArithmeticRange<K>,
+        order: F,
+    ) -> UnionBy<Self, ArithmeticRange<K>, F>
+    where
+        F: Fn(&K, &K) -> Ordering + Copy + 'static;
+
+    fn intersection(self, second: ArithmeticRange<K>) -> Intersection<Self, ArithmeticRange<K>>;
+
+    fn intersection_by<F>(
+        self,
+        second: ArithmeticRange<K>,
+        order: F,
+    ) -> IntersectionBy<Self, ArithmeticRange<K>, F>
+    where
+        F: Fn(&K, &K) -> Ordering + Copy + 'static;
+
+    fn difference(self, second: ArithmeticRange<K>) -> Difference<Self, ArithmeticRange<K>>;
+
+    fn difference_by<F>(
+        self,
+        second: ArithmeticRange<K>,
+        order: F,
+    ) -> DifferenceBy<Self, ArithmeticRange<K>, F>
+    where
+        F: Fn(&K, &K) -> Ordering + Copy + 'static;
+
+    fn symmetric_difference(
+        self,
+        second: ArithmeticRange<K>,
+    ) -> SymmetricDifference<Self, ArithmeticRange<K>>;
+
+    fn symmetric_difference_by<F>(
+        self,
+        second: ArithmeticRange<K>,
+        order: F,
+    ) -> SymmetricDifferenceBy<Self, ArithmeticRange<K>, F>
+    where
+        F: Fn(&K, &K) -> Ordering + Copy + 'static;
+}
+
+impl<K> ArithmeticSetRangeExt<K> for ArithmeticRange<K> {
+    fn union(self, second: ArithmeticRange<K>) -> Union<Self, ArithmeticRange<K>> {
+        Union {
+            first: self,
+            second,
+        }
+    }
+
+    fn union_by<F>(
+        self,
+        second: ArithmeticRange<K>,
+        order: F,
+    ) -> UnionBy<Self, ArithmeticRange<K>, F>
+    where
+        F: Fn(&K, &K) -> Ordering + Copy + 'static,
+    {
+        UnionBy {
+            first: self,
+            second,
+            order,
+        }
+    }
+
+    fn intersection(self, second: ArithmeticRange<K>) -> Intersection<Self, ArithmeticRange<K>> {
+        Intersection {
+            first: self,
+            second,
+        }
+    }
+
+    fn intersection_by<F>(
+        self,
+        second: ArithmeticRange<K>,
+        order: F,
+    ) -> IntersectionBy<Self, ArithmeticRange<K>, F>
+    where
+        F: Fn(&K, &K) -> Ordering + Copy + 'static,
+    {
+        IntersectionBy {
+            first: self,
+            second,
+            order,
+        }
+    }
+
+    fn difference(self, second: ArithmeticRange<K>) -> Difference<Self, ArithmeticRange<K>> {
+        Difference {
+            first: self,
+            second,
+        }
+    }
+
+    fn difference_by<F>(
+        self,
+        second: ArithmeticRange<K>,
+        order: F,
+    ) -> DifferenceBy<Self, ArithmeticRange<K>, F>
+    where
+        F: Fn(&K, &K) -> Ordering + Copy + 'static,
+    {
+        DifferenceBy {
+            first: self,
+            second,
+            order,
+        }
+    }
+
+    fn symmetric_difference(
+        self,
+        second: ArithmeticRange<K>,
+    ) -> SymmetricDifference<Self, ArithmeticRange<K>> {
+        SymmetricDifference {
+            first: self,
+            second,
+        }
+    }
+
+    fn symmetric_difference_by<F>(
+        self,
+        second: ArithmeticRange<K>,
+        order: F,
+    ) -> SymmetricDifferenceBy<Self, ArithmeticRange<K>, F>
+    where
+        F: Fn(&K, &K) -> Ordering + Copy + 'static,
+    {
+        SymmetricDifferenceBy {
+            first: self,
+            second,
+            order,
+        }
+    }
+}
 
 macro_rules! define_pair_set_expression {
     ($expression:ident, $expression_by:ident, $method:ident, $method_by:ident, $operation:ty) => {

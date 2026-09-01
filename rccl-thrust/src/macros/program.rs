@@ -25,6 +25,13 @@ macro_rules! __thrust_selected_backends {
 
 #[macro_export]
 macro_rules! thrust_program {
+    ($context:expr; set_operations $(,)?) => {{
+        $crate::__private::rccl_cub::__private::__device_kernels!(
+            __rccl_thrust_kernels; set_operations
+        );
+        $crate::__thrust_set_backends!(__rccl_thrust_kernels);
+        $crate::__thrust_load_program!($context, __rccl_thrust_kernels)
+    }};
     ($context:expr; $($capability:ident),+ $(,)?) => {{
         $crate::__private::rccl_cub::__private::__device_kernels!(__rccl_thrust_kernels);
         $crate::__thrust_selected_backends!(__rccl_thrust_kernels; $($capability),+);
