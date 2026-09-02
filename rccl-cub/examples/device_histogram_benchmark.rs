@@ -2,9 +2,12 @@
 //!
 //! The input distribution, bin layout, temporary-storage lifetime, warmups,
 //! and event timing are shared with `benchmarks/histogram-reference.cu`.
+//! `RCCL_HISTOGRAM_BATCHED=1` switches both programs to one event pair around
+//! all iterations, reporting the per-call average used to isolate device
+//! throughput from synchronized submission latency.
 
 use cuda_core::{CudaContext, CudaStream, DeviceBuffer};
-use rccl_cub::{DeviceHistogram, DeviceHistogramLevels, HistogramRegion};
+use rccl_cub::{DeviceHistogram, DeviceHistogramLevelsView, HistogramRegion};
 use std::error::Error;
 
 fn argument(name: &str, default: usize) -> usize {
@@ -31,11 +34,25 @@ fn timed(
     }
     stream.synchronize()?;
 
+    // Match the pinned CUB reference's event lifetime exactly. Reusing one
+    // timing pair avoids measuring a different submission/frequency regime
+    // caused by creating and destroying events between every launch pair.
+    let start = stream.context().new_event(Some(0))?;
+    let end = stream.context().new_event(Some(0))?;
+    if std::env::var_os("RCCL_HISTOGRAM_BATCHED").is_some() {
+        start.record(stream)?;
+        for _ in 0..iterations {
+            operation()?;
+        }
+        end.record(stream)?;
+        end.synchronize()?;
+        return Ok(start.elapsed_ms(&end)? as f64 / iterations as f64);
+    }
     let mut samples = Vec::with_capacity(iterations);
     for _ in 0..iterations {
-        let start = stream.record_event(Some(0))?;
+        start.record(stream)?;
         operation()?;
-        let end = stream.record_event(Some(0))?;
+        end.record(stream)?;
         end.synchronize()?;
         samples.push(start.elapsed_ms(&end)? as f64);
     }
@@ -91,6 +108,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let single_samples = DeviceBuffer::from_host(&stream, &single_host)?;
     let multi_samples = DeviceBuffer::from_host(&stream, &multi_host)?;
     let level_values = (0..=bins).map(|value| value as i32).collect::<Vec<_>>();
+    let level_storage = DeviceBuffer::from_host(&stream, &level_values)?;
 
     let mut single_even = DeviceHistogram::<i32, 1>::new(&stream, [bins])?;
     let mut single_even_workspace = rccl_cub::device_histogram_even_workspace!(::<
@@ -118,7 +136,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     })?;
     assert_eq!(single_even.to_host_channels(&stream)?[0], single_expected);
 
-    let single_levels = DeviceHistogramLevels::<i32, 1>::from_channels(&stream, [&level_values])?;
+    // The pinned CCCL reference passes one device-level allocation to every
+    // range-histogram channel. Preserve that pointer aliasing, and therefore
+    // its read-only-cache behavior, through a lifetime-checked borrowed view.
+    let single_levels =
+        DeviceHistogramLevelsView::<i32, 1>::from_ranges(&level_storage, [0..level_values.len()])?;
     let mut single_range = DeviceHistogram::<i32, 1>::new(&stream, [bins])?;
     let mut single_range_workspace = rccl_cub::device_histogram_range_workspace!(::<
         i32,
@@ -170,9 +192,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     })?;
     assert_eq!(multi_even.to_host_channels(&stream)?, multi_expected);
 
-    let multi_levels = DeviceHistogramLevels::<i32, 3>::from_channels(
-        &stream,
-        [&level_values, &level_values, &level_values],
+    let multi_levels = DeviceHistogramLevelsView::<i32, 3>::from_ranges(
+        &level_storage,
+        core::array::from_fn(|_| 0..level_values.len()),
     )?;
     let mut multi_range = DeviceHistogram::<i32, 3>::new(&stream, [bins; 3])?;
     let mut multi_range_workspace = rccl_cub::device_histogram_range_workspace!(::<

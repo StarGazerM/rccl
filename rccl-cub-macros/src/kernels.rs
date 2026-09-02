@@ -88,11 +88,9 @@ fn histogram_kernels_for_input(threads: usize, arithmetic: bool) -> proc_macro2:
         #[kernel]
         #[launch_bounds(#threads_literal)]
         #[launch_contract(
-            domain = 1,
+            domain = 2,
             coordinates = u32,
             block = (#threads_literal, 1, 1),
-            dynamic_shared_range = (1, 16384),
-            dynamic_shared_alignment = 16,
         )]
         pub fn #even<
             S,
@@ -108,11 +106,12 @@ fn histogram_kernels_for_input(threads: usize, arithmetic: bool) -> proc_macro2:
             const SHARED_BYTES: usize,
         >(
             #sample_parameters
-            output: DisjointSlice<C>,
-            privatized: DisjointSlice<C>,
-            lower_levels: Uniform<[L; ACTIVE]>,
-            upper_levels: Uniform<[L; ACTIVE]>,
-            output_lengths: Uniform<[i32; ACTIVE]>,
+            output: DisjointSlice<C, ::cuda_device::thread::Index2D<1>>,
+            privatized: DisjointSlice<C, ::cuda_device::thread::Index2D<1>>,
+            transforms: Uniform<[
+                <S as ::rccl_cub::__private::HistogramSample<L>>::EvenTransform;
+                ACTIVE
+            ]>,
             output_offsets: Uniform<[usize; ACTIVE]>,
             privatized_lengths: Uniform<[i32; ACTIVE]>,
             privatized_offsets: Uniform<[usize; ACTIVE]>,
@@ -121,40 +120,28 @@ fn histogram_kernels_for_input(threads: usize, arithmetic: bool) -> proc_macro2:
             row_stride_samples: Uniform<O>,
             blocks_per_row: Uniform<i32>,
         ) where
-            S: ::rccl_cub::__private::HistogramSample<L> #arithmetic_bounds,
+            S: ::rccl_cub::__private::HistogramSample<L>
+                + ::rccl_cub::__private::HistogramFourSampleLoad
+                #arithmetic_bounds,
             C: ::rccl_cub::__private::HistogramCounter,
             L: Copy,
             O: ::rccl_cub::__private::HistogramOffset,
         {
             #sample_binding
-            let output_lengths = output_lengths.get();
             let output_offsets = output_offsets.get();
             let privatized_lengths = privatized_lengths.get();
             let privatized_offsets = privatized_offsets.get();
-            let lower_levels = lower_levels.get();
-            let upper_levels = upper_levels.get();
-            let sample_decode = |sample: S, channel: usize| {
-                if BYTE_SAMPLE {
-                    sample.byte_bin()
-                } else {
-                    sample.even_bin(
-                        lower_levels[channel],
-                        upper_levels[channel],
-                        output_lengths[channel],
-                    )
-                }
-            };
-            let output_decode = |bin: usize, channel: usize| {
-                if BYTE_SAMPLE {
-                    S::from_byte_bin(bin).even_bin(
-                        lower_levels[channel],
-                        upper_levels[channel],
-                        output_lengths[channel],
-                    )
-                } else {
-                    bin as i32
-                }
-            };
+            let transforms = ::rccl_cub::__private::EvenHistogramTransforms::<
+                S,
+                L,
+                ACTIVE,
+                BYTE_SAMPLE,
+            >::new(transforms.get());
+            let shared_memory =
+                ::rccl_cub::__private::static_block_shared_memory_from_size!(
+                    SHARED_BYTES;
+                    12, 16, 20, 24, 32, 40, 1036, 2064, 3092, 4120, 6176, 8232,
+                );
             ::rccl_cub::__private::histogram_sweep_agent::<
                 _,
                 S,
@@ -172,7 +159,7 @@ fn histogram_kernels_for_input(threads: usize, arithmetic: bool) -> proc_macro2:
                 samples,
                 output,
                 privatized,
-                (output_lengths, output_offsets),
+                output_offsets,
                 (privatized_lengths, privatized_offsets),
                 (
                     num_row_pixels.get(),
@@ -180,20 +167,18 @@ fn histogram_kernels_for_input(threads: usize, arithmetic: bool) -> proc_macro2:
                     row_stride_samples.get(),
                     blocks_per_row.get(),
                 ),
-                sample_decode,
-                output_decode,
-                ::rccl_cub::__private::BlockSharedMemory::new(SHARED_BYTES),
+                transforms,
+                transforms,
+                shared_memory,
             );
         }
 
         #[kernel]
         #[launch_bounds(#threads_literal)]
         #[launch_contract(
-            domain = 1,
+            domain = 2,
             coordinates = u32,
             block = (#threads_literal, 1, 1),
-            dynamic_shared_range = (1, 16384),
-            dynamic_shared_alignment = 16,
         )]
         pub fn #range<
             S,
@@ -209,12 +194,9 @@ fn histogram_kernels_for_input(threads: usize, arithmetic: bool) -> proc_macro2:
             const SHARED_BYTES: usize,
         >(
             #sample_parameters
-            output: DisjointSlice<C>,
-            privatized: DisjointSlice<C>,
-            levels: &[L],
-            level_lengths: Uniform<[i32; ACTIVE]>,
-            level_offsets: Uniform<[usize; ACTIVE]>,
-            output_lengths: Uniform<[i32; ACTIVE]>,
+            output: DisjointSlice<C, ::cuda_device::thread::Index2D<1>>,
+            privatized: DisjointSlice<C, ::cuda_device::thread::Index2D<1>>,
+            levels: ::cuda_device::read_only::ReadOnlySlices<L, ACTIVE>,
             output_offsets: Uniform<[usize; ACTIVE]>,
             privatized_lengths: Uniform<[i32; ACTIVE]>,
             privatized_offsets: Uniform<[usize; ACTIVE]>,
@@ -223,45 +205,28 @@ fn histogram_kernels_for_input(threads: usize, arithmetic: bool) -> proc_macro2:
             row_stride_samples: Uniform<O>,
             blocks_per_row: Uniform<i32>,
         ) where
-            S: ::rccl_cub::__private::HistogramSample<L> #arithmetic_bounds,
+            S: ::rccl_cub::__private::HistogramSample<L>
+                + ::rccl_cub::__private::HistogramFourSampleLoad
+                #arithmetic_bounds,
             C: ::rccl_cub::__private::HistogramCounter,
             L: Copy + PartialOrd,
             O: ::rccl_cub::__private::HistogramOffset,
         {
             #sample_binding
-            let output_lengths = output_lengths.get();
             let output_offsets = output_offsets.get();
-            let level_lengths = level_lengths.get();
-            let level_offsets = level_offsets.get();
             let privatized_lengths = privatized_lengths.get();
             let privatized_offsets = privatized_offsets.get();
-            let find_bin = |sample: S, channel: usize| {
-                let begin = level_offsets[channel];
-                let Some(end) = begin.checked_add(level_lengths[channel] as usize) else {
-                    return -1;
-                };
-                let Some(channel_levels) = levels.get(begin..end) else {
-                    return -1;
-                };
-                ::rccl_cub::__private::histogram_range_bin(
-                    channel_levels,
-                    sample.to_level(),
-                )
-            };
-            let sample_decode = |sample: S, channel: usize| {
-                if BYTE_SAMPLE {
-                    sample.byte_bin()
-                } else {
-                    find_bin(sample, channel)
-                }
-            };
-            let output_decode = |bin: usize, channel: usize| {
-                if BYTE_SAMPLE {
-                    find_bin(S::from_byte_bin(bin), channel)
-                } else {
-                    bin as i32
-                }
-            };
+            let transforms = ::rccl_cub::__private::RangeHistogramTransforms::<
+                S,
+                L,
+                ACTIVE,
+                BYTE_SAMPLE,
+            >::new(levels);
+            let shared_memory =
+                ::rccl_cub::__private::static_block_shared_memory_from_size!(
+                    SHARED_BYTES;
+                    12, 16, 20, 24, 32, 40, 1036, 2064, 3092, 4120, 6176, 8232,
+                );
             ::rccl_cub::__private::histogram_sweep_agent::<
                 _,
                 S,
@@ -279,7 +244,7 @@ fn histogram_kernels_for_input(threads: usize, arithmetic: bool) -> proc_macro2:
                 samples,
                 output,
                 privatized,
-                (output_lengths, output_offsets),
+                output_offsets,
                 (privatized_lengths, privatized_offsets),
                 (
                     num_row_pixels.get(),
@@ -287,9 +252,9 @@ fn histogram_kernels_for_input(threads: usize, arithmetic: bool) -> proc_macro2:
                     row_stride_samples.get(),
                     blocks_per_row.get(),
                 ),
-                sample_decode,
-                output_decode,
-                ::rccl_cub::__private::BlockSharedMemory::new(SHARED_BYTES),
+                transforms,
+                transforms,
+                shared_memory,
             );
         }
     }

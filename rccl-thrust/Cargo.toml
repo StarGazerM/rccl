@@ -6,9 +6,9 @@ license = "Apache-2.0 OR MIT"
 description = "Thrust-shaped host algorithm facade for RCCL"
 
 [dependencies]
-cuda-core = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "6bc513bbcdda781b13a328cf692df86f2215acf9" }
-cuda-device = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "6bc513bbcdda781b13a328cf692df86f2215acf9" }
-cuda-host = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "6bc513bbcdda781b13a328cf692df86f2215acf9" }
+cuda-core = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "97f8b2b7882f0c15ad9ce9b53abed5553920caa8" }
+cuda-device = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "97f8b2b7882f0c15ad9ce9b53abed5553920caa8" }
+cuda-host = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "97f8b2b7882f0c15ad9ce9b53abed5553920caa8" }
 rccl-cub = { path = "../rccl-cub" }
 rccl-memory = { path = "../rccl-memory" }
 

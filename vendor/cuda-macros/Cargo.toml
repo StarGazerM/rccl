@@ -20,4 +20,4 @@ host = []
 quote = "1.0"
 syn = { version = "2.0", features = ["full", "visit", "visit-mut"] }
 proc-macro2 = { version = "1.0", features = ["span-locations"] }
-reserved-oxide-symbols = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "6bc513bbcdda781b13a328cf692df86f2215acf9" }
+reserved-oxide-symbols = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "97f8b2b7882f0c15ad9ce9b53abed5553920caa8" }

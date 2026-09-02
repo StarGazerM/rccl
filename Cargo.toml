@@ -12,7 +12,7 @@ members = [
     "rccl-memory",
     "rccl-thrust",
 ]
-exclude = ["vendor/cuda-host", "vendor/cuda-macros"]
+exclude = ["vendor/cuda-device", "vendor/cuda-host", "vendor/cuda-macros"]
 
 [dependencies]
 rccl-cub = { path = "rccl-cub" }
@@ -27,5 +27,6 @@ lto = "thin"
 # synchronous launches so one CUB temporary allocation can expose disjoint,
 # typed regions without manufacturing DeviceBuffer owners.
 [patch."https://github.com/NVlabs/cuda-oxide.git"]
+cuda-device = { path = "vendor/cuda-device" }
 cuda-host = { path = "vendor/cuda-host" }
 cuda-macros = { path = "vendor/cuda-macros" }

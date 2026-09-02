@@ -174,6 +174,11 @@ struct HistogramLaunchShape<'a> {
     policy: HistogramPolicy,
 }
 
+struct HistogramLaunchCode<'a> {
+    extra_args: proc_macro2::TokenStream,
+    init: &'a proc_macro2::TokenStream,
+}
+
 fn sweep_name(even: bool, arithmetic: bool, threads: usize) -> syn::Ident {
     let input = if arithmetic { "_arithmetic" } else { "" };
     format_ident!(
@@ -234,17 +239,17 @@ fn workspace_branch(
         #bytes
     >);
     Ok(quote! {{
-        let __rccl_probe_launch = ::rccl_cub::__private::cuda_core::LaunchConfig1D::new(
-            1,
-            #threads as u32,
-            #bytes as u32,
+        let __rccl_probe_launch = ::rccl_cub::__private::cuda_core::LaunchConfig2D::new(
+            (1, 1),
+            (#threads as u32, 1),
+            0,
         );
         let __rccl_probe = __rccl_execution.module().#prepare_kernel #generics(
             __rccl_probe_launch,
         ).map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
         let __rccl_blocks_per_sm = __rccl_probe
             .function()
-            .max_active_blocks_per_multiprocessor(#threads as u32, #bytes as u32)
+            .max_active_blocks_per_multiprocessor(#threads as u32, 0)
             .map_err(::rccl_cub::DeviceAlgorithmError::Driver)?;
         let __rccl_sms = __rccl_execution
             .stream()
@@ -430,7 +435,7 @@ fn launch_common(
     shared: bool,
     offset_type: proc_macro2::TokenStream,
     narrow_offsets: bool,
-    extra_launch_args: proc_macro2::TokenStream,
+    code: HistogramLaunchCode<'_>,
 ) -> syn::Result<proc_macro2::TokenStream> {
     let HistogramLaunchShape {
         sample_type,
@@ -440,6 +445,7 @@ fn launch_common(
         active,
         policy,
     } = shape;
+    let HistogramLaunchCode { extra_args, init } = code;
     let kernel = sweep_name(even, arithmetic, policy.threads);
     let prepare_kernel = format_ident!("prepare_{kernel}");
     let threads = policy.threads;
@@ -474,42 +480,55 @@ fn launch_common(
             __rccl_num_row_pixels as i32,
             __rccl_num_rows as i32,
             __rccl_row_stride_samples as i32,
-            __rccl_blocks_per_row as i32,
+            __rccl_tiles_per_row as i32,
         }
     } else {
         quote! {
             __rccl_num_row_pixels,
             __rccl_num_rows,
             __rccl_row_stride_samples,
-            __rccl_blocks_per_row as i32,
+            __rccl_tiles_per_row as i32,
         }
     };
     Ok(quote! {{
+        let __rccl_tiles_per_row = __rccl_num_row_pixels.div_ceil(#threads * #pixels);
+        if __rccl_tiles_per_row > i32::MAX as usize {
+            return ::core::result::Result::Err(
+                ::rccl_cub::DeviceAlgorithmError::InvalidHistogramShape(
+                    "histogram row exceeds CUB's signed tile-count domain",
+                ),
+            );
+        }
         let __rccl_workspace_blocks = __rccl_blocks_per_row
             .checked_mul(__rccl_blocks_per_col)
             .ok_or(::rccl_cub::DeviceAlgorithmError::SizeOverflow)?;
         if __rccl_workspace_blocks != 0 {
-            let __rccl_launch = ::rccl_cub::__private::cuda_core::LaunchConfig1D::new(
-                __rccl_workspace_blocks.min(u32::MAX as usize) as u32,
-                #threads as u32,
-                #bytes as u32,
+            let __rccl_launch = ::rccl_cub::__private::cuda_core::LaunchConfig2D::new(
+                (
+                    __rccl_blocks_per_row.min(u32::MAX as usize) as u32,
+                    __rccl_blocks_per_col.min(u32::MAX as usize) as u32,
+                ),
+                (#threads as u32, 1),
+                0,
             );
             let __rccl_prepared = __rccl_execution.module().#prepare_kernel #generics(
                 __rccl_launch,
             ).map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
+            #init
             __rccl_execution.module().#kernel #generics(
                 __rccl_execution.stream(),
                 &__rccl_prepared,
                 #sample_launch_args
                 &mut *__rccl_output_storage,
                 &mut *__rccl_privatized_storage,
-                #extra_launch_args
-                __rccl_output_lengths.map(|length| length as i32),
+                #extra_args
                 __rccl_output_offsets,
                 __rccl_privatized_lengths.map(|length| length as i32),
                 __rccl_privatized_offsets,
                 #image_launch_args
             ).map_err(::rccl_cub::DeviceAlgorithmError::Launch)?;
+        } else {
+            #init
         }
     }})
 }
@@ -570,6 +589,7 @@ fn expand_even(
     let upper = call.upper_levels;
     let workspace = call.workspace;
     let byte = tmp_primitive_size(&sample_type)? == 1;
+    let init = init_launch(&counter_type, active);
     let shape = HistogramLaunchShape {
         sample_type: &sample_type,
         counter_type: &counter_type,
@@ -585,9 +605,9 @@ fn expand_even(
         true,
         quote!(i32),
         true,
-        quote! {
-            __rccl_lower_levels,
-            __rccl_upper_levels,
+        HistogramLaunchCode {
+            extra_args: quote! { __rccl_transforms, },
+            init: &init,
         },
     )?;
     let shared_wide = launch_common(
@@ -597,9 +617,9 @@ fn expand_even(
         true,
         quote!(usize),
         false,
-        quote! {
-            __rccl_lower_levels,
-            __rccl_upper_levels,
+        HistogramLaunchCode {
+            extra_args: quote! { __rccl_transforms, },
+            init: &init,
         },
     )?;
     let global_narrow = launch_common(
@@ -609,9 +629,9 @@ fn expand_even(
         false,
         quote!(i32),
         true,
-        quote! {
-            __rccl_lower_levels,
-            __rccl_upper_levels,
+        HistogramLaunchCode {
+            extra_args: quote! { __rccl_transforms, },
+            init: &init,
         },
     )?;
     let global_wide = launch_common(
@@ -621,12 +641,11 @@ fn expand_even(
         false,
         quote!(usize),
         false,
-        quote! {
-            __rccl_lower_levels,
-            __rccl_upper_levels,
+        HistogramLaunchCode {
+            extra_args: quote! { __rccl_transforms, },
+            init: &init,
         },
     )?;
-    let init = init_launch(&counter_type, active);
     Ok(quote! {{
         (|| -> ::core::result::Result<(), ::rccl_cub::DeviceAlgorithmError> {
             let __rccl_execution = #execution;
@@ -700,7 +719,20 @@ fn expand_even(
                     );
                 }
             }
-            #init
+            // The ordinary Rust associated type is CUB's host-initialized
+            // ScaleTransform specialization.  Its non-zero range proof and
+            // reciprocal/fraction state cross the launch by value; no type
+            // registry or per-sample reconstruction is involved.
+            let __rccl_transforms: [
+                <#sample_type as ::rccl_cub::__private::HistogramSample<#level_type>>::EvenTransform;
+                #active
+            ] = core::array::from_fn(|channel| {
+                <#sample_type as ::rccl_cub::__private::HistogramSample<#level_type>>::even_transform(
+                    __rccl_lower_levels[channel],
+                    __rccl_upper_levels[channel],
+                    __rccl_output_lengths[channel] as i32,
+                )
+            });
             let __rccl_max_bins = __rccl_output_lengths.iter().copied().max().unwrap_or(0);
             if #byte || __rccl_max_bins <= 256 {
                 if __rccl_narrow_offsets {
@@ -744,6 +776,7 @@ fn expand_range(
     let levels = call.levels;
     let workspace = call.workspace;
     let byte = tmp_primitive_size(&sample_type)? == 1;
+    let init = init_launch(&counter_type, active);
     let shape = HistogramLaunchShape {
         sample_type: &sample_type,
         counter_type: &counter_type,
@@ -759,10 +792,11 @@ fn expand_range(
         true,
         quote!(i32),
         true,
-        quote! {
-            __rccl_levels_storage,
-            __rccl_level_lengths.map(|length| length as i32),
-            __rccl_level_offsets,
+        HistogramLaunchCode {
+            extra_args: quote! {
+                __rccl_level_slices,
+            },
+            init: &init,
         },
     )?;
     let shared_wide = launch_common(
@@ -772,10 +806,11 @@ fn expand_range(
         true,
         quote!(usize),
         false,
-        quote! {
-            __rccl_levels_storage,
-            __rccl_level_lengths.map(|length| length as i32),
-            __rccl_level_offsets,
+        HistogramLaunchCode {
+            extra_args: quote! {
+                __rccl_level_slices,
+            },
+            init: &init,
         },
     )?;
     let global_narrow = launch_common(
@@ -785,10 +820,11 @@ fn expand_range(
         false,
         quote!(i32),
         true,
-        quote! {
-            __rccl_levels_storage,
-            __rccl_level_lengths.map(|length| length as i32),
-            __rccl_level_offsets,
+        HistogramLaunchCode {
+            extra_args: quote! {
+                __rccl_level_slices,
+            },
+            init: &init,
         },
     )?;
     let global_wide = launch_common(
@@ -798,13 +834,13 @@ fn expand_range(
         false,
         quote!(usize),
         false,
-        quote! {
-            __rccl_levels_storage,
-            __rccl_level_lengths.map(|length| length as i32),
-            __rccl_level_offsets,
+        HistogramLaunchCode {
+            extra_args: quote! {
+                __rccl_level_slices,
+            },
+            init: &init,
         },
     )?;
-    let init = init_launch(&counter_type, active);
     Ok(quote! {{
         (|| -> ::core::result::Result<(), ::rccl_cub::DeviceAlgorithmError> {
             let __rccl_execution = #execution;
@@ -833,6 +869,12 @@ fn expand_range(
                     );
                 }
             }
+            let __rccl_level_slices =
+                ::rccl_cub::__private::histogram_read_only_slices(
+                    __rccl_levels_storage,
+                    __rccl_level_lengths,
+                    __rccl_level_offsets,
+                )?;
             let ::rccl_cub::__private::DeviceHistogramWorkspaceParts {
                 privatized: __rccl_privatized_storage,
                 queue: __rccl_queue,
@@ -880,7 +922,6 @@ fn expand_range(
                     ),
                 );
             }
-            #init
             let __rccl_max_bins = __rccl_output_lengths.iter().copied().max().unwrap_or(0);
             if #byte || __rccl_max_bins <= 256 {
                 if __rccl_narrow_offsets {
@@ -900,8 +941,12 @@ fn expand_range(
 
 #[cfg(test)]
 mod tests {
-    use super::{HistogramPolicy, policy_for, scalar, shared_bytes, sweep_name};
+    use super::{
+        HistogramLaunchCode, HistogramLaunchShape, HistogramPolicy, launch_common, policy_for,
+        scalar, shared_bytes, sweep_name,
+    };
     use crate::target::CudaTarget;
+    use quote::quote;
 
     fn policy(
         capability: u16,
@@ -1075,5 +1120,42 @@ mod tests {
         assert!(scalar(&syn::parse_quote!((i32))).is_ok());
         assert!(scalar(&syn::parse_quote!(usize)).is_err());
         assert!(scalar(&syn::parse_quote!(isize)).is_err());
+    }
+
+    #[test]
+    fn sweep_preparation_precedes_the_back_to_back_gpu_launches() {
+        let sample_type: syn::Type = syn::parse_quote!(i32);
+        let counter_type: syn::Type = syn::parse_quote!(i32);
+        let level_type: syn::Type = syn::parse_quote!(i32);
+        let policy = policy(89, sample_type.clone(), counter_type.clone(), 1, 1, true);
+        let initialization = quote!(initialization_marker(););
+        let expansion = launch_common(
+            HistogramLaunchShape {
+                sample_type: &sample_type,
+                counter_type: &counter_type,
+                level_type: &level_type,
+                channels: 1,
+                active: 1,
+                policy,
+            },
+            true,
+            false,
+            true,
+            quote!(i32),
+            true,
+            HistogramLaunchCode {
+                extra_args: quote!(__rccl_transforms,),
+                init: &initialization,
+            },
+        )
+        .unwrap()
+        .to_string();
+
+        let prepare = expansion
+            .find("prepare_device_histogram_even_sweep_384")
+            .unwrap();
+        let initialize = expansion.find("initialization_marker").unwrap();
+        let sweep = expansion.rfind("device_histogram_even_sweep_384").unwrap();
+        assert!(prepare < initialize && initialize < sweep);
     }
 }

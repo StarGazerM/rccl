@@ -360,6 +360,33 @@ fn channel_layout<const CHANNELS: usize>(
     Ok((offsets, total))
 }
 
+/// Materialize CUB's host-initialized array of `SearchTransform` ranges while
+/// retaining one shared borrow of their owning device allocation.
+#[doc(hidden)]
+pub fn histogram_read_only_slices<'a, L: DeviceCopy + Copy, const CHANNELS: usize>(
+    storage: &'a DeviceBuffer<L>,
+    lengths: [usize; CHANNELS],
+    offsets: [usize; CHANNELS],
+) -> Result<cuda_host::ReadOnlySlices<'a, L, CHANNELS>, DeviceAlgorithmError> {
+    let mut overflowed = false;
+    let ranges = core::array::from_fn(|channel| {
+        let begin = offsets[channel];
+        let end = begin.checked_add(lengths[channel]).unwrap_or_else(|| {
+            overflowed = true;
+            begin
+        });
+        begin..end
+    });
+    if overflowed {
+        return Err(DeviceAlgorithmError::SizeOverflow);
+    }
+    cuda_host::ReadOnlySlices::try_from_ranges(storage, ranges).ok_or(
+        DeviceAlgorithmError::InvalidHistogramShape(
+            "histogram level ranges must be nonempty and lie in their device allocation",
+        ),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{HistogramRegion, histogram_uses_i32_offsets};

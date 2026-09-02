@@ -100,6 +100,21 @@ fn device_kernel_capabilities_do_not_leak_unrelated_families() {
         .to_string();
     assert!(histogram.contains("device_histogram_even_sweep_384"));
     assert!(histogram.contains("device_histogram_range_arithmetic_sweep_960"));
+    assert!(histogram.contains("EvenHistogramTransforms"));
+    assert!(histogram.contains("RangeHistogramTransforms"));
+    assert_eq!(
+        histogram
+            .matches("static_block_shared_memory_from_size !")
+            .count(),
+        20,
+        "every pinned sweep entry must select its exact static TempStorage extent"
+    );
+    assert!(!histogram.contains("dynamic_shared_range"));
+    assert!(!histogram.contains("BlockSharedMemory :: new"));
+    assert!(
+        !histogram.contains("| sample : S , channel : usize |"),
+        "CUB's unrolled channel must remain a const-generic trait decision"
+    );
     assert!(!histogram.contains("device_set_keys"));
     assert!(!histogram.contains("device_merge_keys_agent"));
     assert!(!histogram.contains("device_radix_sort"));

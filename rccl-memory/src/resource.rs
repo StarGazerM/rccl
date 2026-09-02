@@ -1097,18 +1097,20 @@ unsafe impl Sync for CudaPoolMemoryResource {}
 impl CudaPoolMemoryResource {
     pub fn new(context: Arc<CudaContext>, config: PoolConfig) -> Result<Self, MemoryError> {
         context.bind_to_thread()?;
-        let props = sys::CUmemPoolProps {
-            allocType: sys::CUmemAllocationType_enum_CU_MEM_ALLOCATION_TYPE_PINNED,
-            handleTypes: sys::CUmemAllocationHandleType_enum_CU_MEM_HANDLE_TYPE_NONE,
-            location: sys::CUmemLocation {
-                type_: sys::CUmemLocationType_enum_CU_MEM_LOCATION_TYPE_DEVICE,
-                id: context.ordinal() as i32,
-            },
-            win32SecurityAttributes: std::ptr::null_mut(),
-            maxSize: config.maximum_size,
-            usage: 0,
-            reserved: [0; 54],
+        // CUDA has extended the tail of `CUmemPoolProps` while preserving its
+        // ABI and the documented requirement that every unselected field is
+        // zero.  Initialize that opaque tail as bytes, then assign only the
+        // stable semantic fields.  A struct literal would couple this crate to
+        // the exact CUDA headers used by bindgen (for example CUDA 12.4 has a
+        // 56-byte `reserved` tail whereas newer headers expose `usage`).
+        let mut props = unsafe { MaybeUninit::<sys::CUmemPoolProps>::zeroed().assume_init() };
+        props.allocType = sys::CUmemAllocationType_enum_CU_MEM_ALLOCATION_TYPE_PINNED;
+        props.handleTypes = sys::CUmemAllocationHandleType_enum_CU_MEM_HANDLE_TYPE_NONE;
+        props.location = sys::CUmemLocation {
+            type_: sys::CUmemLocationType_enum_CU_MEM_LOCATION_TYPE_DEVICE,
+            id: context.ordinal() as i32,
         };
+        props.maxSize = config.maximum_size;
         let mut pool = MaybeUninit::uninit();
         unsafe { sys::cuMemPoolCreate(pool.as_mut_ptr(), &props).result()? };
         let resource = Self {

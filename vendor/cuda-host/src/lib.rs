@@ -86,6 +86,7 @@
 //! ```
 
 pub mod embedded;
+pub mod entry_registry;
 pub mod kernel_family;
 pub mod launch;
 pub mod ltoir;
@@ -99,10 +100,10 @@ pub use kernel_family::{
     NoKernelSelectionCache, SelectedVariant, SelectionMode, SelectionSource,
 };
 pub use launch::{
-    CudaKernel, GenericCudaKernel, HasLength, KernelScalar, KernelSliceArg, KernelSliceArgMut,
-    ReadOnly, RowWidth, RowWidthOwned, Scalar, WriteOnly, push_kernel_device_slice,
-    push_kernel_row_width_device_slice, push_kernel_scalar, read_only_device_buffer_arg,
-    row_width_device_buffer_arg, writable_device_buffer_arg,
+    CudaKernel, GenericCudaKernel, HasLength, KernelArgs, KernelScalar, KernelSliceArg,
+    KernelSliceArgMut, ReadOnly, ReadOnlySlices, RowWidth, RowWidthOwned, Scalar, WriteOnly,
+    push_kernel_device_slice, push_kernel_row_width_device_slice, push_kernel_scalar,
+    read_only_device_buffer_arg, row_width_device_buffer_arg, writable_device_buffer_arg,
 };
 #[doc(hidden)]
 pub use type_id::__intern_generic_kernel_name;
@@ -126,6 +127,9 @@ pub use cuda_async::launch::{AsyncKernelLaunch, AsyncKernelLaunchBuilder, OwnedA
 pub use embedded::{
     EmbeddedModuleError, load_all_ptx_bundles_merged, load_embedded_module,
     load_first_embedded_module,
+};
+pub use entry_registry::{
+    diagnose_generic_kernel_load_error, divergent_type_id_entries, panic_generic_kernel_load_failed,
 };
 /// Loads a compiled kernel module by name. It prefers PTX, then
 /// handles NVVM IR (`<name>.ll`) or an existing `<name>.ltoir`, and finally a

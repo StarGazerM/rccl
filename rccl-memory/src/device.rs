@@ -94,6 +94,12 @@ pub type BlockSharedMemory = AlignedBlockSharedMemory<16>;
 #[doc(hidden)]
 pub use cuda_device::SharedArray as __StaticSharedArray;
 
+#[doc(hidden)]
+#[inline(always)]
+pub fn __invalid_static_block_shared_size() -> ! {
+    cuda_device::debug::trap()
+}
+
 impl<const ALIGN: usize> AlignedBlockSharedMemory<ALIGN> {
     /// Bind the macro-declared dynamic shared extent for this kernel block.
     #[inline(always)]
@@ -305,6 +311,32 @@ macro_rules! static_block_shared_memory {
         // `from_static_raw`; callers receive only the safe affine capability.
         unsafe {
             $crate::device::AlignedBlockSharedMemory::<{ $align }>::from_static_raw(&raw mut $name)
+        }
+    }};
+}
+
+/// Select one literal static shared-memory extent from a compile-time catalog.
+///
+/// Rust does not permit a function-local `static` item to capture an outer
+/// const parameter. CUDA algorithms whose C++ `TempStorage` size depends on
+/// template arguments therefore enumerate their finite literal sizes here and
+/// let monomorphization erase every unselected arm. Each arm still delegates
+/// to [`static_block_shared_memory!`], so generated kernels receive only the
+/// safe affine capability.
+#[macro_export]
+macro_rules! static_block_shared_memory_from_size {
+    ($bytes:expr; $($size:literal),+ $(,)?) => {{
+        match $bytes {
+            $(
+                $size => {
+                    $crate::static_block_shared_memory!(
+                        __RCCL_SELECTED_BLOCK_SHARED_MEMORY,
+                        $size,
+                        16usize
+                    )
+                }
+            )+
+            _ => $crate::device::__invalid_static_block_shared_size(),
         }
     }};
 }

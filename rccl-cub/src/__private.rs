@@ -1,8 +1,10 @@
 pub use crate::histogram::DeviceHistogramWorkspaceParts;
-pub use crate::histogram::histogram_uses_i32_offsets;
+pub use crate::histogram::{histogram_read_only_slices, histogram_uses_i32_offsets};
 pub use crate::histogram_backend::{
-    ArithmeticHistogramRange, HistogramOffset, HistogramRead, HistogramSample,
-    histogram_init_agent, histogram_range_bin, histogram_sweep_agent,
+    ArithmeticHistogramRange, EvenHistogramTransforms, HistogramDecode, HistogramFourReader,
+    HistogramFourSampleLoad, HistogramOffset, HistogramRead, HistogramSample,
+    RangeHistogramTransform, RangeHistogramTransforms, histogram_init_agent, histogram_range_bin,
+    histogram_sweep_agent,
 };
 /// Implementation details used by RCCL's operation macros.
 ///
@@ -49,7 +51,9 @@ pub use rccl_cub_macros::{
     __device_set_workspace_counts,
 };
 pub use rccl_memory::device::{BlockSharedMemory, HistogramCounter};
-pub use rccl_memory::{copy_device_range, static_block_shared_memory};
+pub use rccl_memory::{
+    copy_device_range, static_block_shared_memory, static_block_shared_memory_from_size,
+};
 /// Normalize cuda-oxide and RCCL allocator buffers for CUB's required
 /// stream-ordered lookback memset. Implemented only for the signed
 /// 32-bit protocol word, so byte-zeroing cannot create an invalid value.

@@ -59,6 +59,20 @@ double measure(cudaStream_t stream, cudaEvent_t start, cudaEvent_t end, int iter
     CUDA_CHECK(operation());
   CUDA_CHECK(cudaStreamSynchronize(stream));
 
+  if (std::getenv("RCCL_HISTOGRAM_BATCHED") != nullptr)
+  {
+    // Match the Rust benchmark's diagnostic mode: amortize synchronized
+    // submission latency without changing the operation sequence.
+    CUDA_CHECK(cudaEventRecord(start, stream));
+    for (int i = 0; i < iterations; ++i)
+      CUDA_CHECK(operation());
+    CUDA_CHECK(cudaEventRecord(end, stream));
+    CUDA_CHECK(cudaEventSynchronize(end));
+    float milliseconds = 0;
+    CUDA_CHECK(cudaEventElapsedTime(&milliseconds, start, end));
+    return milliseconds / iterations;
+  }
+
   std::vector<float> samples;
   samples.reserve(static_cast<std::size_t>(iterations));
   for (int i = 0; i < iterations; ++i)

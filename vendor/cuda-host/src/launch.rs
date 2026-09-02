@@ -122,6 +122,134 @@ pub trait KernelScalar: Copy {}
 
 impl<T: Copy> KernelScalar for T {}
 
+/// Fixed-capacity kernel argument packet used by generated synchronous launches.
+///
+/// The proc macro computes `N` from the flattened CUDA ABI, so argument
+/// marshalling stays on the stack and generated code does not expose raw
+/// pointers or perform heap growth between dependent kernel submissions.
+#[doc(hidden)]
+pub struct KernelArgs<const N: usize> {
+    entries: [*mut c_void; N],
+    len: usize,
+}
+
+#[doc(hidden)]
+pub trait KernelArgumentList {
+    fn push_argument(&mut self, entry: *mut c_void);
+}
+
+impl<const N: usize> KernelArgs<N> {
+    #[inline]
+    pub fn new() -> Self {
+        Self {
+            entries: [std::ptr::null_mut(); N],
+            len: 0,
+        }
+    }
+
+    #[inline]
+    fn push(&mut self, entry: *mut c_void) {
+        let Some(slot) = self.entries.get_mut(self.len) else {
+            panic!("generated CUDA kernel argument packet exceeded its ABI capacity");
+        };
+        *slot = entry;
+        self.len += 1;
+    }
+
+    #[inline]
+    pub fn as_mut_slice(&mut self) -> &mut [*mut c_void] {
+        &mut self.entries[..self.len]
+    }
+}
+
+impl<const N: usize> Default for KernelArgs<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const N: usize> KernelArgumentList for KernelArgs<N> {
+    #[inline]
+    fn push_argument(&mut self, entry: *mut c_void) {
+        self.push(entry);
+    }
+}
+
+impl KernelArgumentList for Vec<*mut c_void> {
+    #[inline]
+    fn push_argument(&mut self, entry: *mut c_void) {
+        self.push(entry);
+    }
+}
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct ReadOnlySliceDescriptor<T> {
+    address: u64,
+    len: std::num::NonZeroU32,
+    padding: u32,
+    marker: std::marker::PhantomData<T>,
+}
+
+/// A checked fixed set of nonempty ranges borrowed from one device buffer.
+///
+/// `#[cuda_module]` maps this host-only owner of the launch borrow to
+/// `cuda_device::read_only::ReadOnlySlices<T, N>`. Both types have the same
+/// `repr(C)` descriptor-array layout, while only this host type exposes a safe
+/// constructor.
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct ReadOnlySlices<'a, T, const N: usize> {
+    slices: [ReadOnlySliceDescriptor<T>; N],
+    borrow: std::marker::PhantomData<&'a T>,
+}
+
+impl<'a, T: Copy, const N: usize> ReadOnlySlices<'a, T, N> {
+    /// Validate and materialize device slice descriptors for one launch.
+    ///
+    /// Empty ranges are rejected because CUDA allocations may use a null
+    /// address for an empty buffer, while Rust slices always require a
+    /// non-null aligned address even when their length is zero.
+    pub fn try_from_ranges(
+        buffer: &'a (impl KernelSliceArg<Elem = T> + ?Sized),
+        ranges: [std::ops::Range<usize>; N],
+    ) -> Option<Self> {
+        let element_bytes = std::mem::size_of::<T>();
+        if element_bytes == 0 {
+            return None;
+        }
+        let mut slices = [ReadOnlySliceDescriptor {
+            address: 0,
+            len: std::num::NonZeroU32::MIN,
+            padding: 0,
+            marker: std::marker::PhantomData,
+        }; N];
+        let allocation_address = buffer.cu_deviceptr();
+        for (channel, range) in ranges.into_iter().enumerate() {
+            if range.start >= range.end || range.end > buffer.len() {
+                return None;
+            }
+            let len = i32::try_from(range.len()).ok()?;
+            let len = std::num::NonZeroU32::new(len as u32)?;
+            let byte_offset = range.start.checked_mul(element_bytes)?;
+            let byte_len = range.len().checked_mul(element_bytes)?;
+            if byte_len > isize::MAX as usize {
+                return None;
+            }
+            slices[channel] = ReadOnlySliceDescriptor {
+                address: allocation_address.checked_add(byte_offset as u64)?,
+                len,
+                padding: 0,
+                marker: std::marker::PhantomData,
+            };
+        }
+        Some(Self {
+            slices,
+            borrow: std::marker::PhantomData,
+        })
+    }
+}
+
 /// Pushes a by-value scalar kernel argument into a CUDA driver argument list.
 ///
 /// The pointed-to value must remain alive until the launch submission call has
@@ -139,11 +267,11 @@ impl<T: Copy> KernelScalar for T {}
 /// disappears in release builds for non-ZSTs.
 #[inline]
 #[doc(hidden)]
-pub fn push_kernel_scalar<T: KernelScalar>(args: &mut Vec<*mut c_void>, value: &mut T) {
+pub fn push_kernel_scalar<T: KernelScalar>(args: &mut impl KernelArgumentList, value: &mut T) {
     if std::mem::size_of::<T>() == 0 {
         return;
     }
-    args.push(value as *mut T as *mut c_void);
+    args.push_argument(value as *mut T as *mut c_void);
 }
 
 /// Returns the `(device pointer, element count)` pair used for read-only slice
@@ -175,12 +303,12 @@ pub fn writable_device_buffer_arg<T>(
 #[inline]
 #[doc(hidden)]
 pub fn push_kernel_device_slice(
-    args: &mut Vec<*mut c_void>,
+    args: &mut impl KernelArgumentList,
     ptr: &mut cuda_core::sys::CUdeviceptr,
     len: &mut u64,
 ) {
-    args.push(ptr as *mut cuda_core::sys::CUdeviceptr as *mut c_void);
-    args.push(len as *mut u64 as *mut c_void);
+    args.push_argument(ptr as *mut cuda_core::sys::CUdeviceptr as *mut c_void);
+    args.push_argument(len as *mut u64 as *mut c_void);
 }
 
 /// A device buffer together with the row width the kernel will index it by.
@@ -301,14 +429,14 @@ pub fn row_width_device_buffer_arg<T>(
 #[inline]
 #[doc(hidden)]
 pub fn push_kernel_row_width_device_slice(
-    args: &mut Vec<*mut c_void>,
+    args: &mut impl KernelArgumentList,
     ptr: &mut cuda_core::sys::CUdeviceptr,
     len: &mut u64,
     width: &mut u32,
 ) {
-    args.push(ptr as *mut cuda_core::sys::CUdeviceptr as *mut c_void);
-    args.push(len as *mut u64 as *mut c_void);
-    args.push(width as *mut u32 as *mut c_void);
+    args.push_argument(ptr as *mut cuda_core::sys::CUdeviceptr as *mut c_void);
+    args.push_argument(len as *mut u64 as *mut c_void);
+    args.push_argument(width as *mut u32 as *mut c_void);
 }
 
 // =============================================================================
@@ -900,5 +1028,80 @@ mod tests {
             ptr
         );
         assert_eq!(unsafe { *(args[1] as *const u64) }, len);
+    }
+
+    #[test]
+    fn fixed_kernel_args_keep_the_generated_abi_packet_on_the_stack() {
+        let mut args = KernelArgs::<2>::new();
+        let mut ptr: cuda_core::sys::CUdeviceptr = 0xfeed_beefu64;
+        let mut len = 1024u64;
+
+        push_kernel_device_slice(&mut args, &mut ptr, &mut len);
+
+        assert_eq!(args.as_mut_slice().len(), 2);
+        assert_eq!(args.as_mut_slice()[0], &mut ptr as *mut _ as *mut c_void);
+        assert_eq!(args.as_mut_slice()[1], &mut len as *mut _ as *mut c_void);
+    }
+
+    #[test]
+    #[should_panic(expected = "exceeded its ABI capacity")]
+    fn fixed_kernel_args_fail_loudly_if_codegen_miscalculates_capacity() {
+        let mut args = KernelArgs::<1>::new();
+        let mut ptr: cuda_core::sys::CUdeviceptr = 0;
+        let mut len = 0u64;
+        push_kernel_device_slice(&mut args, &mut ptr, &mut len);
+    }
+
+    struct TestReadOnlyBuffer {
+        address: u64,
+        len: usize,
+    }
+
+    // SAFETY: this test double reports one stable, aligned synthetic device
+    // allocation and is never submitted to a CUDA launch.
+    unsafe impl KernelSliceArg for TestReadOnlyBuffer {
+        type Elem = u32;
+
+        fn cu_deviceptr(&self) -> cuda_core::sys::CUdeviceptr {
+            self.address
+        }
+
+        fn len(&self) -> usize {
+            self.len
+        }
+    }
+
+    #[test]
+    #[expect(
+        clippy::single_range_in_vec_init,
+        reason = "N=1 is the API shape under test, not a request to collect the range"
+    )]
+    fn read_only_slices_validate_every_range_and_keep_the_device_abi() {
+        let buffer = TestReadOnlyBuffer {
+            address: 0x1000,
+            len: 16,
+        };
+        let slices = ReadOnlySlices::try_from_ranges(&buffer, [1..5, 8..16]).unwrap();
+        assert_eq!(
+            std::mem::size_of_val(&slices),
+            4 * std::mem::size_of::<u64>()
+        );
+        assert_eq!(
+            std::mem::offset_of!(ReadOnlySliceDescriptor<u32>, address),
+            0
+        );
+        assert_eq!(std::mem::offset_of!(ReadOnlySliceDescriptor<u32>, len), 8);
+        assert_eq!(
+            std::mem::offset_of!(ReadOnlySliceDescriptor<u32>, padding),
+            12
+        );
+        assert!(ReadOnlySlices::try_from_ranges(&buffer, [0..0]).is_none());
+        assert!(ReadOnlySlices::try_from_ranges(&buffer, [15..17]).is_none());
+
+        let oversized = TestReadOnlyBuffer {
+            address: 0x1000,
+            len: i32::MAX as usize + 1,
+        };
+        assert!(ReadOnlySlices::try_from_ranges(&oversized, [0..i32::MAX as usize + 1]).is_none());
     }
 }
