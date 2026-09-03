@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export LC_ALL=C
 
 task_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cccl_revision=571f2fc3bc53cd710e306ad43d58995c1fe4219f
@@ -46,8 +47,8 @@ find "$cccl_root/cub/test" -maxdepth 2 -type f \
   done <"$api_tests"
 } | sort -u >"$contract_sources"
 
-xargs -d '\n' rg -o --no-filename --pcre2 \
-  '(?:cub::)?(?:Device[A-Za-z0-9]+|WarpReduceBatched)::[A-Z][A-Za-z0-9_]+' \
+xargs -d '\n' rg -o --no-filename \
+  '(cub::)?(Device[A-Za-z0-9]+|WarpReduceBatched)::[A-Z][A-Za-z0-9_]+' \
   <"$contract_sources" \
   | sed 's/^cub:://' \
   | rg -v '::TempStorage$' \
