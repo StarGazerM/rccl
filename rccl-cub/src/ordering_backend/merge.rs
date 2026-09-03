@@ -64,7 +64,7 @@ where
 }
 
 /// Exact `AgentMerge::consume_tile` key path, including the SM80 asynchronous
-/// load-to-shared policy selected by the proc macro.
+/// load-to-shared policy selected by ordinary cfg-aware const policy.
 ///
 /// This function is safe to generated code. Its launch is branded as one
 /// 512-thread block per merge tile, `partitions` contains the preceding
@@ -392,7 +392,7 @@ pub fn merge_pairs_agent<
 
 /// CUB `AgentBlockSort` keys-only path used by DeviceMergeSort.
 ///
-/// The proc macro fixes the architecture policy (`THREADS`, `ITEMS`) and the
+/// Ordinary cfg-aware const policy fixes `THREADS` and `ITEMS`, and the
 /// launch chooses the borrowed destination, replacing CUB's runtime `ping`
 /// pointer selection without changing the tile algorithm.
 #[inline(always)]

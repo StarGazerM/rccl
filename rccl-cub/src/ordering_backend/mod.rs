@@ -27,8 +27,8 @@ use rccl_memory::device::{
 
 // CUB marks each per-thread item loop with `_CCCL_PRAGMA_UNROLL_FULL()`. A
 // const-generic Rust loop is not enough: LLVM is permitted to leave it rolled,
-// which changes both instruction shape and throughput. The proc macro selects
-// `ITEMS`; this shallow declarative macro materializes those compile-time
+// which changes both instruction shape and throughput. Ordinary const policy
+// selects `ITEMS`; this shallow declarative macro materializes compile-time
 // repetitions as ordinary Rust statements. Ordering policies currently cap at
 // 21 items per thread, and the extra entries leave room for subsequent pinned
 // policies while failing closed at the call-site assertion below.
@@ -154,7 +154,7 @@ macro_rules! for_each_histogram_thread_bin {
 // The primitive radix surface tops out at eight 8-bit passes for 64-bit
 // keys. CUB marks every histogram pass loop as fully unrolled even though the
 // selected bit range is runtime state. Materialize that same bounded shape in
-// Rust; `MAX_PASSES` remains a proc-macro-selected type-level policy.
+// Rust; `MAX_PASSES` remains an ordinary const-generic policy value.
 macro_rules! for_each_histogram_pass {
     ($maximum:expr, $active:expr, $pass:ident, $body:block) => {{
         macro_rules! one {
@@ -297,7 +297,7 @@ macro_rules! for_each_radix_raking_word {
 
 /// CUB `BlockExchange` inserts one item after every 32 logical items when a
 /// thread owns a power-of-two number of items greater than four.  `ITEMS` is a
-/// proc-macro-selected policy constant, so this branch disappears in each
+/// ordinary const-generic policy value, so this branch disappears in each
 /// kernel instantiation.
 #[inline(always)]
 const fn block_exchange_index<const ITEMS: usize>(index: u32) -> usize {

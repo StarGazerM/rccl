@@ -5,10 +5,10 @@ status_values = ["missing", "partial", "implemented", "native-rust", "backend-bl
 [[surface]]
 id = "compile-time-macro-boundary"
 kind = "compiler-infrastructure"
-owner = "rccl-cub-macros/rccl-cub/rccl-thrust"
+owner = "rccl-cub/rccl-thrust"
 status = "implemented"
 entries = ["cub.complete-public-catalog", "cub.semantic-operation-contracts", "thrust.coverage-ledger", "declarative-vs-procedural-boundary"]
-evidence = ["RCCL_COMPILER_DSL.md", "rccl-cub-macros/src/catalog.rs", "rccl-cub-macros/src/call.rs", "rccl-cub/src/macros", "rccl-thrust/src/macros", "scripts/test-gpu.sh"]
+evidence = ["RCCL_COMPILER_DSL.md", "rccl-cub/src/api_tests.rs", "rccl-thrust/src/api_tests.rs", "rccl-cub/src/dispatch.rs", "rccl-cub/src/histogram_dispatch.rs", "scripts/test-gpu.sh"]
 
 [[surface]]
 id = "rust-support-values"
@@ -86,10 +86,10 @@ evidence = ["CCCL_THRUST_CUB_COVERAGE_PLAN.md"]
 [[surface]]
 id = "thrust-set-operations"
 kind = "thrust-public-header"
-owner = "rccl-thrust/rccl-cub/rccl-cub-macros"
+owner = "rccl-thrust/rccl-cub"
 status = "partial"
 entries = ["thrust/thrust/set_operations.h"]
-evidence = ["rccl-thrust/src/set.rs", "rccl-cub/src/ordering_backend/set.rs", "rccl-cub-macros/src/set.rs", "rccl-thrust/examples/set_operations.rs", "rccl-thrust/examples/set_operations_tests.rs", "reviews/set-operations-cccl-source.md", "scripts/test-set-operations.sh"]
+evidence = ["rccl-thrust/src/set.rs", "rccl-cub/src/ordering_backend/set.rs", "rccl-cub/src/set_operation.rs", "rccl-cub/src/set_kernels.rs", "rccl-thrust/examples/set_operations.rs", "rccl-thrust/examples/set_operations_tests.rs", "reviews/set-operations-cccl-source.md", "scripts/test-set-operations.sh"]
 review = "reviews/set-operations-cccl-source.md"
 
 [[surface]]
@@ -258,7 +258,7 @@ kind = "cub-public-header"
 owner = "rccl-cub"
 status = "backend-blocked"
 entries = ["cub/cub/warp/warp_merge_sort.cuh"]
-evidence = ["rccl-cub-macros/src/catalog.rs", "rccl-cub-macros/src/call.rs", "RCCL_COMPILER_DSL.md"]
+evidence = ["CCCL_THRUST_CUB_COVERAGE_PLAN.md", "RCCL_COMPILER_DSL.md"]
 
 [[surface]]
 id = "cub-device-sort-merge"
@@ -270,7 +270,7 @@ entries = [
   "cub/cub/device/device_merge_sort.cuh",
   "cub/cub/device/device_radix_sort.cuh",
 ]
-evidence = ["rccl-cub-macros/src/catalog.rs", "rccl-cub-macros/src/call.rs", "RCCL_COMPILER_DSL.md"]
+evidence = ["rccl-cub/src/dispatch.rs", "rccl-cub/src/ordering_kernels.rs", "rccl-cub/src/merge.rs", "rccl-cub/src/merge_sort.rs", "rccl-cub/src/radix.rs", "RCCL_COMPILER_DSL.md"]
 
 [[surface]]
 id = "cub-public-missing"
@@ -350,7 +350,7 @@ entries = [
   "cub/cub/agent/agent_radix_sort_downsweep.cuh",
   "cub/cub/agent/agent_sub_warp_merge_sort.cuh",
 ]
-evidence = ["rccl-cub-macros/src/catalog.rs", "CCCL_THRUST_CUB_COVERAGE_PLAN.md"]
+evidence = ["CCCL_THRUST_CUB_COVERAGE_PLAN.md"]
 
 [[surface]]
 id = "cub-agents-missing"

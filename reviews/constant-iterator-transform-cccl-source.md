@@ -28,14 +28,14 @@ callable, compiler invocation, or output-format choice.
 - A zero-length early return cannot mask either executable because both use
   nonempty ranges and verify their complete result.
 - `RepeatN` construction never executes the user closure on the host. The only
-  operational path is the generated cuda-oxide kernel.
+  operational path is the fixed CUB cuda-oxide kernel.
 - The catalog marks only this intersection as partial. Other range adaptors
   and transform forms remain planned rather than gaining compile-only or CPU
   examples.
 - RCCL emits Rust only. The gate invokes cuda-oxide's standard workflow and
   does not configure its compiler, target, device-code format, or loader.
-- The gate rejects a CUDA kernel in `rccl-thrust/src/macros`; the declarative
-  Thrust wrapper must lower through the hidden CUB transform edge.
+- The gate rejects Thrust-owned CUDA kernels; the ordinary Thrust function
+  lowers through the hidden CUB transform edge.
 
 ## Injected faults
 

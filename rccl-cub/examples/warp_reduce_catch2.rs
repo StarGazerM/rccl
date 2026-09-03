@@ -17,21 +17,19 @@ const THREADS: usize = 128;
 const ITEMS_PER_THREAD: usize = 4;
 
 // Runtime selectors choose among already-compiled Catch2 rows. Literal widths
-// and ordinary Rust closure expressions remain inputs to RCCL's proc macros.
+// and ordinary Rust closure expressions remain const-generic function inputs.
 macro_rules! full_integer_operation {
     ($type:ty, $operation:expr, $width:literal, $value:expr) => {
         match $operation {
-            0 => rccl_cub::warp_reduce!(::<$type, $width>($value, |left, right| left.wrapping_add(right))),
-            1 => rccl_cub::warp_reduce!(::<$type, $width>($value, |left, right| if left > right {
-                left
-            } else {
-                right
-            })),
-            2 => rccl_cub::warp_reduce!(::<$type, $width>($value, |left, right| if left < right {
-                left
-            } else {
-                right
-            })),
+            0 => rccl_cub::warp_reduce::<$type, $width>($value, $width, |left, right| {
+                left.wrapping_add(right)
+            }),
+            1 => rccl_cub::warp_reduce::<$type, $width>($value, $width, |left, right| {
+                if left > right { left } else { right }
+            }),
+            2 => rccl_cub::warp_reduce::<$type, $width>($value, $width, |left, right| {
+                if left < right { left } else { right }
+            }),
             _ => return,
         }
     };
@@ -40,18 +38,15 @@ macro_rules! full_integer_operation {
 macro_rules! partial_integer_operation {
     ($type:ty, $operation:expr, $width:literal, $value:expr, $valid:expr) => {
         match $operation {
-            0 => rccl_cub::warp_reduce!(::<$type, $width>($value, $valid, |left, right| left
-                .wrapping_add(right))),
-            1 => rccl_cub::warp_reduce!(::<$type, $width>($value, $valid, |left, right| if left > right {
-                left
-            } else {
-                right
-            })),
-            2 => rccl_cub::warp_reduce!(::<$type, $width>($value, $valid, |left, right| if left < right {
-                left
-            } else {
-                right
-            })),
+            0 => rccl_cub::warp_reduce::<$type, $width>($value, $valid, |left, right| {
+                left.wrapping_add(right)
+            }),
+            1 => rccl_cub::warp_reduce::<$type, $width>($value, $valid, |left, right| {
+                if left > right { left } else { right }
+            }),
+            2 => rccl_cub::warp_reduce::<$type, $width>($value, $valid, |left, right| {
+                if left < right { left } else { right }
+            }),
             _ => return,
         }
     };
@@ -60,19 +55,15 @@ macro_rules! partial_integer_operation {
 macro_rules! items_integer_operation {
     ($type:ty, $operation:expr, $width:literal, $items:expr) => {
         match $operation {
-            0 => {
-                rccl_cub::warp_reduce_items!(::<$type, $width, 4>($items, |left, right| left.wrapping_add(right)))
-            }
-            1 => rccl_cub::warp_reduce_items!(::<$type, $width, 4>($items, |left, right| if left > right {
-                left
-            } else {
-                right
-            })),
-            2 => rccl_cub::warp_reduce_items!(::<$type, $width, 4>($items, |left, right| if left < right {
-                left
-            } else {
-                right
-            })),
+            0 => rccl_cub::warp_reduce_items::<$type, $width, 4>($items, |left, right| {
+                left.wrapping_add(right)
+            }),
+            1 => rccl_cub::warp_reduce_items::<$type, $width, 4>($items, |left, right| {
+                if left > right { left } else { right }
+            }),
+            2 => rccl_cub::warp_reduce_items::<$type, $width, 4>($items, |left, right| {
+                if left < right { left } else { right }
+            }),
             _ => return,
         }
     };
@@ -113,7 +104,7 @@ macro_rules! integer_matrix_body {
     };
 }
 
-#[rccl_cub::program]
+#[cuda_device::cuda_module]
 mod kernels {
     use super::*;
 
@@ -245,7 +236,7 @@ where
 fn main() -> Result<(), Box<dyn Error>> {
     let context = CudaContext::new(0)?;
     let stream = context.default_stream();
-    let program = kernels::program!(&context)?;
+    let program = unsafe { kernels::load(&context)? };
     let launch = LaunchConfig1D::new(1, THREADS as u32, 0);
     let mut executed = 0;
 

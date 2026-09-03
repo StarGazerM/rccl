@@ -72,18 +72,17 @@ not labelled an isolated kernel-latency proof. Both implementations execute
 the same alternating `DoubleBuffer` workload and validate the complete final
 buffer.
 
-The full-range and 0..24 operations now select the same named primitive Rust
-function items. Before that change, identical zero-capture closure expressions
-at different call sites had distinct Rust types and produced duplicate
-cuda-oxide kernel specializations. The proc macro emits exact static one-sweep
-entries for the two supported key extents (34,304 and 32,768 bytes) and the
-three pair extents (28,160, 26,624, and 32,768 bytes); it then selects the
-entry from macro-visible key/value layouts. There is no maximum-sized runtime
-fallback. Round-trip, descending, every valid digit-window shape, wide-payload
+The full-range and 0..24 operations use the same primitive Rust function
+items. Before that change, identical zero-capture closure expressions at
+different call sites had distinct Rust types and produced duplicate
+cuda-oxide kernel specializations. One generic key kernel and one generic pair
+kernel receive their literal shared-memory extents through private layout
+dispatch; there are no extent-mangled names or maximum-sized runtime fallback.
+Round-trip, descending, every valid digit-window shape, wide-payload
 and wide-key pair probes, and floating signed-zero tests prevent that
 structural specialization from masking changed semantics.
 
-The WarpReduce operation macro selects the same hardware integer-add
+The ordinary WarpReduce const-generic function selects the same hardware integer-add
 collective as pinned CUB. Four independent reductions per loaded value keep
 the benchmark sensitive to that selection while amortizing the unavoidable
 checked-slice boundary. Replacing the specialization with the correct but

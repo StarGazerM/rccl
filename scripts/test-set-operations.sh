@@ -19,20 +19,19 @@ if rg -n 'require_output|maximum_output|OutputTooSmall' \
 fi
 if ! rg -U -q '#\[repr\(C\)\]\n#\[derive\(Clone, Copy, Debug, Default, PartialEq, Eq, DeviceCopy\)\]\npub struct KeyValue' \
   rccl-cub/src/range.rs; then
-  printf '%s\n' 'KeyValue must expose macro-visible C layout without a dishonest key-only Rust Ord' >&2
+  printf '%s\n' 'KeyValue must expose stable C layout without a dishonest key-only Rust Ord' >&2
   exit 1
 fi
 if rg -n '\bunsafe\b|\*mut|\*const|\bArc\b' \
-  rccl-cub/src/ordering_backend/set.rs rccl-cub-macros/src/set.rs rccl-thrust/src/set.rs; then
-  printf '%s\n' 'set algorithms and generated lowering must retain the safe Rust boundary' >&2
+  rccl-cub/src/ordering_backend/set.rs rccl-cub/src/set_operation.rs \
+  rccl-cub/src/set_kernels.rs rccl-thrust/src/set.rs; then
+  printf '%s\n' 'set algorithms and kernel bindings must retain the safe Rust boundary' >&2
   exit 1
 fi
 if rg -n '#\[allow\(' \
-  rccl-cub/src/ordering_backend/set.rs rccl-cub-macros/src/kernels.rs rccl-thrust/src/set.rs \
+  rccl-cub/src/set_kernels.rs rccl-thrust/src/set.rs \
   || ! rg -q 'reason = "the final cursor loads are part of CCCL' \
-    rccl-cub/src/ordering_backend/set.rs \
-  || ! rg -q 'reason = "CUDA entry points preserve the pinned CUB launch ABI' \
-    rccl-cub-macros/src/kernels.rs; then
+    rccl-cub/src/ordering_backend/set.rs; then
   printf '%s\n' 'set lint exceptions must be checked CCCL algorithm or CUDA ABI expectations, never broad allows' >&2
   exit 1
 fi
@@ -46,8 +45,8 @@ for example in \
   rccl-thrust/examples/set_operations.rs \
   rccl-thrust/examples/set_operations_tests.rs \
   rccl-thrust/examples/set_operations_benchmark.rs; do
-  if ! rg -q 'thrust_program!\(&context; .*set_operations' "$example"; then
-    printf '%s\n' 'set programs must request only their compile-time backend capability bundle' >&2
+  if ! rg -q 'rccl_thrust::cuda::Program::load\(&context\)' "$example"; then
+    printf '%s\n' 'set examples must use the ordinary fixed program loader' >&2
     exit 1
   fi
 done

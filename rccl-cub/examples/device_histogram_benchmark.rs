@@ -89,7 +89,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let context = CudaContext::new(0)?;
     let stream = context.default_stream();
-    let cub = rccl_cub::cub_program!(&context; histogram)?;
+    let cub = rccl_cub::cuda::Program::load(&context)?;
     let launch = cub.on(&stream)?;
 
     let single_host = random_bins(items, bins);
@@ -111,20 +111,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     let level_storage = DeviceBuffer::from_host(&stream, &level_values)?;
 
     let mut single_even = DeviceHistogram::<i32, 1>::new(&stream, [bins])?;
-    let mut single_even_workspace = rccl_cub::device_histogram_even_workspace!(::<
-        i32,
-        i32,
-        i32,
-        1,
-        1,
-    >(
+    let mut single_even_workspace = rccl_cub::device_histogram_even_workspace::<i32, i32, i32, 1, 1>(
         &launch,
         &single_samples,
         HistogramRegion::All,
         &single_even,
-    ))?;
+    )?;
     let single_even_ms = timed(&stream, iterations, || {
-        rccl_cub::device_histogram_even!(::<i32, i32, i32, 1, 1>(
+        rccl_cub::device_histogram_even::<i32, i32, i32, 1, 1>(
             &launch,
             &single_samples,
             HistogramRegion::All,
@@ -132,7 +126,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             [0],
             [bins as i32],
             &mut single_even_workspace,
-        ))
+        )
     })?;
     assert_eq!(single_even.to_host_channels(&stream)?[0], single_expected);
 
@@ -142,45 +136,34 @@ fn main() -> Result<(), Box<dyn Error>> {
     let single_levels =
         DeviceHistogramLevelsView::<i32, 1>::from_ranges(&level_storage, [0..level_values.len()])?;
     let mut single_range = DeviceHistogram::<i32, 1>::new(&stream, [bins])?;
-    let mut single_range_workspace = rccl_cub::device_histogram_range_workspace!(::<
-        i32,
-        i32,
-        i32,
-        1,
-        1,
-    >(
-        &launch,
-        &single_samples,
-        HistogramRegion::All,
-        &single_range,
-    ))?;
+    let mut single_range_workspace =
+        rccl_cub::device_histogram_range_workspace::<i32, i32, i32, 1, 1>(
+            &launch,
+            &single_samples,
+            HistogramRegion::All,
+            &single_range,
+        )?;
     let single_range_ms = timed(&stream, iterations, || {
-        rccl_cub::device_histogram_range!(::<i32, i32, i32, 1, 1>(
+        rccl_cub::device_histogram_range::<i32, i32, i32, 1, 1>(
             &launch,
             &single_samples,
             HistogramRegion::All,
             &mut single_range,
             &single_levels,
             &mut single_range_workspace,
-        ))
+        )
     })?;
     assert_eq!(single_range.to_host_channels(&stream)?[0], single_expected);
 
     let mut multi_even = DeviceHistogram::<i32, 3>::new(&stream, [bins; 3])?;
-    let mut multi_even_workspace = rccl_cub::device_histogram_even_workspace!(::<
-        i32,
-        i32,
-        i32,
-        4,
-        3,
-    >(
+    let mut multi_even_workspace = rccl_cub::device_histogram_even_workspace::<i32, i32, i32, 4, 3>(
         &launch,
         &multi_samples,
         HistogramRegion::All,
         &multi_even,
-    ))?;
+    )?;
     let multi_even_ms = timed(&stream, iterations, || {
-        rccl_cub::device_histogram_even!(::<i32, i32, i32, 4, 3>(
+        rccl_cub::device_histogram_even::<i32, i32, i32, 4, 3>(
             &launch,
             &multi_samples,
             HistogramRegion::All,
@@ -188,7 +171,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             [0; 3],
             [bins as i32; 3],
             &mut multi_even_workspace,
-        ))
+        )
     })?;
     assert_eq!(multi_even.to_host_channels(&stream)?, multi_expected);
 
@@ -197,27 +180,22 @@ fn main() -> Result<(), Box<dyn Error>> {
         core::array::from_fn(|_| 0..level_values.len()),
     )?;
     let mut multi_range = DeviceHistogram::<i32, 3>::new(&stream, [bins; 3])?;
-    let mut multi_range_workspace = rccl_cub::device_histogram_range_workspace!(::<
-        i32,
-        i32,
-        i32,
-        4,
-        3,
-    >(
-        &launch,
-        &multi_samples,
-        HistogramRegion::All,
-        &multi_range,
-    ))?;
+    let mut multi_range_workspace =
+        rccl_cub::device_histogram_range_workspace::<i32, i32, i32, 4, 3>(
+            &launch,
+            &multi_samples,
+            HistogramRegion::All,
+            &multi_range,
+        )?;
     let multi_range_ms = timed(&stream, iterations, || {
-        rccl_cub::device_histogram_range!(::<i32, i32, i32, 4, 3>(
+        rccl_cub::device_histogram_range::<i32, i32, i32, 4, 3>(
             &launch,
             &multi_samples,
             HistogramRegion::All,
             &mut multi_range,
             &multi_levels,
             &mut multi_range_workspace,
-        ))
+        )
     })?;
     assert_eq!(multi_range.to_host_channels(&stream)?, multi_expected);
 

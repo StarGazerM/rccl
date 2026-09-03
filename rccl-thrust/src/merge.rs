@@ -5,7 +5,6 @@ use rccl_memory::{DeviceAllocator, TemporaryValue};
 
 use crate::{
     DeviceAlgorithmError,
-    backend::{MergeBackend, MergePairsBackend},
     cuda::Execution,
     range::{DeviceView, DeviceViewMut, KeyValueRange, KeyValueRangeMut},
 };
@@ -85,14 +84,13 @@ impl<'a, 'b, K> Merge<DeviceView<'a, K>, DeviceView<'b, K>>
 where
     K: TemporaryValue + PartialOrd,
 {
-    pub fn write_into<A, M>(
+    pub fn write_into<A>(
         self,
         output: DeviceViewMut<'_, K>,
-        execution: &Execution<'_, '_, A, M>,
+        execution: &Execution<'_, '_, A>,
     ) -> Result<(), DeviceAlgorithmError>
     where
         A: DeviceAllocator,
-        M: MergeBackend<K>,
     {
         execute_merge_by(
             execution,
@@ -109,14 +107,13 @@ where
     K: TemporaryValue,
     F: Fn(&K, &K) -> Ordering + Copy,
 {
-    pub fn write_into<A, M>(
+    pub fn write_into<A>(
         self,
         output: DeviceViewMut<'_, K>,
-        execution: &Execution<'_, '_, A, M>,
+        execution: &Execution<'_, '_, A>,
     ) -> Result<(), DeviceAlgorithmError>
     where
         A: DeviceAllocator,
-        M: MergeBackend<K>,
     {
         execute_merge_by(
             execution,
@@ -133,14 +130,13 @@ where
     K: TemporaryValue + PartialOrd,
     V: TemporaryValue,
 {
-    pub fn write_into<A, M>(
+    pub fn write_into<A>(
         self,
         mut output: KeyValueRangeMut<'_, K, V>,
-        execution: &Execution<'_, '_, A, M>,
+        execution: &Execution<'_, '_, A>,
     ) -> Result<(), DeviceAlgorithmError>
     where
         A: DeviceAllocator,
-        M: MergePairsBackend<K, V>,
     {
         execute_merge_pairs_by(
             execution,
@@ -158,14 +154,13 @@ where
     V: TemporaryValue,
     F: Fn(&K, &K) -> Ordering + Copy,
 {
-    pub fn write_into<A, M>(
+    pub fn write_into<A>(
         self,
         mut output: KeyValueRangeMut<'_, K, V>,
-        execution: &Execution<'_, '_, A, M>,
+        execution: &Execution<'_, '_, A>,
     ) -> Result<(), DeviceAlgorithmError>
     where
         A: DeviceAllocator,
-        M: MergePairsBackend<K, V>,
     {
         execute_merge_pairs_by(execution, self.first, self.second, &mut output, self.order)
     }
@@ -182,8 +177,8 @@ fn natural_order<K: PartialOrd>(left: &K, right: &K) -> Ordering {
     }
 }
 
-fn execute_merge_by<K, A, M, F>(
-    execution: &Execution<'_, '_, A, M>,
+fn execute_merge_by<K, A, F>(
+    execution: &Execution<'_, '_, A>,
     first: &cuda_core::DeviceBuffer<K>,
     second: &cuda_core::DeviceBuffer<K>,
     output: &mut cuda_core::DeviceBuffer<K>,
@@ -192,12 +187,10 @@ fn execute_merge_by<K, A, M, F>(
 where
     K: TemporaryValue,
     A: DeviceAllocator,
-    M: MergeBackend<K>,
     F: Fn(&K, &K) -> Ordering + Copy,
 {
-    let partition_count = execution
-        .module()
-        .merge_partition_count(first.len(), second.len())?;
+    let partition_count =
+        rccl_cub::thrust_integration::device_merge_partition_count::<K>(first.len(), second.len())?;
     let mut temporary = crate::memory::TemporaryWorkspace1::<_, usize>::new_in(
         execution.allocator(),
         execution.stream(),
@@ -207,13 +200,13 @@ where
     .map_err(DeviceAlgorithmError::Memory)?;
     let (partitions,) = temporary.parts_mut();
     let result = execution
-        .module()
-        .merge(execution, first, second, partitions, output, order);
-    execution.__synchronize(result)
+        .launch()
+        .merge(first, second, partitions, output, order);
+    execution.synchronize(result)
 }
 
-fn execute_merge_pairs_by<K, V, A, M, F>(
-    execution: &Execution<'_, '_, A, M>,
+fn execute_merge_pairs_by<K, V, A, F>(
+    execution: &Execution<'_, '_, A>,
     first: KeyValueRange<'_, K, V>,
     second: KeyValueRange<'_, K, V>,
     output: &mut KeyValueRangeMut<'_, K, V>,
@@ -223,15 +216,15 @@ where
     K: TemporaryValue,
     V: TemporaryValue,
     A: DeviceAllocator,
-    M: MergePairsBackend<K, V>,
     F: Fn(&K, &K) -> Ordering + Copy,
 {
     let (first_keys, first_values) = first.parts();
     let (second_keys, second_values) = second.parts();
     let (output_keys, output_values) = output.parts_mut();
-    let partition_count = execution
-        .module()
-        .merge_pairs_partition_count(first_keys.len(), second_keys.len())?;
+    let partition_count = rccl_cub::thrust_integration::device_merge_pairs_partition_count::<K, V>(
+        first_keys.len(),
+        second_keys.len(),
+    )?;
     let mut temporary = crate::memory::TemporaryWorkspace1::<_, usize>::new_in(
         execution.allocator(),
         execution.stream(),
@@ -240,8 +233,7 @@ where
     )
     .map_err(DeviceAlgorithmError::Memory)?;
     let (partitions,) = temporary.parts_mut();
-    let result = execution.module().merge_pairs(
-        execution,
+    let result = execution.launch().merge_pairs(
         first_keys,
         first_values,
         second_keys,
@@ -251,7 +243,7 @@ where
         output_values,
         order,
     );
-    execution.__synchronize(result)
+    execution.synchronize(result)
 }
 
 #[cfg(test)]

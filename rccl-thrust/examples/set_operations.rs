@@ -17,7 +17,7 @@ fn prefix<T: cuda_core::DeviceCopy>(
 fn main() -> Result<(), Box<dyn Error>> {
     let context = CudaContext::new(0)?;
     let stream = context.default_stream();
-    let thrust = rccl_thrust::thrust_program!(&context; merge, set_operations)?;
+    let thrust = rccl_thrust::cuda::Program::load(&context)?;
     let exec = thrust.par(&stream)?;
 
     let first_host = [0_i32, 2, 4, 5, 6, 8, 9];

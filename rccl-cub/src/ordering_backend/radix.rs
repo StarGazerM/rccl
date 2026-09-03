@@ -35,9 +35,9 @@ pub fn radix_init_bins_and_counters_agent(
 }
 
 // These hidden function items are the Rust spelling of CUB's primitive
-// `Traits` operations.  The proc macro selects the exact item for the key type
-// and direction.  Keeping each operation as one named item is significant:
-// identical operation-macro calls then have identical callable types, so
+// `Traits` operations.  The sealed `RadixKey` implementation selects the exact
+// item for the key type and direction. Keeping each operation as one named item
+// is significant: identical operation calls then have identical function types, so
 // cuda-oxide emits one kernel specialization instead of one per call site.
 // None of the functions performs runtime policy or type dispatch.
 
@@ -716,8 +716,8 @@ pub fn radix_single_tile_pairs_agent<
 
 /// Exact pinned SM80+ histogram agent used before one-sweep radix passes.
 ///
-/// `to_ordered` and `digit` are proc-macro-emitted primitive operations. This
-/// keeps key representation metadata out of the runtime support crate while
+/// `to_ordered` and `digit` are sealed `RadixKey` function items. This keeps
+/// representation selection static while
 /// retaining CUB's striped loads, per-block shared histogram, and device-wide
 /// atomic accumulation.
 #[inline(always)]
@@ -1021,7 +1021,7 @@ fn radix_lookback_global(
 
 /// Exact pinned SM80 `AgentRadixSortOnesweep` keys-only path.
 ///
-/// The proc macro fixes the policy (`THREADS`, `ITEMS`) and supplies primitive
+/// Ordinary const policy fixes `THREADS` and `ITEMS`; `RadixKey` supplies the
 /// bit conversions. Checked `rccl-memory` capabilities own CUB's phase-aliased
 /// shared storage, device-wide atomic lookback, and disjoint output contracts;
 /// the algorithm itself receives only affine values and borrowed slices.

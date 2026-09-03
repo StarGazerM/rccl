@@ -1,86 +1,86 @@
-use cuda_core::{CudaContext, CudaStream};
+use cuda_core::{CudaContext, CudaStream, DeviceBuffer, DeviceCopy};
 use rccl_memory::{BorrowedCudaMemoryResource, DeviceAllocator, MemoryError};
-use std::{error::Error, fmt};
+use std::{error::Error, fmt, sync::Arc};
 
-/// A synchronous Thrust execution policy borrowing one stream and program.
-pub struct Execution<'stream, 'program, A: DeviceAllocator, M> {
-    stream: &'stream CudaStream,
+/// A synchronous Thrust execution policy borrowing one stream and the fixed
+/// RCCL kernel program.
+pub struct Execution<'stream, 'program, A: DeviceAllocator> {
+    launch: rccl_cub::cuda::Launch<'stream, 'program>,
     allocator: A,
-    module: &'program M,
 }
 
-impl<A: DeviceAllocator, M> Execution<'_, '_, A, M> {
+impl<A: DeviceAllocator> Execution<'_, '_, A> {
     pub fn stream(&self) -> &CudaStream {
-        self.stream
+        self.launch.stream()
     }
 
     pub fn allocator(&self) -> &A {
         &self.allocator
     }
 
-    #[doc(hidden)]
-    pub fn module(&self) -> &M {
-        self.module
+    pub(crate) fn launch(&self) -> &rccl_cub::cuda::Launch<'_, '_> {
+        &self.launch
     }
 
-    /// Apply the completion point required by synchronous Thrust `par`.
-    ///
-    /// Each lowering places this call at the same temporary-array lifetime
-    /// boundary as pinned Thrust: merge and merge-sort synchronize before
-    /// releasing storage, while radix sort releases its inner temporary array
-    /// before the enclosing smart-sort synchronization.
-    #[doc(hidden)]
-    pub fn __synchronize(
+    pub(crate) fn transform_repeat_in_place<T, F>(
+        &self,
+        output: &mut DeviceBuffer<T>,
+        repeated: T,
+        op: F,
+    ) -> Result<(), cuda_core::LaunchContractError>
+    where
+        T: DeviceCopy,
+        F: Fn(T, T) -> T + Copy,
+    {
+        rccl_cub::thrust_integration::transform_repeat_in_place(&self.launch, output, repeated, op)
+    }
+
+    pub(crate) fn synchronize(
         &self,
         result: Result<(), crate::DeviceAlgorithmError>,
     ) -> Result<(), crate::DeviceAlgorithmError> {
         match result {
             Ok(()) => self
-                .stream
+                .stream()
                 .synchronize()
                 .map_err(crate::DeviceAlgorithmError::Driver),
             Err(error) => {
-                // A multi-kernel lowering can enqueue work successfully and
-                // then fail while preparing or launching a later kernel. The
-                // first error remains the operation result, but borrowed
-                // inputs and private temporary storage may not be released
-                // until the earlier enqueue has finished.
-                let _ = self.stream.synchronize();
+                let _ = self.stream().synchronize();
                 Err(error)
             }
         }
     }
 }
 
-/// Runtime owner for one macro-generated Thrust/CUB program.
-pub struct Program<'context, M> {
-    context: &'context CudaContext,
-    module: M,
+/// Runtime owner for the fixed Thrust/CUB kernel program.
+pub struct Program<'context> {
+    cub: rccl_cub::cuda::Program<'context>,
 }
 
-impl<'context, M> Program<'context, M> {
-    #[doc(hidden)]
-    pub fn __from_module(context: &'context CudaContext, module: M) -> Self {
-        Self { context, module }
+impl<'context> Program<'context> {
+    pub fn load(
+        context: &'context Arc<CudaContext>,
+    ) -> Result<Self, cuda_host::EmbeddedModuleError> {
+        Ok(Self {
+            cub: rccl_cub::cuda::Program::load(context)?,
+        })
     }
 
-    /// Construct the ordinary synchronous CUDA execution policy.
     pub fn par<'stream, 'program>(
         &'program self,
         stream: &'stream CudaStream,
-    ) -> Result<Execution<'stream, 'program, BorrowedCudaMemoryResource<'stream>, M>, ExecutionError>
+    ) -> Result<Execution<'stream, 'program, BorrowedCudaMemoryResource<'stream>>, ExecutionError>
     {
         let allocator =
             BorrowedCudaMemoryResource::new(stream.context()).map_err(ExecutionError)?;
         self.par_with(stream, allocator)
     }
 
-    /// Construct a synchronous CUDA execution policy using a caller resource.
     pub fn par_in<'stream, 'program, 'allocator, A: DeviceAllocator + ?Sized>(
         &'program self,
         stream: &'stream CudaStream,
         allocator: &'allocator A,
-    ) -> Result<Execution<'stream, 'program, &'allocator A, M>, ExecutionError> {
+    ) -> Result<Execution<'stream, 'program, &'allocator A>, ExecutionError> {
         self.par_with(stream, allocator)
     }
 
@@ -88,17 +88,12 @@ impl<'context, M> Program<'context, M> {
         &'program self,
         stream: &'stream CudaStream,
         allocator: A,
-    ) -> Result<Execution<'stream, 'program, A, M>, ExecutionError> {
-        if self.context != stream.context().as_ref()
-            || allocator.context().as_ref() != stream.context().as_ref()
-        {
+    ) -> Result<Execution<'stream, 'program, A>, ExecutionError> {
+        if allocator.context().as_ref() != stream.context().as_ref() {
             return Err(ExecutionError(MemoryError::ContextMismatch));
         }
-        Ok(Execution {
-            stream,
-            allocator,
-            module: &self.module,
-        })
+        let launch = self.cub.on(stream).map_err(ExecutionError)?;
+        Ok(Execution { launch, allocator })
     }
 }
 

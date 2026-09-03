@@ -27,9 +27,9 @@ matrix_example=rccl-cub/examples/warp_reduce_catch2.rs
 float_matrix_example=rccl-cub/examples/warp_reduce_catch2_f32.rs
 unit_test=rccl-cub/tests/warp_reduce_upstream.rs
 for required in \
-  'rccl_cub::warp_reduce!(::<i32, 32>' \
-  'rccl_cub::warp_reduce!(::<i32, 16>' \
-  'rccl_cub::warp_reduce_items!(::<i32, 32, 4>' \
+  'rccl_cub::warp_reduce::<i32, 32>' \
+  'rccl_cub::warp_reduce::<i32, 16>' \
+  'rccl_cub::warp_reduce_items::<i32, 32, 4>' \
   '496, 1520, 2544, 3568'; do
   if ! rg -q -F "$required" "$overview_example"; then
     printf '%s\n' "WarpReduce port lost required evidence: $required" >&2
@@ -37,8 +37,8 @@ for required in \
   fi
 done
 for required in \
-  'rccl_cub::warp_reduce!(::<$type, $width>' \
-  'rccl_cub::warp_reduce_items!(::<$type, $width, 4>' \
+  'rccl_cub::warp_reduce::<$type, $width>' \
+  'rccl_cub::warp_reduce_items::<$type, $width, 4>' \
   'full_integer_operation!($type, operation, 1' \
   'items_integer_operation!($type, operation, 16' \
   'items_integer_operation!($type, operation, 1' \
@@ -66,8 +66,8 @@ for required in \
   'partial_reference_excludes_inactive_lanes' \
   'multiple_item_reference_keeps_thread_items_in_order' \
   'supported_catch2_matrix_executes_every_translated_row' \
-  'warp_reduce_accepts_a_literal_forwarded_by_a_rust_macro'; do
-  if ! rg -q -F "$required" "$unit_test" rccl-cub-macros/src/call.rs; then
+  'warp_reduce_width_is_an_ordinary_const_generic'; do
+  if ! rg -q -F "$required" "$unit_test"; then
     printf '%s\n' "WarpReduce unit-test port lost required evidence: $required" >&2
     exit 1
   fi
@@ -85,10 +85,6 @@ while IFS= read -r rust_source; do
   fi
 done < <(
   find rccl-cub/src -type f -name '*.rs' ! -name 'tests.rs' -print
-  printf '%s\n' \
-    rccl-cub-macros/src/lib.rs \
-    rccl-cub-macros/src/call.rs \
-    rccl-cub-macros/src/catalog.rs
 )
 if [[ "$implementation_redflag" -ne 0 ]]; then
   printf '%s\n' 'WarpReduce implementation reintroduced erased or raw-pointer machinery' >&2
@@ -96,6 +92,7 @@ if [[ "$implementation_redflag" -ne 0 ]]; then
 fi
 
 source scripts/oxide-env.sh
+arch="${RCCL_ARCH:-sm_89}"
 
 cleanup_sidecars() {
   rm -f -- \
@@ -110,6 +107,7 @@ trap cleanup_sidecars EXIT
 
 for example in warp_reduce warp_reduce_catch2 warp_reduce_catch2_f32; do
   cargo oxide build \
+    --arch "$arch" \
     --features cuda-oxide-example \
     -- \
     --release \

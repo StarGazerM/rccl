@@ -1,5 +1,6 @@
 #!/usr/bin/env sh
-# Build the exact cuda-oxide compiler required by RCCL's read-only vector loads.
+# Build the exact cuda-oxide compiler required by RCCL's architecture cfgs and
+# read-only vector loads.
 set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -23,8 +24,19 @@ if [ ! -d "$oxide_checkout/.git" ]; then
 fi
 
 if [ -n "$(git -C "$oxide_checkout" status --porcelain --untracked-files=normal)" ]; then
+  expected_dir=$(mktemp -d)
+  expected_index="$expected_dir/index"
+  trap 'test ! -e "$expected_index" || unlink "$expected_index"; rmdir "$expected_dir"' EXIT HUP INT TERM
+  GIT_INDEX_FILE="$expected_index" git -C "$oxide_checkout" read-tree HEAD
+  GIT_INDEX_FILE="$expected_index" git -C "$oxide_checkout" apply --cached "$oxide_patch"
+  expected_tree=$(GIT_INDEX_FILE="$expected_index" git -C "$oxide_checkout" write-tree)
+  actual_tree=$(git -C "$oxide_checkout" write-tree)
+  unlink "$expected_index"
+  rmdir "$expected_dir"
+  trap - EXIT HUP INT TERM
   if [ -n "$(git -C "$oxide_checkout" ls-files --others --exclude-standard)" ] ||
-    ! git -C "$oxide_checkout" diff HEAD --binary --no-ext-diff | cmp -s - "$oxide_patch"; then
+    ! git -C "$oxide_checkout" diff --quiet ||
+    [ "$actual_tree" != "$expected_tree" ]; then
     printf 'refusing cuda-oxide checkout with unrelated changes: %s\n' "$oxide_checkout" >&2
     exit 1
   fi
@@ -51,4 +63,4 @@ cargo +"$oxide_toolchain" install \
   cargo +"$oxide_toolchain" oxide setup
 )
 
-printf '%s\n' "cuda-oxide $oxide_commit with RCCL read-only vector lowering is installed"
+printf '%s\n' "cuda-oxide $oxide_commit with RCCL architecture cfgs and read-only vector lowering is installed"

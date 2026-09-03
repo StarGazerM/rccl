@@ -48,11 +48,6 @@ pub(crate) struct CudaModuleParam {
     /// named `Uniform` cannot borrow the scalar host ABI.
     pub(crate) uniform_ty: Option<Type>,
     pub(crate) uniform_scalar: Option<TokenStream2>,
-    /// Host/device paired scalar whose host type carries the lifetime of a
-    /// borrowed device allocation. Its concrete Copy guarantee comes from the
-    /// generated kernel's element bound; it must not be repeated in a where
-    /// clause using the anonymous sync lifetime.
-    pub(crate) borrowed_scalar: bool,
     /// Integer classification of a scalar parameter's declared type, used to
     /// decide which scalars may appear in `requires` relations. Always
     /// `Other` for non-scalar parameters.
@@ -160,7 +155,6 @@ pub(crate) fn cuda_module_param_from_typed(
         disjoint_slice_elem,
         uniform_ty,
         uniform_scalar,
-        borrowed_scalar: cuda_module_read_only_slices(&pat_type.ty).is_some(),
         scalar_int: scalar_int_class(&pat_type.ty),
     })
 }
@@ -212,14 +206,6 @@ fn cuda_module_host_type(
         ));
     }
 
-    if let Some((elem_ty, count)) = cuda_module_read_only_slices(ty) {
-        return Ok((
-            quote! { ::cuda_host::ReadOnlySlices<'_, #elem_ty, #count> },
-            quote! { ::cuda_host::ReadOnlySlices<#async_lifetime, #elem_ty, #count> },
-            CudaModuleParamMarshal::Scalar,
-        ));
-    }
-
     // A `Uniform<T>` parameter is marshalled exactly like `T`. The host takes
     // the bare scalar because the host is what makes the value uniform: one
     // marshalled value reaches every thread of the launch.
@@ -243,46 +229,6 @@ fn cuda_module_host_type(
         quote! { #ty },
         CudaModuleParamMarshal::Scalar,
     ))
-}
-
-/// Recognize only cuda-oxide's absolute device type. Requiring the complete
-/// path keeps a local look-alike from borrowing the distinct host ABI.
-fn cuda_module_read_only_slices(ty: &Type) -> Option<(TokenStream2, TokenStream2)> {
-    let Type::Path(type_path) = ty else {
-        return None;
-    };
-    if type_path.qself.is_some() || type_path.path.leading_colon.is_none() {
-        return None;
-    }
-    let names = type_path
-        .path
-        .segments
-        .iter()
-        .map(|segment| segment.ident.to_string())
-        .collect::<Vec<_>>();
-    if names != ["cuda_device", "read_only", "ReadOnlySlices"] {
-        return None;
-    }
-    let segment = type_path.path.segments.last()?;
-    let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
-        return None;
-    };
-    let mut arguments = arguments.args.iter();
-    let GenericArgument::Type(element) = arguments.next()? else {
-        return None;
-    };
-    let count = match arguments.next()? {
-        GenericArgument::Const(count) => quote! { #count },
-        // In an unexpanded generic kernel signature, Rust's syntax parser
-        // classifies a bare const parameter such as `ACTIVE` as a type path.
-        // Name resolution later establishes that it is the declared const.
-        GenericArgument::Type(count) => quote! { #count },
-        _ => return None,
-    };
-    if arguments.next().is_some() {
-        return None;
-    }
-    Some((quote! { #element }, count))
 }
 
 fn cuda_module_slice_elem(ty: &Type) -> Option<(TokenStream2, bool)> {

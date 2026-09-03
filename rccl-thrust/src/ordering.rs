@@ -3,14 +3,7 @@ use core::cmp::Ordering;
 use cuda_core::DeviceBuffer;
 use rccl_memory::{DeviceAllocator, TemporaryValue};
 
-use crate::{
-    DeviceAlgorithmError,
-    backend::{
-        ComparisonSortBackend, ComparisonSortPairsBackend, RadixSortBackend, RadixSortPairsBackend,
-    },
-    cuda::Execution,
-    range::KeyValueRangeMut,
-};
+use crate::{DeviceAlgorithmError, cuda::Execution, range::KeyValueRangeMut};
 
 /// Rust-style in-place ordering for a mutable device buffer.
 ///
@@ -18,87 +11,77 @@ use crate::{
 /// retain the relative order of equivalent values. The additional execution
 /// argument makes the CUDA stream and allocator borrow explicit.
 pub trait DeviceSortExt<K: TemporaryValue> {
-    fn sort_unstable<A, M>(
+    fn sort_unstable<A>(
         &mut self,
-        execution: &Execution<'_, '_, A, M>,
+        execution: &Execution<'_, '_, A>,
     ) -> Result<(), DeviceAlgorithmError>
     where
         A: DeviceAllocator,
-        M: RadixSortBackend<K>;
+        K: rccl_cub::RadixKey;
 
-    fn sort_unstable_by<A, M, F>(
+    fn sort_unstable_by<A, F>(
         &mut self,
-        execution: &Execution<'_, '_, A, M>,
+        execution: &Execution<'_, '_, A>,
         order: F,
     ) -> Result<(), DeviceAlgorithmError>
     where
         A: DeviceAllocator,
-        M: ComparisonSortBackend<K>,
         F: Fn(&K, &K) -> Ordering + Copy;
 
-    fn sort<A, M>(
-        &mut self,
-        execution: &Execution<'_, '_, A, M>,
-    ) -> Result<(), DeviceAlgorithmError>
+    fn sort<A>(&mut self, execution: &Execution<'_, '_, A>) -> Result<(), DeviceAlgorithmError>
     where
         A: DeviceAllocator,
-        M: RadixSortBackend<K>;
+        K: rccl_cub::RadixKey;
 
-    fn sort_by<A, M, F>(
+    fn sort_by<A, F>(
         &mut self,
-        execution: &Execution<'_, '_, A, M>,
+        execution: &Execution<'_, '_, A>,
         order: F,
     ) -> Result<(), DeviceAlgorithmError>
     where
         A: DeviceAllocator,
-        M: ComparisonSortBackend<K>,
         F: Fn(&K, &K) -> Ordering + Copy;
 }
 
 impl<K: TemporaryValue> DeviceSortExt<K> for DeviceBuffer<K> {
-    fn sort_unstable<A, M>(
+    fn sort_unstable<A>(
         &mut self,
-        execution: &Execution<'_, '_, A, M>,
+        execution: &Execution<'_, '_, A>,
     ) -> Result<(), DeviceAlgorithmError>
     where
         A: DeviceAllocator,
-        M: RadixSortBackend<K>,
+        K: rccl_cub::RadixKey,
     {
         crate::backend::radix_sort(execution, self)
     }
 
-    fn sort_unstable_by<A, M, F>(
+    fn sort_unstable_by<A, F>(
         &mut self,
-        execution: &Execution<'_, '_, A, M>,
+        execution: &Execution<'_, '_, A>,
         order: F,
     ) -> Result<(), DeviceAlgorithmError>
     where
         A: DeviceAllocator,
-        M: ComparisonSortBackend<K>,
         F: Fn(&K, &K) -> Ordering + Copy,
     {
         crate::backend::merge_sort(execution, self, order)
     }
 
-    fn sort<A, M>(
-        &mut self,
-        execution: &Execution<'_, '_, A, M>,
-    ) -> Result<(), DeviceAlgorithmError>
+    fn sort<A>(&mut self, execution: &Execution<'_, '_, A>) -> Result<(), DeviceAlgorithmError>
     where
         A: DeviceAllocator,
-        M: RadixSortBackend<K>,
+        K: rccl_cub::RadixKey,
     {
         crate::backend::radix_sort(execution, self)
     }
 
-    fn sort_by<A, M, F>(
+    fn sort_by<A, F>(
         &mut self,
-        execution: &Execution<'_, '_, A, M>,
+        execution: &Execution<'_, '_, A>,
         order: F,
     ) -> Result<(), DeviceAlgorithmError>
     where
         A: DeviceAllocator,
-        M: ComparisonSortBackend<K>,
         F: Fn(&K, &K) -> Ordering + Copy,
     {
         crate::backend::merge_sort(execution, self, order)
@@ -111,92 +94,86 @@ impl<K: TemporaryValue> DeviceSortExt<K> for DeviceBuffer<K> {
 /// keys. This avoids overloading Rust's `sort_by_key`, which conventionally
 /// means key extraction from each element.
 pub trait DeviceKeyValueSortExt<K: TemporaryValue, V: TemporaryValue> {
-    fn sort_unstable<A, M>(
+    fn sort_unstable<A>(
         &mut self,
-        execution: &Execution<'_, '_, A, M>,
+        execution: &Execution<'_, '_, A>,
     ) -> Result<(), DeviceAlgorithmError>
     where
         A: DeviceAllocator,
-        M: RadixSortPairsBackend<K, V>;
+        K: rccl_cub::RadixKey,
+        V: rccl_cub::RadixValue;
 
-    fn sort_unstable_by<A, M, F>(
+    fn sort_unstable_by<A, F>(
         &mut self,
-        execution: &Execution<'_, '_, A, M>,
+        execution: &Execution<'_, '_, A>,
         order: F,
     ) -> Result<(), DeviceAlgorithmError>
     where
         A: DeviceAllocator,
-        M: ComparisonSortPairsBackend<K, V>,
         F: Fn(&K, &K) -> Ordering + Copy;
 
-    fn sort<A, M>(
-        &mut self,
-        execution: &Execution<'_, '_, A, M>,
-    ) -> Result<(), DeviceAlgorithmError>
+    fn sort<A>(&mut self, execution: &Execution<'_, '_, A>) -> Result<(), DeviceAlgorithmError>
     where
         A: DeviceAllocator,
-        M: RadixSortPairsBackend<K, V>;
+        K: rccl_cub::RadixKey,
+        V: rccl_cub::RadixValue;
 
-    fn sort_by<A, M, F>(
+    fn sort_by<A, F>(
         &mut self,
-        execution: &Execution<'_, '_, A, M>,
+        execution: &Execution<'_, '_, A>,
         order: F,
     ) -> Result<(), DeviceAlgorithmError>
     where
         A: DeviceAllocator,
-        M: ComparisonSortPairsBackend<K, V>,
         F: Fn(&K, &K) -> Ordering + Copy;
 }
 
 impl<K: TemporaryValue, V: TemporaryValue> DeviceKeyValueSortExt<K, V>
     for KeyValueRangeMut<'_, K, V>
 {
-    fn sort_unstable<A, M>(
+    fn sort_unstable<A>(
         &mut self,
-        execution: &Execution<'_, '_, A, M>,
+        execution: &Execution<'_, '_, A>,
     ) -> Result<(), DeviceAlgorithmError>
     where
         A: DeviceAllocator,
-        M: RadixSortPairsBackend<K, V>,
+        K: rccl_cub::RadixKey,
+        V: rccl_cub::RadixValue,
     {
         let (keys, values) = self.parts_mut();
         crate::backend::radix_sort_pairs(execution, keys, values)
     }
 
-    fn sort_unstable_by<A, M, F>(
+    fn sort_unstable_by<A, F>(
         &mut self,
-        execution: &Execution<'_, '_, A, M>,
+        execution: &Execution<'_, '_, A>,
         order: F,
     ) -> Result<(), DeviceAlgorithmError>
     where
         A: DeviceAllocator,
-        M: ComparisonSortPairsBackend<K, V>,
         F: Fn(&K, &K) -> Ordering + Copy,
     {
         let (keys, values) = self.parts_mut();
         crate::backend::merge_sort_pairs(execution, keys, values, order)
     }
 
-    fn sort<A, M>(
-        &mut self,
-        execution: &Execution<'_, '_, A, M>,
-    ) -> Result<(), DeviceAlgorithmError>
+    fn sort<A>(&mut self, execution: &Execution<'_, '_, A>) -> Result<(), DeviceAlgorithmError>
     where
         A: DeviceAllocator,
-        M: RadixSortPairsBackend<K, V>,
+        K: rccl_cub::RadixKey,
+        V: rccl_cub::RadixValue,
     {
         let (keys, values) = self.parts_mut();
         crate::backend::radix_sort_pairs(execution, keys, values)
     }
 
-    fn sort_by<A, M, F>(
+    fn sort_by<A, F>(
         &mut self,
-        execution: &Execution<'_, '_, A, M>,
+        execution: &Execution<'_, '_, A>,
         order: F,
     ) -> Result<(), DeviceAlgorithmError>
     where
         A: DeviceAllocator,
-        M: ComparisonSortPairsBackend<K, V>,
         F: Fn(&K, &K) -> Ordering + Copy,
     {
         let (keys, values) = self.parts_mut();

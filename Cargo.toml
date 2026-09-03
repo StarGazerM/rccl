@@ -8,7 +8,6 @@ description = "Umbrella crate for RCCL's Thrust-shaped and CUB-level CUDA primit
 [workspace]
 members = [
     "rccl-cub",
-    "rccl-cub-macros",
     "rccl-memory",
     "rccl-thrust",
 ]
@@ -20,7 +19,10 @@ rccl-thrust = { path = "rccl-thrust" }
 
 [profile.release]
 codegen-units = 1
-lto = "thin"
+# cuda-oxide embeds each library-owned device bundle as a native `.oxart`
+# object inside the rlib. Rust ThinLTO assumes every rlib object contains
+# LLVM bitcode and rejects that deliberately native archive member.
+lto = false
 
 # Pinned cuda-oxide currently accepts arbitrary safe slice arguments only on
 # its async launcher surface. RCCL uses the same KernelSliceArg contract for

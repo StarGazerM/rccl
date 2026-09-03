@@ -25,7 +25,6 @@ example_regions="$temporary_directory/example-regions"
 api_tests="$temporary_directory/api-tests"
 contract_sources="$temporary_directory/contract-sources"
 public_methods="$temporary_directory/public-methods"
-catalog_methods="$temporary_directory/catalog-methods"
 
 find "$cccl_root/cub/examples" -type f -name '*.cu' -printf '%P\n' \
   | sort >"$example_files"
@@ -54,12 +53,6 @@ xargs -d '\n' rg -o --no-filename --pcre2 \
   | rg -v '::TempStorage$' \
   | sort -u >"$public_methods"
 
-rg -U -o --pcre2 'exercised_operation!\(\s*"[^"]+"' \
-  "$task_root/rccl-cub-macros/src/catalog.rs" \
-  | rg -o '"[^"]+"' \
-  | tr -d '"' \
-  | sort >"$catalog_methods"
-
 check_inventory() {
   local description="$1"
   local path="$2"
@@ -84,11 +77,6 @@ check_inventory 'CUB API-test files' "$api_tests" 49 \
   f912154f0cca0b95e4f94d2157719effb188fd6b2124a0bd188be9ad95a537f8
 check_inventory 'CUB public methods exercised by examples/API tests' "$public_methods" 105 \
   a213bf7e1282806bbd08f2a3e2641fabbaa0d86dffc6daeae4203706a8267c9b
-
-if ! diff -u "$public_methods" "$catalog_methods"; then
-  printf '%s\n' 'the typed CUB compiler catalog drifted from the pinned exercised-method set' >&2
-  exit 1
-fi
 
 printf '%s\n' \
   'Pinned CUB source contract: PASS (19 programs, 378 regions, 49 API tests, 105 exercised methods)'

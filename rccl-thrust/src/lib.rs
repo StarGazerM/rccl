@@ -1,24 +1,28 @@
 //! Thrust-level Rust support.
 //!
 //! Runtime values, range adaptors, and algorithm calls use ordinary Rust
-//! traits and methods. The program macro is the compile-time boundary that
-//! materializes the target-specific CUB/cuda-oxide backend implementations.
+//! traits and methods. Architecture selection belongs to cargo-oxide's target
+//! configuration; it is not represented in the public API.
 
 mod backend;
 mod error;
 mod histogram;
-mod macros;
 mod merge;
 mod ordering;
 mod set;
+mod transform;
 
-#[doc(hidden)]
-pub mod __private;
+#[cfg(test)]
+mod api_tests;
+
 pub mod cuda;
 pub mod range;
 
 pub use cuda_core::DeviceCopy;
 pub use error::TransformError;
+pub use histogram::{
+    histogram_even, histogram_even_arithmetic, histogram_range, histogram_range_arithmetic,
+};
 pub use merge::{Merge, MergeBy};
 pub use ordering::{DeviceKeyValueSortExt, DeviceSortExt};
 pub use rccl_cub::{
@@ -31,6 +35,7 @@ pub use set::{
     ArithmeticSetRangeExt, Difference, DifferenceBy, Intersection, IntersectionBy,
     SymmetricDifference, SymmetricDifferenceBy, Union, UnionBy,
 };
+pub use transform::transform;
 
 /// Extension traits used by ordinary Rust method syntax.
 pub mod prelude {

@@ -56,12 +56,16 @@ the implementation contract.
 
 ## Compile-time policy
 
-The proc-macro-owned policy is exactly:
+The supported-target policy is an ordinary Rust const calculation:
 
-- SM 5.2: 256 threads, nominal 15 four-byte items;
-- SM 6.0 and newer: 512 threads, nominal 19 four-byte items;
-- `items = min(nominal, max(1, ceil(nominal * 4 / sizeof(K))))`;
-- `items_per_tile = threads * items - 1`.
+- 512 threads, nominal 19 four-byte items;
+- `items = min(19, max(1, ceil(19 * 4 / sizeof(K))))`;
+- `items_per_tile = 512 * items - 1`.
+
+cuda-oxide's required basic feature already makes SM80 the RCCL module floor,
+so the removed pre-SM80 schedule was unreachable compatibility code. Set
+policy therefore needs no architecture cfg; only concrete key/value layouts
+affect its literal kernel extents.
 
 Value size deliberately does not affect item tuning.  It does affect the
 shared union: a `threads * sizeof(i32)` offset array followed by the larger of
@@ -70,12 +74,11 @@ complete union has 16-byte alignment.  These values, operation
 monomorphization, kernel entry selection, and launch bounds are compile-time
 facts.  Input lengths and the 32/64-bit index branch are runtime facts.
 
-The Rust program setup can emit a set-only trait implementation catalog. This
-is capability collection, not another schedule table: the same CUB proc macro
-still owns every architecture/type decision and every kernel body, and the
-public set operations remain ordinary Rust methods. The pinned example adds
-the independent `merge` capability because it demonstrates merge before the
-four set operations; the focused set tests and benchmark do not compile it.
+The fixed CUB program owns the set kernel module. Ordinary const functions and
+sealed layout capabilities own policy; no generated capability catalog or
+schedule table exists. The public set operations remain ordinary Rust methods.
+The pinned example also demonstrates merge before the four set operations,
+while the focused set tests and benchmark exercise only the set methods.
 Rust comparator captures must be owned (`move`) and `'static`; this is the
 language-level replacement for copying a C++ comparison object into a launch.
 
@@ -116,25 +119,23 @@ equivalent-range, discard-kernel, by-key source selection, all eight
 buffers deliberately use the known result length in the simple cases so an
 accidental worst-case-capacity restriction fails the suite.
 
-The proc-macro test pins SM52 and SM89 record item counts and shared-byte
-layouts, including the rule that value size changes the shared union but not
-items per thread. Memcheck/racecheck skip only the magnitude-30-through-33
+Ordinary unit tests pin record item counts and shared-byte layouts, including
+the rule that value size changes the shared union but not items per thread.
+Memcheck/racecheck skip only the magnitude-30-through-33
 launches after running a smaller instance of the identical arithmetic agent;
 the native wide-index result tests remain mandatory.
 
-The pinned SM52 policy is therefore preserved and tested, but the current
-cuda-oxide revision cannot emit any Rust CUDA module below SM70: its own target
-validator assigns `DetectedFeatures::Basic` an SM70 floor. A direct SM52 build
-reaches that validator and is rejected before PTX generation; the same
-set/merge capability bundle builds on SM70 and SM89. Consequently SM52 device
-execution and performance are not claimed until cuda-oxide lowers its basic
+Pre-SM80 compatibility policy was deleted rather than preserved behind an
+unreachable branch. The supported SM89 set/merge capability bundle builds and
+runs; lower-target execution is not claimed. Consequently no lower-SM device
+execution or performance is claimed until cuda-oxide lowers its basic
 target floor. This is an upstream backend limitation, not a substituted RCCL
 schedule.
 
-The review also deliberately changed the SM60+ nominal item count from 19 to
-18. The focused policy test failed with `(512, 9)` instead of `(512, 10)` and
-passed again only after restoring 19, demonstrating that the test detects a
-wrong TMP policy rather than accepting the current implementation.
+The review also deliberately changed the supported-target nominal item count
+from 19 to 18. The focused policy test failed with `(512, 9)` instead of
+`(512, 10)` and passed again only after restoring 19, demonstrating that the
+test detects a wrong layout policy rather than accepting the implementation.
 
 The strict benchmark rejects any foreign compute process before measuring and
 uses a 0.1% slowdown ceiling. Its default is the large pinned `i32/i64`,
@@ -165,5 +166,5 @@ spill traffic; the corresponding cuda-oxide agent uses 83 registers with no
 stack or spill traffic.  Their partition agents use 18 and 16 registers,
 respectively.  Both use one barrier and the pinned 512-thread/19-item policy,
 so this is a code-generation resource mismatch after matching the algorithm
-and TMP path. Exact performance remains open until this difference and the
+and layout-policy path. Exact performance remains open until this difference and the
 exclusive-GPU throughput gate are resolved.

@@ -12,7 +12,7 @@ use cuda_device::{DisjointSlice, kernel, launch_bounds, launch_contract, thread}
 const THREADS: usize = 128;
 const ITEMS_PER_THREAD: usize = 4;
 
-#[rccl_cub::program]
+#[cuda_device::cuda_module]
 mod kernels {
     use super::*;
 
@@ -28,7 +28,7 @@ mod kernels {
     pub fn overview(input: &[i32], mut output: DisjointSlice<i32>) {
         let index = thread::index_1d();
         let aggregate =
-            rccl_cub::warp_reduce!(::<i32, 32>(input[index.get()], |left, right| left + right));
+            rccl_cub::warp_reduce::<i32, 32>(input[index.get()], 32, |left, right| left + right);
         if let Some(slot) = output.get_mut(index) {
             *slot = aggregate;
         }
@@ -45,11 +45,10 @@ mod kernels {
     )]
     pub fn partial_sum(input: &[i32], valid_items: u32, mut output: DisjointSlice<i32>) {
         let index = thread::index_1d();
-        let aggregate = rccl_cub::warp_reduce!(::<i32, 32>(
-            input[index.get()],
-            valid_items,
-            |left, right| left + right,
-        ));
+        let aggregate =
+            rccl_cub::warp_reduce::<i32, 32>(input[index.get()], valid_items, |left, right| {
+                left + right
+            });
         if let Some(slot) = output.get_mut(index) {
             *slot = aggregate;
         }
@@ -65,10 +64,9 @@ mod kernels {
     )]
     pub fn logical_16_max(input: &[i32], mut output: DisjointSlice<i32>) {
         let index = thread::index_1d();
-        let aggregate = rccl_cub::warp_reduce!(::<i32, 16>(
-            input[index.get()],
-            |left, right| { if left > right { left } else { right } },
-        ));
+        let aggregate = rccl_cub::warp_reduce::<i32, 16>(input[index.get()], 16, |left, right| {
+            if left > right { left } else { right }
+        });
         if let Some(slot) = output.get_mut(index) {
             *slot = aggregate;
         }
@@ -93,7 +91,7 @@ mod kernels {
             input[first + 3],
         ];
         let aggregate =
-            rccl_cub::warp_reduce_items!(::<i32, 32, 4>(items, |left, right| left + right));
+            rccl_cub::warp_reduce_items::<i32, 32, 4>(items, |left, right| left + right);
         if let Some(slot) = output.get_mut(index) {
             *slot = aggregate;
         }
@@ -111,7 +109,7 @@ mod kernels {
     pub fn i64_sum(input: &[i64], mut output: DisjointSlice<i64>) {
         let index = thread::index_1d();
         let aggregate =
-            rccl_cub::warp_reduce!(::<i64, 32>(input[index.get()], |left, right| left + right));
+            rccl_cub::warp_reduce::<i64, 32>(input[index.get()], 32, |left, right| left + right);
         if let Some(slot) = output.get_mut(index) {
             *slot = aggregate;
         }
@@ -128,10 +126,9 @@ mod kernels {
     )]
     pub fn u8_sum(input: &[u8], mut output: DisjointSlice<u8>) {
         let index = thread::index_1d();
-        let aggregate = rccl_cub::warp_reduce!(::<u8, 32>(
-            input[index.get()],
-            |left, right| left.wrapping_add(right),
-        ));
+        let aggregate = rccl_cub::warp_reduce::<u8, 32>(input[index.get()], 32, |left, right| {
+            left.wrapping_add(right)
+        });
         if let Some(slot) = output.get_mut(index) {
             *slot = aggregate;
         }
@@ -157,7 +154,7 @@ fn lane_zero_values<T: Copy>(output: &[T], logical_width: usize) -> Vec<T> {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let context = CudaContext::new(0)?;
     let stream = context.default_stream();
-    let program = kernels::program!(&context)?;
+    let program = unsafe { kernels::load(&context)? };
     let launch = LaunchConfig1D::new(1, THREADS as u32, 0);
 
     let overview_input = (0..THREADS as i32).collect::<Vec<_>>();

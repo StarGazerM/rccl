@@ -9,8 +9,8 @@ The implementation boundary is:
 ```text
 Thrust method on a typed device range or execution value
   -> ordinary rccl-thrust trait/generic code
-  -> backend trait implementation emitted with the program's CUB policy
-  -> concrete cuda-oxide Rust
+  -> ordinary rccl-cub validation and dispatch
+  -> fixed cuda-oxide kernel modules
   -> rustc/cuda-oxide monomorphization
 
 rccl-memory -> rccl-cub -> rccl-thrust -> rccl
@@ -19,10 +19,10 @@ rccl-memory -> rccl-cub -> rccl-thrust -> rccl
 
 Ordinary Rust support is ordinary Rust. Slices, tuples, arrays, ranges,
 allocators, workspaces, closures, and execution borrows are not generated.
-A declarative macro is used when a public operation only needs fixed
-syntax-directed lowering. A proc macro is retained only when expansion must
-choose a target/type-dependent CUB schedule, a concrete device instruction, or
-a static kernel family.
+Local declarative macros only reduce repetitive implementation source or
+unroll fixed device loops. RCCL owns no proc-macro crate. Target-dependent CUB
+policy is ordinary Rust selected by compiler cfg; type behavior uses generics
+and sealed capabilities.
 
 ## Current implemented slices
 
@@ -41,11 +41,10 @@ Thrust parity. The ordering result tests pass; the known cuda-oxide
 register/throughput gap remains a measured performance issue rather than a
 relaxed test.
 
-User kernels are declared with `#[rccl_cub::program]` and bound with
-`kernels::program!(&context)`. Device-wide users construct
-`cub_program!(&context)` or `thrust_program!(&context)`, then borrow the
-program and stream through `on`/`par`. Public calls never name a module or
-architecture.
+User kernels use cuda-oxide's `#[cuda_device::cuda_module]` directly.
+Device-wide users load `rccl_cub::cuda::Program` or
+`rccl_thrust::cuda::Program`, then borrow the program and stream through
+`on`/`par`. Public calls never name a module, architecture, or policy type.
 
 ## Macro boundary
 
@@ -54,7 +53,7 @@ The public calls are ordinary, type-inferred Rust method syntax:
 ```rust,ignore
 use rccl_thrust::prelude::*;
 
-let thrust = rccl_thrust::thrust_program!(&context)?;
+let thrust = rccl_thrust::cuda::Program::load(&context)?;
 let exec = thrust.par(&stream)?;
 
 keys.sort_unstable_by(&exec, |left, right| right.cmp(left))?;
@@ -79,20 +78,10 @@ let intersection_size = first
 
 `view()` and `view_mut()` carry the input and output borrows through the
 composed expression. The terminal method allocates the same private workspace
-and calls a statically selected backend trait implementation. `thrust_program!` is the item
-generation boundary: declarative scaffolding implements those traits for its
-cuda-oxide module, and the nested CUB proc macros emit the exact policy and
-launch graphs. Architecture/type policy therefore remains compile time
-without making every algorithm call a macro. Architecture is neither a public
-operand nor runtime state.
-
-A program that uses only set algorithms may write
-`thrust_program!(&context; set_operations)`. This compile-time capability
-selection emits only set backend trait implementations; it does not select a
-set algorithm or policy, change the method API, or introduce runtime dispatch.
-Capabilities compose, so the pinned example uses
-`thrust_program!(&context; merge, set_operations)`. The default form remains
-the full implemented backend catalog.
+and calls ordinary CUB functions against the fixed program modules. CUB owns
+policy, validation, and launch control. Architecture policy reads only
+compiler-emitted cfgs. Architecture is neither a public operand nor runtime
+state.
 
 Comparator closures are copied into device kernel arguments. A comparator
 that captures values therefore uses Rust's `move` closure syntax; the public
@@ -120,19 +109,12 @@ shape. A descriptor becomes operational only when that algorithm implements
 its generated lowering; constructing it never executes a device closure on
 the host.
 
-The remaining proc macros are intentionally limited to:
-
-- `#[rccl_cub::program]`: an attribute transformation that only an attribute
-  proc macro can perform;
-- `warp_reduce!` and `warp_reduce_items!`: scalar representation, tile
-  width, and concrete instruction/tree selection;
-- `__device_kernels!`: construction of the fixed static cuda-oxide kernel
-  family;
-- CUB merge/radix operations and workspace formulas whose literal policy
-  depends on target architecture and macro-visible type layout.
-
-Fixed program construction and the currently implemented constant-input
-transform launch wrapper are `macro_rules!`, not quote-only proc macros.
+All 51 former RCCL proc-macro entries and the `rccl-cub-macros` crate are
+removed. Warp reduction, device-wide operations, histogram/transform calls,
+workspace construction, and program loading are ordinary functions. Remaining
+private `macro_rules!` definitions only spell finite literal dispatch arms,
+primitive implementations, or compile-time device-loop unrolling; none are
+exported or expanded by users.
 
 ## Rust API direction
 
@@ -141,7 +123,7 @@ transform launch wrapper are `macro_rules!`, not quote-only proc macros.
 | `span` | kernel slices and checked disjoint slices |
 | `array` | `[T; N]` |
 | `pair`, `tuple` | Rust tuples or a named `repr(C)` record when names/layout matter |
-| TMP/type traits | generics, trait bounds, associated types, const generics; proc expansion only for closed CUB policy selection |
+| TMP/type traits | generics, sealed capability traits, associated types, and const generics |
 | `optional`, `expected` | `Option`, `Result` |
 | `device_vector` | `rccl_memory::DeviceBuffer` |
 | comparator/function object | an ordinary copyable Rust closure |
@@ -152,14 +134,15 @@ transform launch wrapper are `macro_rules!`, not quote-only proc macros.
 There are no compatibility `Less`, `Greater`, `Comparator`, pointer-pair
 span, runtime schedule, policy object, or legacy module aliases.
 
-The two exact `unsafe` expressions in the algorithm-facing runtime sources
-are cuda-oxide artifact-provenance binds inside the declarative
-`cub_program!` and `thrust_program!` wrappers. Algorithm bodies, range
+The three internal `unsafe` expressions in the algorithm-facing runtime
+sources bind the fixed cuda-oxide histogram, ordering, and set artifacts to
+their adjacent checked-in module definitions. Public program construction is
+safe. Algorithm bodies, range
 logic, temporary-storage splitting, and generated launch arguments use Rust
 ownership, borrows, slices, checked disjoint regions, and typed cuda-oxide
 interfaces.
 
-The detailed macro/TMP contract is in
+The detailed compile-time boundary is in
 [RCCL_COMPILER_DSL.md](RCCL_COMPILER_DSL.md). The pinned CUB example/API-test
 inventory is in
 [CCCL_CUB_EXAMPLE_TEST_CONTRACT.md](CCCL_CUB_EXAMPLE_TEST_CONTRACT.md). The
@@ -173,7 +156,7 @@ stage and adversarial error-masking iteration, is in
 scripts/test-gpu.sh
 ```
 
-The gate checks the crate boundary, rejects quote-only public proc macros,
-keeps architecture selection inside the CUB policy crate, compiles every
+The gate checks the crate boundary, rejects RCCL proc-macro crates and exported
+operation macros, keeps architecture selection inside the CUB policy crate, compiles every
 registered public example, runs host/GPU correctness tests, and runs the
 upstream-corresponding result and performance comparisons.

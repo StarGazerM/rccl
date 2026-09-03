@@ -89,7 +89,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let context = CudaContext::new(0)?;
     let stream = context.default_stream();
-    let cub = rccl_cub::cub_program!(&context)?;
+    let cub = rccl_cub::cuda::Program::load(&context)?;
     let launch = cub.on(&stream)?;
 
     let first_host = (0..count)
@@ -101,20 +101,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     let first = DeviceBuffer::from_host(&stream, &first_host)?;
     let second = DeviceBuffer::from_host(&stream, &second_host)?;
     let mut merged = DeviceBuffer::<u32>::zeroed(&stream, count * 2)?;
-    let mut merge_workspace = rccl_cub::device_merge_keys_workspace!(::<u32>(
-        &launch,
-        first.len(),
-        second.len(),
-    ))?;
+    let mut merge_workspace =
+        rccl_cub::device_merge_keys_workspace::<u32>(&launch, first.len(), second.len())?;
     let merge_timing = timed(&stream, iterations, || {
-        rccl_cub::device_merge_keys!(::<u32>(
+        rccl_cub::device_merge_keys(
             &launch,
             &first,
             &second,
             &mut merge_workspace,
             &mut merged,
             |left: &u32, right: &u32| left.cmp(right),
-        ))
+        )
     })?;
     let merged_host = merged.to_host_vec(&stream)?;
     assert!(
@@ -135,13 +132,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let second_values = DeviceBuffer::from_host(&stream, &second_values_host)?;
     let mut merged_pair_keys = DeviceBuffer::<u32>::zeroed(&stream, count * 2)?;
     let mut merged_pair_values = DeviceBuffer::<u64>::zeroed(&stream, count * 2)?;
-    let mut pair_workspace = rccl_cub::device_merge_pairs_workspace!(::<u32, u64>(
-        &launch,
-        first.len(),
-        second.len(),
-    ))?;
+    let mut pair_workspace =
+        rccl_cub::device_merge_pairs_workspace::<u32, u64>(&launch, first.len(), second.len())?;
     let pair_merge_timing = timed(&stream, iterations, || {
-        rccl_cub::device_merge_pairs!(::<u32, u64>(
+        rccl_cub::device_merge_pairs(
             &launch,
             &first,
             &first_values,
@@ -151,7 +145,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             &mut merged_pair_keys,
             &mut merged_pair_values,
             |left: &u32, right: &u32| left.cmp(right),
-        ))
+        )
     })?;
     assert!(
         merged_pair_values
@@ -168,15 +162,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     window_expected.sort_by_key(|key| key & 0x00ff_ffff);
     let sort_input = DeviceBuffer::from_host(&stream, &sort_input_host)?;
     let mut sorted = DeviceBuffer::<u32>::zeroed(&stream, count)?;
-    let mut sort_workspace = rccl_cub::device_merge_sort_keys_workspace!(::<u32>(&launch, count))?;
+    let mut sort_workspace = rccl_cub::device_merge_sort_keys_workspace::<u32>(&launch, count)?;
     let sort_timing = timed(&stream, iterations, || {
-        rccl_cub::device_merge_sort_keys_copy!(::<u32>(
+        rccl_cub::device_merge_sort_keys_copy(
             &launch,
             &sort_input,
             &mut sort_workspace,
             &mut sorted,
             |left: &u32, right: &u32| left.cmp(right),
-        ))
+        )
     })?;
     let sorted_host = sorted.to_host_vec(&stream)?;
     assert_eq!(sorted_host, sort_expected);
@@ -185,15 +179,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut radix_inputs = (0..(iterations + 3))
         .map(|_| DeviceBuffer::from_host(&stream, &sort_input_host))
         .collect::<Result<Vec<_>, _>>()?;
-    let mut radix_workspace = rccl_cub::device_radix_sort_workspace!(::<u32>(&launch, count))?;
+    let mut radix_workspace = rccl_cub::device_radix_sort_workspace::<u32>(&launch, count)?;
     stream.synchronize()?;
     let mut radix_index = 0usize;
     let radix_timing = timed(&stream, iterations, || {
-        let result = rccl_cub::device_radix_sort_keys!(::<u32>(
+        let result = rccl_cub::device_radix_sort_keys(
             &launch,
             &mut radix_inputs[radix_index],
             &mut radix_workspace,
-        ));
+        );
         radix_index += 1;
         result
     })?;
@@ -207,16 +201,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         .map(|_| DeviceBuffer::from_host(&stream, &sort_input_host))
         .collect::<Result<Vec<_>, _>>()?;
     let mut radix_pair_workspace =
-        rccl_cub::device_radix_sort_pairs_workspace!(::<u32, u32>(&launch, count))?;
+        rccl_cub::device_radix_sort_pairs_workspace::<u32, u32>(&launch, count)?;
     stream.synchronize()?;
     let mut radix_pair_index = 0usize;
     let radix_pair_timing = timed(&stream, iterations, || {
-        let result = rccl_cub::device_radix_sort_pairs!(::<u32, u32>(
+        let result = rccl_cub::device_radix_sort_pairs(
             &launch,
             &mut radix_pair_keys[radix_pair_index],
             &mut radix_pair_values[radix_pair_index],
             &mut radix_pair_workspace,
-        ));
+        );
         radix_pair_index += 1;
         result
     })?;
@@ -234,15 +228,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut window_buffers = rccl_cub::DoubleBuffer::new(&mut window_keys_0, &mut window_keys_1)
         .expect("equal benchmark key buffers must construct");
     let mut radix_window_workspace =
-        rccl_cub::device_radix_sort_keys_buffer_workspace!(::<u32>(&launch, count))?;
+        rccl_cub::device_radix_sort_keys_buffer_workspace::<u32>(&launch, count)?;
     stream.synchronize()?;
     let radix_window_timing = timed(&stream, iterations, || {
-        rccl_cub::device_radix_sort_keys_buffer!(::<u32>(
+        rccl_cub::device_radix_sort_keys_buffer(
             &launch,
             &mut window_buffers,
             0u32..24u32,
             &mut radix_window_workspace,
-        ))
+        )
     })?;
     assert_eq!(
         window_buffers.current().to_host_vec(&stream)?,
@@ -259,15 +253,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     )
     .expect("equal benchmark pair buffers must construct");
     let mut radix_window_pair_workspace =
-        rccl_cub::device_radix_sort_pairs_buffer_workspace!(::<u32, u32>(&launch, count))?;
+        rccl_cub::device_radix_sort_pairs_buffer_workspace::<u32, u32>(&launch, count)?;
     stream.synchronize()?;
     let radix_window_pair_timing = timed(&stream, iterations, || {
-        rccl_cub::device_radix_sort_pairs_buffer!(::<u32, u32>(
+        rccl_cub::device_radix_sort_pairs_buffer(
             &launch,
             &mut window_pair_buffers,
             0u32..24u32,
             &mut radix_window_pair_workspace,
-        ))
+        )
     })?;
     let (window_pair_keys, window_pair_values) = window_pair_buffers.current();
     assert_eq!(window_pair_keys.to_host_vec(&stream)?, window_expected);
@@ -285,18 +279,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut single_keys_1 = DeviceBuffer::<u32>::zeroed(&stream, SINGLE_TILE_COUNT)?;
     let mut single_keys = rccl_cub::DoubleBuffer::new(&mut single_keys_0, &mut single_keys_1)
         .expect("equal single-tile key buffers must construct");
-    let mut single_keys_workspace = rccl_cub::device_radix_sort_keys_buffer_workspace!(::<u32>(
-        &launch,
-        SINGLE_TILE_COUNT,
-    ))?;
+    let mut single_keys_workspace =
+        rccl_cub::device_radix_sort_keys_buffer_workspace::<u32>(&launch, SINGLE_TILE_COUNT)?;
     stream.synchronize()?;
     let radix_single_tile_timing = timed_batched(&stream, iterations, SINGLE_TILE_BATCH, || {
-        rccl_cub::device_radix_sort_keys_buffer!(::<u32>(
+        rccl_cub::device_radix_sort_keys_buffer(
             &launch,
             &mut single_keys,
             0u32..32u32,
             &mut single_keys_workspace,
-        ))
+        )
     })?;
     assert_eq!(
         single_keys.current().to_host_vec(&stream)?,
@@ -312,19 +304,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         (&mut single_pair_keys_1, &mut single_pair_values_1),
     )
     .expect("equal single-tile pair buffers must construct");
-    let mut single_pairs_workspace = rccl_cub::device_radix_sort_pairs_buffer_workspace!(::<u32, u32>(
-        &launch,
-        SINGLE_TILE_COUNT,
-    ))?;
+    let mut single_pairs_workspace =
+        rccl_cub::device_radix_sort_pairs_buffer_workspace::<u32, u32>(&launch, SINGLE_TILE_COUNT)?;
     stream.synchronize()?;
     let radix_single_tile_pair_timing =
         timed_batched(&stream, iterations, SINGLE_TILE_BATCH, || {
-            rccl_cub::device_radix_sort_pairs_buffer!(::<u32, u32>(
+            rccl_cub::device_radix_sort_pairs_buffer(
                 &launch,
                 &mut single_pairs,
                 0u32..32u32,
                 &mut single_pairs_workspace,
-            ))
+            )
         })?;
     let (single_pair_keys, single_pair_values) = single_pairs.current();
     assert_eq!(single_pair_keys.to_host_vec(&stream)?, single_tile_expected);

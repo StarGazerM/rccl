@@ -5,6 +5,13 @@ edition = "2024"
 license = "Apache-2.0 OR MIT"
 description = "Device-wide and cooperative CUDA primitives for RCCL"
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(cuda_arch_ge_80)',
+    'cfg(cuda_arch_ge_90)',
+    'cfg(cuda_arch_ge_100)',
+] }
+
 [features]
 cuda-oxide-example = []
 
@@ -12,7 +19,6 @@ cuda-oxide-example = []
 cuda-core = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "97f8b2b7882f0c15ad9ce9b53abed5553920caa8" }
 cuda-device = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "97f8b2b7882f0c15ad9ce9b53abed5553920caa8" }
 cuda-host = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "97f8b2b7882f0c15ad9ce9b53abed5553920caa8" }
-rccl-cub-macros = { path = "../rccl-cub-macros" }
 rccl-memory = { path = "../rccl-memory" }
 
 [[example]]
@@ -100,8 +106,44 @@ test = false
 required-features = ["cuda-oxide-example"]
 
 [[example]]
+name = "device_histogram_counters_32"
+path = "examples/device_histogram_counters_32.rs"
+test = false
+required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "device_histogram_counters_64"
+path = "examples/device_histogram_counters_64.rs"
+test = false
+required-features = ["cuda-oxide-example"]
+
+[[example]]
 name = "device_histogram_probe"
 path = "examples/device_histogram_probe.rs"
+test = false
+required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "device_histogram_types_8"
+path = "examples/device_histogram_types_8.rs"
+test = false
+required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "device_histogram_types_16"
+path = "examples/device_histogram_types_16.rs"
+test = false
+required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "device_histogram_types_32"
+path = "examples/device_histogram_types_32.rs"
+test = false
+required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "device_histogram_types_64"
+path = "examples/device_histogram_types_64.rs"
 test = false
 required-features = ["cuda-oxide-example"]
 

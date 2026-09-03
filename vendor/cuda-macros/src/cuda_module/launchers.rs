@@ -799,7 +799,7 @@ fn generate_cuda_module_prepared_owned_async_launch_method(
 fn cuda_module_launch_generics(kernel: &CudaModuleKernel) -> syn::Generics {
     let mut generics = kernel.generics.clone();
     for param in &kernel.params {
-        if matches!(param.marshal, CudaModuleParamMarshal::Scalar) && !param.borrowed_scalar {
+        if matches!(param.marshal, CudaModuleParamMarshal::Scalar) {
             let host_ty = &param.sync_host_ty;
             generics
                 .make_where_clause()
@@ -830,7 +830,7 @@ fn cuda_module_owned_async_launch_generics(
         generics.make_where_clause().predicates.push(predicate);
     }
     for param in &kernel.params {
-        if matches!(param.marshal, CudaModuleParamMarshal::Scalar) && !param.borrowed_scalar {
+        if matches!(param.marshal, CudaModuleParamMarshal::Scalar) {
             let host_ty = &param.async_host_ty;
             generics
                 .make_where_clause()
@@ -849,7 +849,7 @@ fn cuda_module_async_launch_generics(kernel: &CudaModuleKernel) -> syn::Generics
         .params
         .insert(0, syn::GenericParam::Lifetime(lifetime_param));
     for param in &kernel.params {
-        if matches!(param.marshal, CudaModuleParamMarshal::Scalar) && !param.borrowed_scalar {
+        if matches!(param.marshal, CudaModuleParamMarshal::Scalar) {
             let host_ty = &param.async_host_ty;
             generics
                 .make_where_clause()

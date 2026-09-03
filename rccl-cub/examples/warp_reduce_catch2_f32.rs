@@ -12,22 +12,18 @@ const THREADS: usize = 128;
 macro_rules! f32_min_max_operation {
     ($operation:expr, $width:literal, $value:expr) => {
         match $operation {
-            0 => rccl_cub::warp_reduce!(::<f32, $width>($value, |left, right| if left > right {
-                left
-            } else {
-                right
-            })),
-            1 => rccl_cub::warp_reduce!(::<f32, $width>($value, |left, right| if left < right {
-                left
-            } else {
-                right
-            })),
+            0 => rccl_cub::warp_reduce::<f32, $width>($value, $width, |left, right| {
+                if left > right { left } else { right }
+            }),
+            1 => rccl_cub::warp_reduce::<f32, $width>($value, $width, |left, right| {
+                if left < right { left } else { right }
+            }),
             _ => return,
         }
     };
 }
 
-#[rccl_cub::program]
+#[cuda_device::cuda_module]
 mod kernels {
     use super::*;
 
@@ -72,7 +68,7 @@ fn lane_zero_values(output: &[f32], logical_width: usize) -> Vec<f32> {
 fn main() -> Result<(), Box<dyn Error>> {
     let context = CudaContext::new(0)?;
     let stream = context.default_stream();
-    let program = kernels::program!(&context)?;
+    let program = unsafe { kernels::load(&context)? };
     let launch = LaunchConfig1D::new(1, THREADS as u32, 0);
     let prepared = program.prepare_f32_min_max(launch)?;
     let input = (0..THREADS)

@@ -1,7 +1,7 @@
 use core::cmp::Ordering;
 
 use cuda_core::{DeviceBuffer, DeviceCopy};
-use rccl_cub::__private::{
+use rccl_cub::thrust_integration::{
     SerialSetOperation, SetDifference as CubSetDifference, SetIntersection as CubSetIntersection,
     SetSymmetricDifference as CubSetSymmetricDifference, SetUnion as CubSetUnion,
 };
@@ -9,7 +9,6 @@ use rccl_memory::{DeviceAllocator, TemporaryValue};
 
 use crate::{
     DeviceAlgorithmError,
-    backend::{ArithmeticSetBackend, SetBackend, SetPairsBackend},
     cuda::Execution,
     range::{ArithmeticRange, DeviceView, DeviceViewMut, KeyValueRange, KeyValueRangeMut},
 };
@@ -25,8 +24,8 @@ fn natural_order<K: PartialOrd>(left: &K, right: &K) -> Ordering {
     }
 }
 
-fn set_keys_by<K, A, M, F, Op>(
-    execution: &Execution<'_, '_, A, M>,
+fn set_keys_by<K, A, F, Op>(
+    execution: &Execution<'_, '_, A>,
     first: &DeviceBuffer<K>,
     second: &DeviceBuffer<K>,
     output: Option<&mut DeviceBuffer<K>>,
@@ -35,7 +34,6 @@ fn set_keys_by<K, A, M, F, Op>(
 where
     K: DeviceCopy + 'static,
     A: DeviceAllocator,
-    M: SetBackend<K>,
     F: Fn(&K, &K) -> Ordering + Copy + 'static,
     Op: SerialSetOperation,
 {
@@ -47,8 +45,8 @@ where
         return Ok(0);
     }
     let counts = execution
-        .module()
-        .set_workspace_counts(execution, first.len(), second.len())?;
+        .launch()
+        .set_workspace_counts::<K, K>(first.len(), second.len())?;
     if counts.wide_indices {
         let mut temporary =
             crate::memory::TemporaryWorkspace5::<_, usize, u128, u8, u128, u8>::new_in_with_extra_tail(
@@ -74,24 +72,13 @@ where
                 &mut *partitions,
                 &mut *virtual_shared,
             );
-            if let Some(output) = output {
-                execution.module().set_i64::<_, _, Op>(
-                    execution,
-                    first,
-                    second,
-                    &mut workspace,
-                    output,
-                    order,
-                )
-            } else {
-                execution.module().set_discard_i64::<_, _, Op>(
-                    execution,
-                    first,
-                    second,
-                    &mut workspace,
-                    order,
-                )
-            }
+            execution.launch().set_keys::<i64, K, _, Op, _, _, _, _>(
+                first,
+                second,
+                &mut workspace,
+                output,
+                order,
+            )
         };
         result?;
         output_count
@@ -122,24 +109,13 @@ where
                 &mut *partitions,
                 &mut *virtual_shared,
             );
-            if let Some(output) = output {
-                execution.module().set_i32::<_, _, Op>(
-                    execution,
-                    first,
-                    second,
-                    &mut workspace,
-                    output,
-                    order,
-                )
-            } else {
-                execution.module().set_discard_i32::<_, _, Op>(
-                    execution,
-                    first,
-                    second,
-                    &mut workspace,
-                    order,
-                )
-            }
+            execution.launch().set_keys::<i32, K, _, Op, _, _, _, _>(
+                first,
+                second,
+                &mut workspace,
+                output,
+                order,
+            )
         };
         result?;
         output_count
@@ -148,8 +124,8 @@ where
     }
 }
 
-fn set_arithmetic_by<K, A, M, F, Op>(
-    execution: &Execution<'_, '_, A, M>,
+fn set_arithmetic_by<K, A, F, Op>(
+    execution: &Execution<'_, '_, A>,
     first: ArithmeticRange<K>,
     second: ArithmeticRange<K>,
     output: &mut DeviceBuffer<K>,
@@ -162,7 +138,6 @@ where
         + core::ops::Mul<Output = K>
         + 'static,
     A: DeviceAllocator,
-    M: SetBackend<K> + ArithmeticSetBackend<K>,
     F: Fn(&K, &K) -> Ordering + Copy + 'static,
     Op: SerialSetOperation,
 {
@@ -175,8 +150,8 @@ where
         return Ok(0);
     }
     let counts = execution
-        .module()
-        .set_workspace_counts(execution, first_len, second_len)?;
+        .launch()
+        .set_workspace_counts::<K, K>(first_len, second_len)?;
     if counts.wide_indices {
         let mut temporary =
             crate::memory::TemporaryWorkspace5::<_, usize, u128, u8, u128, u8>::new_in_with_extra_tail(
@@ -202,14 +177,15 @@ where
                 &mut *partitions,
                 &mut *virtual_shared,
             );
-            execution.module().set_arithmetic_i64::<_, _, Op>(
-                execution,
-                first,
-                second,
-                &mut workspace,
-                output,
-                order,
-            )
+            execution
+                .launch()
+                .set_arithmetic::<i64, K, _, Op, _, _, _, _>(
+                    first,
+                    second,
+                    &mut workspace,
+                    output,
+                    order,
+                )
         };
         result?;
         output_count
@@ -240,14 +216,15 @@ where
                 &mut *partitions,
                 &mut *virtual_shared,
             );
-            execution.module().set_arithmetic_i32::<_, _, Op>(
-                execution,
-                first,
-                second,
-                &mut workspace,
-                output,
-                order,
-            )
+            execution
+                .launch()
+                .set_arithmetic::<i32, K, _, Op, _, _, _, _>(
+                    first,
+                    second,
+                    &mut workspace,
+                    output,
+                    order,
+                )
         };
         result?;
         output_count
@@ -256,8 +233,8 @@ where
     }
 }
 
-fn set_pairs_by<K, V, A, M, F, Op>(
-    execution: &Execution<'_, '_, A, M>,
+fn set_pairs_by<K, V, A, F, Op>(
+    execution: &Execution<'_, '_, A>,
     first: KeyValueRange<'_, K, V>,
     second: (&DeviceBuffer<K>, &DeviceBuffer<V>),
     mut output: KeyValueRangeMut<'_, K, V>,
@@ -267,7 +244,6 @@ where
     K: TemporaryValue + 'static,
     V: TemporaryValue,
     A: DeviceAllocator,
-    M: SetPairsBackend<K, V>,
     F: Fn(&K, &K) -> Ordering + Copy + 'static,
     Op: SerialSetOperation,
 {
@@ -288,11 +264,9 @@ where
     if total == 0 {
         return Ok(0);
     }
-    let counts = execution.module().set_pairs_workspace_counts(
-        execution,
-        first_keys.len(),
-        second_keys.len(),
-    )?;
+    let counts = execution
+        .launch()
+        .set_workspace_counts::<K, V>(first_keys.len(), second_keys.len())?;
     if counts.wide_indices {
         let mut temporary =
             crate::memory::TemporaryWorkspace5::<_, usize, u128, u8, u128, u8>::new_in_with_extra_tail(
@@ -318,17 +292,18 @@ where
                 &mut *partitions,
                 &mut *virtual_shared,
             );
-            execution.module().set_pairs_i64::<_, _, Op>(
-                execution,
-                first_keys,
-                first_values,
-                second_keys,
-                second_values,
-                &mut workspace,
-                output_keys,
-                output_values,
-                order,
-            )
+            execution
+                .launch()
+                .set_pairs::<i64, K, V, _, Op, _, _, _, _>(
+                    first_keys,
+                    first_values,
+                    second_keys,
+                    second_values,
+                    &mut workspace,
+                    output_keys,
+                    output_values,
+                    order,
+                )
         };
         result?;
         output_count
@@ -359,17 +334,18 @@ where
                 &mut *partitions,
                 &mut *virtual_shared,
             );
-            execution.module().set_pairs_i32::<_, _, Op>(
-                execution,
-                first_keys,
-                first_values,
-                second_keys,
-                second_values,
-                &mut workspace,
-                output_keys,
-                output_values,
-                order,
-            )
+            execution
+                .launch()
+                .set_pairs::<i32, K, V, _, Op, _, _, _, _>(
+                    first_keys,
+                    first_values,
+                    second_keys,
+                    second_values,
+                    &mut workspace,
+                    output_keys,
+                    output_values,
+                    order,
+                )
         };
         result?;
         output_count
@@ -424,16 +400,15 @@ macro_rules! define_key_set_expression {
         where
             K: DeviceCopy + PartialOrd + 'static,
         {
-            pub fn write_into<A, M>(
+            pub fn write_into<A>(
                 self,
                 output: DeviceViewMut<'_, K>,
-                execution: &Execution<'_, '_, A, M>,
+                execution: &Execution<'_, '_, A>,
             ) -> Result<usize, DeviceAlgorithmError>
             where
                 A: DeviceAllocator,
-                M: SetBackend<K>,
             {
-                set_keys_by::<K, A, M, _, $operation>(
+                set_keys_by::<K, A, _, $operation>(
                     execution,
                     self.first.__into_buffer(),
                     self.second.__into_buffer(),
@@ -443,15 +418,14 @@ macro_rules! define_key_set_expression {
             }
 
             /// Execute the operation without materializing its keys.
-            pub fn count<A, M>(
+            pub fn count<A>(
                 self,
-                execution: &Execution<'_, '_, A, M>,
+                execution: &Execution<'_, '_, A>,
             ) -> Result<usize, DeviceAlgorithmError>
             where
                 A: DeviceAllocator,
-                M: SetBackend<K>,
             {
-                set_keys_by::<K, A, M, _, $operation>(
+                set_keys_by::<K, A, _, $operation>(
                     execution,
                     self.first.__into_buffer(),
                     self.second.__into_buffer(),
@@ -466,16 +440,15 @@ macro_rules! define_key_set_expression {
             K: DeviceCopy + 'static,
             F: Fn(&K, &K) -> Ordering + Copy + 'static,
         {
-            pub fn write_into<A, M>(
+            pub fn write_into<A>(
                 self,
                 output: DeviceViewMut<'_, K>,
-                execution: &Execution<'_, '_, A, M>,
+                execution: &Execution<'_, '_, A>,
             ) -> Result<usize, DeviceAlgorithmError>
             where
                 A: DeviceAllocator,
-                M: SetBackend<K>,
             {
-                set_keys_by::<K, A, M, F, $operation>(
+                set_keys_by::<K, A, F, $operation>(
                     execution,
                     self.first.__into_buffer(),
                     self.second.__into_buffer(),
@@ -484,15 +457,14 @@ macro_rules! define_key_set_expression {
                 )
             }
 
-            pub fn count<A, M>(
+            pub fn count<A>(
                 self,
-                execution: &Execution<'_, '_, A, M>,
+                execution: &Execution<'_, '_, A>,
             ) -> Result<usize, DeviceAlgorithmError>
             where
                 A: DeviceAllocator,
-                M: SetBackend<K>,
             {
-                set_keys_by::<K, A, M, F, $operation>(
+                set_keys_by::<K, A, F, $operation>(
                     execution,
                     self.first.__into_buffer(),
                     self.second.__into_buffer(),
@@ -511,16 +483,15 @@ macro_rules! define_key_set_expression {
                 + core::ops::Mul<Output = K>
                 + 'static,
         {
-            pub fn write_into<A, M>(
+            pub fn write_into<A>(
                 self,
                 output: DeviceViewMut<'_, K>,
-                execution: &Execution<'_, '_, A, M>,
+                execution: &Execution<'_, '_, A>,
             ) -> Result<usize, DeviceAlgorithmError>
             where
                 A: DeviceAllocator,
-                M: SetBackend<K> + ArithmeticSetBackend<K>,
             {
-                set_arithmetic_by::<K, A, M, _, $operation>(
+                set_arithmetic_by::<K, A, _, $operation>(
                     execution,
                     self.first,
                     self.second,
@@ -539,16 +510,15 @@ macro_rules! define_key_set_expression {
                 + 'static,
             F: Fn(&K, &K) -> Ordering + Copy + 'static,
         {
-            pub fn write_into<A, M>(
+            pub fn write_into<A>(
                 self,
                 output: DeviceViewMut<'_, K>,
-                execution: &Execution<'_, '_, A, M>,
+                execution: &Execution<'_, '_, A>,
             ) -> Result<usize, DeviceAlgorithmError>
             where
                 A: DeviceAllocator,
-                M: SetBackend<K> + ArithmeticSetBackend<K>,
             {
-                set_arithmetic_by::<K, A, M, F, $operation>(
+                set_arithmetic_by::<K, A, F, $operation>(
                     execution,
                     self.first,
                     self.second,
@@ -759,17 +729,16 @@ macro_rules! define_pair_set_expression {
             K: TemporaryValue + PartialOrd + 'static,
             V: TemporaryValue,
         {
-            pub fn write_into<A, M>(
+            pub fn write_into<A>(
                 self,
                 output: KeyValueRangeMut<'_, K, V>,
-                execution: &Execution<'_, '_, A, M>,
+                execution: &Execution<'_, '_, A>,
             ) -> Result<usize, DeviceAlgorithmError>
             where
                 A: DeviceAllocator,
-                M: SetPairsBackend<K, V>,
             {
                 let (second_keys, second_values) = self.second.parts();
-                set_pairs_by::<K, V, A, M, _, $operation>(
+                set_pairs_by::<K, V, A, _, $operation>(
                     execution,
                     self.first,
                     (second_keys, second_values),
@@ -785,17 +754,16 @@ macro_rules! define_pair_set_expression {
             V: TemporaryValue,
             F: Fn(&K, &K) -> Ordering + Copy + 'static,
         {
-            pub fn write_into<A, M>(
+            pub fn write_into<A>(
                 self,
                 output: KeyValueRangeMut<'_, K, V>,
-                execution: &Execution<'_, '_, A, M>,
+                execution: &Execution<'_, '_, A>,
             ) -> Result<usize, DeviceAlgorithmError>
             where
                 A: DeviceAllocator,
-                M: SetPairsBackend<K, V>,
             {
                 let (second_keys, second_values) = self.second.parts();
-                set_pairs_by::<K, V, A, M, F, $operation>(
+                set_pairs_by::<K, V, A, F, $operation>(
                     execution,
                     self.first,
                     (second_keys, second_values),
@@ -857,14 +825,13 @@ where
     K: TemporaryValue + PartialOrd + 'static,
     V: TemporaryValue,
 {
-    pub fn write_into<A, M>(
+    pub fn write_into<A>(
         self,
         output: KeyValueRangeMut<'_, K, V>,
-        execution: &Execution<'_, '_, A, M>,
+        execution: &Execution<'_, '_, A>,
     ) -> Result<usize, DeviceAlgorithmError>
     where
         A: DeviceAllocator,
-        M: SetPairsBackend<K, V>,
     {
         execute_pair_intersection(execution, self.first, self.second, output, natural_order)
     }
@@ -876,21 +843,20 @@ where
     V: TemporaryValue,
     F: Fn(&K, &K) -> Ordering + Copy + 'static,
 {
-    pub fn write_into<A, M>(
+    pub fn write_into<A>(
         self,
         output: KeyValueRangeMut<'_, K, V>,
-        execution: &Execution<'_, '_, A, M>,
+        execution: &Execution<'_, '_, A>,
     ) -> Result<usize, DeviceAlgorithmError>
     where
         A: DeviceAllocator,
-        M: SetPairsBackend<K, V>,
     {
         execute_pair_intersection(execution, self.first, self.second, output, self.order)
     }
 }
 
-fn execute_pair_intersection<K, V, A, M, F>(
-    execution: &Execution<'_, '_, A, M>,
+fn execute_pair_intersection<K, V, A, F>(
+    execution: &Execution<'_, '_, A>,
     first: KeyValueRange<'_, K, V>,
     second: DeviceView<'_, K>,
     output: KeyValueRangeMut<'_, K, V>,
@@ -900,11 +866,10 @@ where
     K: TemporaryValue + 'static,
     V: TemporaryValue,
     A: DeviceAllocator,
-    M: SetPairsBackend<K, V>,
     F: Fn(&K, &K) -> Ordering + Copy + 'static,
 {
     let (_, first_values) = first.parts();
-    set_pairs_by::<K, V, A, M, F, CubSetIntersection>(
+    set_pairs_by::<K, V, A, F, CubSetIntersection>(
         execution,
         first,
         (second.__into_buffer(), first_values),

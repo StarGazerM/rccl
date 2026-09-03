@@ -693,8 +693,9 @@ where
 /// Primitive sample arithmetic used by CUB's histogram transforms.
 ///
 /// This is an ordinary Rust type-class boundary: the associated implementation
-/// resolves from `S` and `L`, while the operation macro is reserved for target
-/// policy and launch-schedule selection.
+/// resolves from `S` and `L`. Architecture policy resolves separately from the
+/// cfgs supplied by `cargo oxide`; the call wrapper only carries the resulting
+/// constants across stable Rust's const-generic expression boundary.
 #[doc(hidden)]
 pub trait HistogramSample<L>: Copy + Default {
     type EvenTransform: HistogramDecode<Self>;
@@ -830,16 +831,16 @@ pub struct FloatingHistogramScale<S, L, Common> {
     marker: core::marker::PhantomData<(S, L)>,
 }
 
-/// One channel's initialized CUB `SearchTransform`.
+/// One channel's borrowed level range.
 #[derive(Clone, Copy)]
 #[doc(hidden)]
 pub struct RangeHistogramTransform<'a, L> {
-    levels: read_only::ReadOnlyRange<'a, L>,
+    levels: &'a [L],
 }
 
 impl<'a, L> RangeHistogramTransform<'a, L> {
     #[inline(always)]
-    pub fn new(levels: read_only::ReadOnlyRange<'a, L>) -> Self {
+    pub fn new(levels: &'a [L]) -> Self {
         Self { levels }
     }
 }
@@ -847,8 +848,8 @@ impl<'a, L> RangeHistogramTransform<'a, L> {
 impl<L: Copy + PartialOrd> HistogramDecode<L> for RangeHistogramTransform<'_, L> {
     #[inline(always)]
     fn bin(self, sample: L) -> i32 {
-        let bin = self.levels.upper_bound(sample).wrapping_sub(1);
-        if bin >= self.levels.len().wrapping_sub(1) {
+        let bin = read_only::upper_bound(self.levels, sample).wrapping_sub(1);
+        if bin >= (self.levels.len() as i32).wrapping_sub(1) {
             -1
         } else {
             bin
@@ -919,28 +920,47 @@ where
     }
 }
 
-/// Host-initialized CUB `SearchTransform` array used by both decode stages.
+/// Borrowed level storage and per-channel ranges used by both decode stages.
 #[derive(Clone, Copy)]
 #[doc(hidden)]
-pub struct RangeHistogramTransforms<S, L, const ACTIVE: usize, const BYTE_SAMPLE: bool> {
-    levels: read_only::ReadOnlySlices<L, ACTIVE>,
+pub struct RangeHistogramTransforms<'a, S, L, const ACTIVE: usize, const BYTE_SAMPLE: bool> {
+    levels: &'a [L],
+    lengths: [usize; ACTIVE],
+    offsets: [usize; ACTIVE],
     marker: core::marker::PhantomData<S>,
 }
 
-impl<S, L, const ACTIVE: usize, const BYTE_SAMPLE: bool>
-    RangeHistogramTransforms<S, L, ACTIVE, BYTE_SAMPLE>
+impl<'a, S, L, const ACTIVE: usize, const BYTE_SAMPLE: bool>
+    RangeHistogramTransforms<'a, S, L, ACTIVE, BYTE_SAMPLE>
 {
     #[inline(always)]
-    pub fn new(levels: read_only::ReadOnlySlices<L, ACTIVE>) -> Self {
+    pub fn new(levels: &'a [L], lengths: [usize; ACTIVE], offsets: [usize; ACTIVE]) -> Self {
         Self {
             levels,
+            lengths,
+            offsets,
             marker: core::marker::PhantomData,
         }
+    }
+
+    #[inline(always)]
+    fn channel<const CHANNEL: usize>(self) -> &'a [L] {
+        if CHANNEL >= ACTIVE {
+            cuda_device::debug::trap();
+        }
+        let begin = self.offsets[CHANNEL];
+        let Some(end) = begin.checked_add(self.lengths[CHANNEL]) else {
+            cuda_device::debug::trap();
+        };
+        let Some(levels) = self.levels.get(begin..end) else {
+            cuda_device::debug::trap();
+        };
+        levels
     }
 }
 
 impl<S, L, const ACTIVE: usize, const BYTE_SAMPLE: bool> HistogramSampleDecode<S>
-    for RangeHistogramTransforms<S, L, ACTIVE, BYTE_SAMPLE>
+    for RangeHistogramTransforms<'_, S, L, ACTIVE, BYTE_SAMPLE>
 where
     S: HistogramSample<L>,
     L: Copy + PartialOrd,
@@ -950,14 +970,14 @@ where
         if BYTE_SAMPLE {
             sample.byte_bin()
         } else {
-            let levels = self.levels.get_const::<CHANNEL>();
+            let levels = self.channel::<CHANNEL>();
             RangeHistogramTransform::new(levels).bin(sample.to_level())
         }
     }
 }
 
 impl<S, L, const ACTIVE: usize, const BYTE_SAMPLE: bool> HistogramOutputDecode
-    for RangeHistogramTransforms<S, L, ACTIVE, BYTE_SAMPLE>
+    for RangeHistogramTransforms<'_, S, L, ACTIVE, BYTE_SAMPLE>
 where
     S: HistogramSample<L>,
     L: Copy + PartialOrd,
@@ -965,7 +985,7 @@ where
     #[inline(always)]
     fn bin<const CHANNEL: usize>(self, privatized_bin: usize) -> i32 {
         if BYTE_SAMPLE {
-            let levels = self.levels.get_const::<CHANNEL>();
+            let levels = self.channel::<CHANNEL>();
             RangeHistogramTransform::new(levels).bin(S::from_byte_bin(privatized_bin).to_level())
         } else {
             privatized_bin as i32
@@ -1365,7 +1385,7 @@ pub fn histogram_init_agent<C, const ACTIVE_CHANNELS: usize>(
 }
 
 /// Exact SM50-family `AgentHistogram` sweep used by the pinned policy on
-/// SM52--SM89, with the same blocked loading, per-thread RLE, privatization,
+/// SM80--SM89, with the same blocked loading, per-thread RLE, privatization,
 /// even-share row traversal, and final atomic composition.
 #[inline(always)]
 #[expect(
@@ -1381,7 +1401,7 @@ pub fn histogram_sweep_agent<
     OutputDecode,
     const CHANNELS: usize,
     const ACTIVE_CHANNELS: usize,
-    const THREADS: usize,
+    const THREADS: u32,
     const PIXELS_PER_THREAD: usize,
     const RLE_COMPRESS: bool,
     const SHARED_PRIVATIZATION: bool,
@@ -1486,7 +1506,7 @@ fn histogram_sweep_with_private<
     Private,
     const CHANNELS: usize,
     const ACTIVE_CHANNELS: usize,
-    const THREADS: usize,
+    const THREADS: u32,
     const PIXELS_PER_THREAD: usize,
     const RLE_COMPRESS: bool,
 >(
@@ -1519,7 +1539,7 @@ fn histogram_sweep_with_private<
         let mut bin = thread_index;
         while bin < count {
             private.zero(channel, bin);
-            bin += THREADS;
+            bin += THREADS as usize;
         }
     });
     thread::sync_threads();
@@ -1610,7 +1630,7 @@ fn histogram_sweep_with_private<
                     C::fetch_add_device(output, channel_offset + output_bin as usize, count);
                 }
             }
-            bin += THREADS;
+            bin += THREADS as usize;
         }
     });
 }
@@ -1625,7 +1645,7 @@ fn consume_rows<
     Private,
     const CHANNELS: usize,
     const ACTIVE_CHANNELS: usize,
-    const THREADS: usize,
+    const THREADS: u32,
     const PIXELS_PER_THREAD: usize,
     const RLE_COMPRESS: bool,
 >(
@@ -1644,7 +1664,7 @@ fn consume_rows<
 {
     let (num_row_pixels, num_rows, row_stride_samples) = image;
     let (logical_block_x, logical_block_y, blocks_per_row, blocks_per_col) = grid;
-    let tile_samples = Offset::from_usize(THREADS * PIXELS_PER_THREAD * CHANNELS);
+    let tile_samples = Offset::from_usize(THREADS as usize * PIXELS_PER_THREAD * CHANNELS);
     let mut row = logical_block_y;
     while Offset::from_i32(row) < num_rows {
         let row_begin = Offset::from_i32(row).mul(row_stride_samples);

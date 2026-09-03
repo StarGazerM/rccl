@@ -154,8 +154,8 @@ fn print_timings(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_keys<K, A, M>(
-    execution: &rccl_thrust::cuda::Execution<'_, '_, A, M>,
+fn run_keys<K, A>(
+    execution: &rccl_thrust::cuda::Execution<'_, '_, A>,
     stream: &CudaStream,
     key_name: &str,
     count: usize,
@@ -166,7 +166,6 @@ fn run_keys<K, A, M>(
 where
     K: BenchKey,
     A: rccl_memory::DeviceAllocator,
-    M: rccl_thrust::__private::SetBackend<K>,
 {
     let (first, second, _) = sorted_inputs::<K>(stream, count, ratio, entropy)?;
     let mut output = DeviceBuffer::<K>::zeroed(stream, count)?;
@@ -207,8 +206,8 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_pairs<K, V, A, M>(
-    execution: &rccl_thrust::cuda::Execution<'_, '_, A, M>,
+fn run_pairs<K, V, A>(
+    execution: &rccl_thrust::cuda::Execution<'_, '_, A>,
     stream: &CudaStream,
     key_name: &str,
     value_name: &str,
@@ -221,7 +220,6 @@ where
     K: BenchKey,
     V: TemporaryValue,
     A: rccl_memory::DeviceAllocator,
-    M: rccl_thrust::__private::SetPairsBackend<K, V>,
 {
     let (first_keys, second_keys, first_count) = sorted_inputs::<K>(stream, count, ratio, entropy)?;
     let second_count = count - first_count;
@@ -278,45 +276,45 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let context = CudaContext::new(0)?;
     let stream = context.default_stream();
-    let thrust = rccl_thrust::thrust_program!(&context; set_operations)?;
+    let thrust = rccl_thrust::cuda::Program::load(&context)?;
     let cache = SingleStreamCachingMemoryResource::new(&stream)?;
     let execution = thrust.par_in(&stream, &cache)?;
 
     match (mode.as_str(), key.as_str(), value.as_str()) {
-        ("keys", "i8", _) => run_keys::<i8, _, _>(
+        ("keys", "i8", _) => run_keys::<i8, _>(
             &execution, &stream, "i8", count, iterations, &entropy, ratio,
         ),
-        ("keys", "i16", _) => run_keys::<i16, _, _>(
+        ("keys", "i16", _) => run_keys::<i16, _>(
             &execution, &stream, "i16", count, iterations, &entropy, ratio,
         ),
-        ("keys", "i32", _) => run_keys::<i32, _, _>(
+        ("keys", "i32", _) => run_keys::<i32, _>(
             &execution, &stream, "i32", count, iterations, &entropy, ratio,
         ),
-        ("keys", "i64", _) => run_keys::<i64, _, _>(
+        ("keys", "i64", _) => run_keys::<i64, _>(
             &execution, &stream, "i64", count, iterations, &entropy, ratio,
         ),
-        ("pairs", "i8", "i8") => run_pairs::<i8, i8, _, _>(
+        ("pairs", "i8", "i8") => run_pairs::<i8, i8, _>(
             &execution, &stream, "i8", "i8", count, iterations, &entropy, ratio,
         ),
-        ("pairs", "i8", "i64") => run_pairs::<i8, i64, _, _>(
+        ("pairs", "i8", "i64") => run_pairs::<i8, i64, _>(
             &execution, &stream, "i8", "i64", count, iterations, &entropy, ratio,
         ),
-        ("pairs", "i16", "i8") => run_pairs::<i16, i8, _, _>(
+        ("pairs", "i16", "i8") => run_pairs::<i16, i8, _>(
             &execution, &stream, "i16", "i8", count, iterations, &entropy, ratio,
         ),
-        ("pairs", "i16", "i64") => run_pairs::<i16, i64, _, _>(
+        ("pairs", "i16", "i64") => run_pairs::<i16, i64, _>(
             &execution, &stream, "i16", "i64", count, iterations, &entropy, ratio,
         ),
-        ("pairs", "i32", "i8") => run_pairs::<i32, i8, _, _>(
+        ("pairs", "i32", "i8") => run_pairs::<i32, i8, _>(
             &execution, &stream, "i32", "i8", count, iterations, &entropy, ratio,
         ),
-        ("pairs", "i32", "i64") => run_pairs::<i32, i64, _, _>(
+        ("pairs", "i32", "i64") => run_pairs::<i32, i64, _>(
             &execution, &stream, "i32", "i64", count, iterations, &entropy, ratio,
         ),
-        ("pairs", "i64", "i8") => run_pairs::<i64, i8, _, _>(
+        ("pairs", "i64", "i8") => run_pairs::<i64, i8, _>(
             &execution, &stream, "i64", "i8", count, iterations, &entropy, ratio,
         ),
-        ("pairs", "i64", "i64") => run_pairs::<i64, i64, _, _>(
+        ("pairs", "i64", "i64") => run_pairs::<i64, i64, _>(
             &execution, &stream, "i64", "i64", count, iterations, &entropy, ratio,
         ),
         _ => Err(format!(

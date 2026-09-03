@@ -122,14 +122,13 @@ macro_rules! test_scalar {
 
 test_scalar!(i8, u8, i16, u16, i32, u32, f32, f64);
 
-fn test_key_value_type<T, A, M>(
-    execution: &rccl_thrust::cuda::Execution<'_, '_, A, M>,
+fn test_key_value_type<T, A>(
+    execution: &rccl_thrust::cuda::Execution<'_, '_, A>,
     stream: &cuda_core::CudaStream,
 ) -> Result<(), Box<dyn Error>>
 where
     T: TestScalar,
     A: rccl_thrust::memory::DeviceAllocator,
-    M: rccl_thrust::__private::SetBackend<KeyValue<T, T>>,
 {
     let mut first = (0..4097_i32)
         .map(|index| KeyValue {
@@ -201,14 +200,13 @@ where
     Ok(())
 }
 
-fn test_by_key_type<T, A, M>(
-    execution: &rccl_thrust::cuda::Execution<'_, '_, A, M>,
+fn test_by_key_type<T, A>(
+    execution: &rccl_thrust::cuda::Execution<'_, '_, A>,
     stream: &cuda_core::CudaStream,
 ) -> Result<(), Box<dyn Error>>
 where
     T: TestScalar,
     A: rccl_thrust::memory::DeviceAllocator,
-    M: rccl_thrust::__private::SetPairsBackend<T, T>,
 {
     let mut first = (0..4097_i32)
         .map(|index| KeyValue {
@@ -309,7 +307,7 @@ where
 fn main() -> Result<(), Box<dyn Error>> {
     let context = CudaContext::new(0)?;
     let stream = context.default_stream();
-    let thrust = rccl_thrust::thrust_program!(&context; set_operations)?;
+    let thrust = rccl_thrust::cuda::Program::load(&context)?;
     let exec = thrust.par(&stream)?;
 
     // Exact simple cases from the four key-only CCCL unit-test files.
@@ -605,25 +603,25 @@ fn main() -> Result<(), Box<dyn Error>> {
     // CCCL orders only by `key` but compares whole records for test equality;
     // Rust exposes that key equivalence as a closure rather than a dishonest
     // `Ord` implementation.
-    test_key_value_type::<i8, _, _>(&exec, &stream)?;
-    test_key_value_type::<u8, _, _>(&exec, &stream)?;
-    test_key_value_type::<i16, _, _>(&exec, &stream)?;
-    test_key_value_type::<u16, _, _>(&exec, &stream)?;
-    test_key_value_type::<i32, _, _>(&exec, &stream)?;
-    test_key_value_type::<u32, _, _>(&exec, &stream)?;
-    test_key_value_type::<f32, _, _>(&exec, &stream)?;
-    test_key_value_type::<f64, _, _>(&exec, &stream)?;
+    test_key_value_type::<i8, _>(&exec, &stream)?;
+    test_key_value_type::<u8, _>(&exec, &stream)?;
+    test_key_value_type::<i16, _>(&exec, &stream)?;
+    test_key_value_type::<u16, _>(&exec, &stream)?;
+    test_key_value_type::<i32, _>(&exec, &stream)?;
+    test_key_value_type::<u32, _>(&exec, &stream)?;
+    test_key_value_type::<f32, _>(&exec, &stream)?;
+    test_key_value_type::<f64, _>(&exec, &stream)?;
 
     // The pinned by-key families instantiate both keys and values at every
     // variable-unit-test type, for ascending and descending overloads.
-    test_by_key_type::<i8, _, _>(&exec, &stream)?;
-    test_by_key_type::<u8, _, _>(&exec, &stream)?;
-    test_by_key_type::<i16, _, _>(&exec, &stream)?;
-    test_by_key_type::<u16, _, _>(&exec, &stream)?;
-    test_by_key_type::<i32, _, _>(&exec, &stream)?;
-    test_by_key_type::<u32, _, _>(&exec, &stream)?;
-    test_by_key_type::<f32, _, _>(&exec, &stream)?;
-    test_by_key_type::<f64, _, _>(&exec, &stream)?;
+    test_by_key_type::<i8, _>(&exec, &stream)?;
+    test_by_key_type::<u8, _>(&exec, &stream)?;
+    test_by_key_type::<i16, _>(&exec, &stream)?;
+    test_by_key_type::<u16, _>(&exec, &stream)?;
+    test_by_key_type::<i32, _>(&exec, &stream)?;
+    test_by_key_type::<u32, _>(&exec, &stream)?;
+    test_by_key_type::<f32, _>(&exec, &stream)?;
+    test_by_key_type::<f64, _>(&exec, &stream)?;
 
     // Exercise the arithmetic-range lowering under both normal execution and
     // compute-sanitizer without materializing either input.

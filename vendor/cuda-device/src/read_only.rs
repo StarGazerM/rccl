@@ -10,8 +10,6 @@
 //! cuda-oxide compiler preserves the load as one cache-qualified instruction,
 //! including for the over-aligned vector values in [`crate::vector`].
 
-use core::{marker::PhantomData, num::NonZeroU32};
-
 /// A bounds-proved contiguous register tile for one CUDA thread.
 ///
 /// CUDA block algorithms commonly prove a complete global-memory tile once,
@@ -103,121 +101,6 @@ impl<'a, T: Copy, const PIXELS: usize, const CHANNELS: usize, const FULL: bool>
     }
 }
 
-#[derive(Clone, Copy)]
-#[repr(C)]
-struct SliceDescriptor<T> {
-    address: u64,
-    len: NonZeroU32,
-    padding: u32,
-    marker: PhantomData<T>,
-}
-
-/// A fixed set of read-only device slices passed to a kernel by value.
-///
-/// The host launcher accepts only `cuda_host::ReadOnlySlices`, whose checked
-/// constructor borrows one device allocation and validates every range. The
-/// device representation is intentionally not constructible in safe Rust;
-/// kernels can only recover shared slices whose lifetime is bounded by this
-/// launch parameter.
-#[derive(Clone, Copy)]
-#[repr(C)]
-pub struct ReadOnlySlices<T, const N: usize> {
-    slices: [SliceDescriptor<T>; N],
-}
-
-impl<T, const N: usize> ReadOnlySlices<T, N> {
-    /// Borrow one checked channel range.
-    #[inline(always)]
-    pub fn get(&self, index: usize) -> Option<ReadOnlyRange<'_, T>> {
-        let descriptor = self.slices.get(index)?;
-        Some(ReadOnlyRange {
-            address: descriptor.address,
-            len: descriptor.len,
-            marker: PhantomData,
-        })
-    }
-
-    /// Borrow a channel selected by a monomorphized histogram agent.
-    #[inline(always)]
-    pub fn get_const<const INDEX: usize>(&self) -> ReadOnlyRange<'_, T> {
-        if INDEX >= N {
-            crate::debug::trap();
-        }
-        let descriptor = &self.slices[INDEX];
-        ReadOnlyRange {
-            address: descriptor.address,
-            len: descriptor.len,
-            marker: PhantomData,
-        }
-    }
-}
-
-/// One host-validated CUB `SearchTransform` range.
-///
-/// The address and signed level count match CUB's transform object. The
-/// lifetime is borrowed from the owning [`ReadOnlySlices`] kernel argument,
-/// and the fields cannot be forged by device code.
-#[derive(Clone, Copy)]
-#[repr(C)]
-pub struct ReadOnlyRange<'a, T> {
-    address: u64,
-    len: NonZeroU32,
-    marker: PhantomData<&'a T>,
-}
-
-impl<T> ReadOnlyRange<'_, T> {
-    /// Number of validated elements in this range.
-    #[inline(always)]
-    #[must_use]
-    pub fn len(self) -> i32 {
-        self.len.get() as i32
-    }
-
-    /// Ranges passed by [`ReadOnlySlices`] are always nonempty.
-    #[inline(always)]
-    #[must_use]
-    pub fn is_empty(self) -> bool {
-        false
-    }
-
-    /// Return the first index whose value compares greater than `sample`.
-    #[inline(always)]
-    #[must_use]
-    pub fn upper_bound(self, sample: T) -> i32
-    where
-        T: Copy + PartialOrd,
-    {
-        let mut retval = 0u32;
-        let mut num_items = self.len.get();
-        loop {
-            let half = num_items >> 1;
-            let probe = retval.wrapping_add(half);
-            if sample < __load_address_at(self.address, probe as usize) {
-                num_items = half;
-            } else {
-                let consumed = half.wrapping_add(1);
-                retval = retval.wrapping_add(consumed);
-                num_items = num_items.wrapping_sub(consumed);
-            }
-            if num_items == 0 {
-                break;
-            }
-        }
-        retval as i32
-    }
-}
-
-/// Compiler boundary for a host-validated [`ReadOnlyRange`] probe.
-///
-/// The containing range is the only caller and maintains CUB's exact
-/// `retval + half < len` interval invariant. Keeping the device address and
-/// signed count separate avoids reconstructing a Rust fat slice in every
-/// unrolled channel transform.
-#[inline(never)]
-fn __load_address_at<T: Copy>(_address: u64, _index: usize) -> T {
-    unreachable!("read-only address load executed outside cuda-oxide device compilation")
-}
-
 /// Copy a value through CUDA's read-only global-memory path.
 ///
 /// Device compilation recognizes this compiler stub as a memory intrinsic so
@@ -269,26 +152,7 @@ fn __load_at<T: Copy>(input: &[T], index: usize) -> T {
 
 #[cfg(test)]
 mod tests {
-    use super::{ReadOnlyRange, ReadOnlySlices, SliceDescriptor, ThreadTile};
-
-    #[test]
-    fn read_only_slice_set_matches_cub_search_transform_per_channel() {
-        assert_eq!(
-            core::mem::size_of::<ReadOnlySlices<u32, 3>>(),
-            6 * core::mem::size_of::<u64>()
-        );
-        assert_eq!(
-            core::mem::align_of::<ReadOnlySlices<u32, 3>>(),
-            core::mem::align_of::<u64>()
-        );
-        assert_eq!(
-            core::mem::size_of::<ReadOnlyRange<'static, u32>>(),
-            2 * core::mem::size_of::<u64>()
-        );
-        assert_eq!(core::mem::offset_of!(SliceDescriptor<u32>, address), 0);
-        assert_eq!(core::mem::offset_of!(SliceDescriptor<u32>, len), 8);
-        assert_eq!(core::mem::offset_of!(SliceDescriptor<u32>, padding), 12);
-    }
+    use super::ThreadTile;
 
     #[test]
     fn thread_tile_proves_one_extent_and_keeps_partial_pixels_explicit() {

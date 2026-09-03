@@ -17,7 +17,7 @@ const LAUNCHES: usize = 100;
 const ITEMS: usize = BLOCK_THREADS * BLOCKS;
 const WARPS: usize = ITEMS / WARP_THREADS;
 
-#[rccl_cub::program]
+#[cuda_device::cuda_module]
 mod kernels {
     use super::*;
 
@@ -28,11 +28,12 @@ mod kernels {
         let index = thread::index_1d();
         if let Some(slot) = values.get_mut(index) {
             let value = *slot;
-            let first = rccl_cub::warp_reduce!(::<i32, 32>(value, |left, right| left + right));
+            let first = rccl_cub::warp_reduce::<i32, 32>(value, 32, |left, right| left + right);
             let second =
-                rccl_cub::warp_reduce!(::<i32, 32>(value ^ 0x55, |left, right| left + right));
-            let third = rccl_cub::warp_reduce!(::<i32, 32>(value * 3, |left, right| left + right));
-            let fourth = rccl_cub::warp_reduce!(::<i32, 32>(value - 7, |left, right| left + right));
+                rccl_cub::warp_reduce::<i32, 32>(value ^ 0x55, 32, |left, right| left + right);
+            let third = rccl_cub::warp_reduce::<i32, 32>(value * 3, 32, |left, right| left + right);
+            let fourth =
+                rccl_cub::warp_reduce::<i32, 32>(value - 7, 32, |left, right| left + right);
             if warp::lane_id() == 0 {
                 *slot = first + second + third + fourth;
             }
@@ -47,7 +48,7 @@ fn input_value(index: usize) -> i32 {
 fn main() -> Result<(), Box<dyn Error>> {
     let context = CudaContext::new(0)?;
     let stream = context.default_stream();
-    let program = kernels::program!(&context)?;
+    let program = unsafe { kernels::load(&context)? };
     let launch = LaunchConfig1D::new(BLOCKS as u32, BLOCK_THREADS as u32, 0);
     let prepared = program.prepare_reduce_warps(launch)?;
 

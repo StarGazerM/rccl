@@ -13,29 +13,46 @@ if [[ "$(git -C "$cccl_root" rev-parse HEAD)" != "$cccl_revision" ]]; then
 fi
 
 build_dir="$(mktemp -d "${TMPDIR:-/tmp}/rccl-histogram.XXXXXX")"
+histogram_probes=(
+  device_histogram_probe
+  device_histogram_counters_32
+  device_histogram_counters_64
+  device_histogram_types_8
+  device_histogram_types_16
+  device_histogram_types_32
+  device_histogram_types_64
+)
 cleanup() {
   rm -rf -- "$build_dir"
-  rm -f -- \
-    device_histogram_probe.options \
-    device_histogram_probe.target \
-    device_histogram_benchmark.options \
-    device_histogram_benchmark.target
+  for probe in "${histogram_probes[@]}"; do
+    rm -f -- "$probe.options" "$probe.target"
+  done
+  rm -f -- device_histogram_benchmark.options device_histogram_benchmark.target
 }
 trap cleanup EXIT
 
+probe_build_args=()
+for probe in "${histogram_probes[@]}"; do
+  probe_build_args+=(--example "$probe")
+done
 cargo oxide build --arch "${RCCL_ARCH:-sm_89}" --features cuda-oxide-example -- \
-  --release --package rccl-cub --example device_histogram_probe
-./target/release/examples/device_histogram_probe
+  --jobs "${RCCL_HISTOGRAM_BUILD_JOBS:-2}" \
+  --release --package rccl-cub "${probe_build_args[@]}"
+for probe in "${histogram_probes[@]}"; do
+  "./target/release/examples/$probe"
+done
 
 compute_sanitizer="$CUDA_TOOLKIT_PATH/compute-sanitizer/compute-sanitizer"
 if [[ ! -x "$compute_sanitizer" ]]; then
   printf '%s\n' "CUDA compute-sanitizer is unavailable at $compute_sanitizer" >&2
   exit 1
 fi
-"$compute_sanitizer" --tool memcheck --error-exitcode 97 \
-  ./target/release/examples/device_histogram_probe
-"$compute_sanitizer" --tool racecheck --error-exitcode 98 \
-  ./target/release/examples/device_histogram_probe
+for probe in "${histogram_probes[@]}"; do
+  "$compute_sanitizer" --tool memcheck --error-exitcode 97 \
+    "./target/release/examples/$probe"
+  "$compute_sanitizer" --tool racecheck --error-exitcode 98 \
+    "./target/release/examples/$probe"
+done
 
 foreign_compute="$(
   nvidia-smi --query-compute-apps=pid,process_name --format=csv,noheader,nounits 2>/dev/null \

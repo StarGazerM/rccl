@@ -60,3 +60,12 @@ fn supported_catch2_matrix_executes_every_translated_row() {
 
     assert_eq!(full + partial + multiple_items + floating_min_max, 150);
 }
+
+#[test]
+fn warp_reduce_width_is_an_ordinary_const_generic() {
+    fn logical_width<const WIDTH: usize>() -> usize {
+        WIDTH
+    }
+
+    assert_eq!(logical_width::<32>(), 32);
+}

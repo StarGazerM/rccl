@@ -1,15 +1,27 @@
-pub use crate::histogram::DeviceHistogramWorkspaceParts;
-pub use crate::histogram::{histogram_read_only_slices, histogram_uses_i32_offsets};
+pub use crate::histogram::{
+    DeviceHistogramWorkspaceParts, HistogramInitKernel, HistogramKernel, HistogramLaunchGeometry,
+    HistogramLaunchStorage, HistogramLevelStorage, HistogramLevels, HistogramPolicy,
+    HistogramPolicyKernels, HistogramScalar, histogram_policy, histogram_shared_bytes,
+    histogram_uses_i32_offsets,
+};
 pub use crate::histogram_backend::{
     ArithmeticHistogramRange, EvenHistogramTransforms, HistogramDecode, HistogramFourReader,
     HistogramFourSampleLoad, HistogramOffset, HistogramRead, HistogramSample,
     RangeHistogramTransform, RangeHistogramTransforms, histogram_init_agent, histogram_range_bin,
     histogram_sweep_agent,
 };
-/// Implementation details used by RCCL's operation macros.
+pub use crate::histogram_kernels::HistogramModule;
+pub use crate::merge::{
+    MergeKeysKernel, MergePairsKernel, merge_agent_launch, merge_items, merge_load_to_shared_keys,
+    merge_partition_launch, merge_shared_bytes,
+};
+pub use crate::merge_sort::{
+    MergeSortKeysKernel, MergeSortPairsKernel, merge_sort_items, merge_sort_shared_bytes,
+};
+/// Implementation details used by RCCL's separately compiled CUDA modules.
 ///
-/// This is public only because a proc-macro expansion is compiled in the
-/// caller's crate. It is not a compatibility API.
+/// cuda-oxide compiles those modules as distinct crates, so their device code
+/// needs a public path back to these items. This is not a compatibility API.
 #[doc(hidden)]
 pub use crate::ordering_backend::{
     ArithmeticSetRange, SerialSetOperation, SetAgentState, SetDifference, SetIndex,
@@ -38,18 +50,25 @@ pub use crate::ordering_backend::{
     radix_u64_to_ordered_ascending, radix_u64_to_ordered_descending, set_arithmetic_keys_agent,
     set_init_agent, set_keys_agent, set_keys_discard_agent, set_pairs_agent, set_partition_agent,
 };
-pub use cuda_core;
-pub use cuda_device;
-pub use cuda_host;
-#[doc(hidden)]
-pub use rccl_cub_macros::{
-    __device_kernels, __device_merge_keys_partition_count, __device_merge_pairs_partition_count,
-    __device_merge_sort_partition_count, __device_radix_sort_pairs_workspace_counts,
-    __device_radix_sort_workspace_counts, __device_set_arithmetic_i32, __device_set_arithmetic_i64,
-    __device_set_discard_i32, __device_set_discard_i64, __device_set_keys_i32,
-    __device_set_keys_i64, __device_set_pairs_i32, __device_set_pairs_i64,
-    __device_set_workspace_counts,
+pub use crate::ordering_kernels::OrderingModule;
+pub use crate::radix::{
+    RadixKernel, RadixKey, RadixKeysKernel, RadixPairsKernel, RadixValue, radix_items,
+    radix_shared_bytes, radix_single_items,
 };
+pub use crate::set_kernels::SetModule;
+pub use crate::set_operation::{ArithmeticSetKernel, SetKernel, set_items, set_shared_bytes};
+pub use crate::warp::{warp_reduce, warp_reduce_items};
+pub use crate::workspace::{
+    device_merge_pairs_partition_count, device_merge_pairs_workspace, device_merge_partition_count,
+    device_merge_sort_keys_workspace, device_merge_sort_pairs_workspace,
+    device_merge_sort_partition_count, device_merge_workspace,
+    device_radix_sort_keys_buffer_workspace, device_radix_sort_keys_workspace,
+    device_radix_sort_pairs_buffer_workspace, device_radix_sort_pairs_workspace,
+    device_radix_sort_pairs_workspace_counts, device_radix_sort_workspace_counts,
+    device_set_workspace_counts,
+};
+pub use cuda_core;
+pub use cuda_host;
 pub use rccl_memory::device::{BlockSharedMemory, HistogramCounter};
 pub use rccl_memory::{
     copy_device_range, static_block_shared_memory, static_block_shared_memory_from_size,

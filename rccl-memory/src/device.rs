@@ -11,7 +11,7 @@ use core::{
     mem::{MaybeUninit, align_of, size_of},
 };
 use cuda_device::{
-    DisjointSlice, DynamicSharedArray, LinearTiles, SharedArray, SpaceLayout,
+    DisjointSlice, DynamicSharedArray, LinearTiles, SpaceLayout,
     atomic::{
         AtomicOrdering, BlockAtomicI32, BlockAtomicI64, BlockAtomicU32, BlockAtomicU64,
         DeviceAtomicI32, DeviceAtomicI64, DeviceAtomicU32, DeviceAtomicU64,
@@ -78,7 +78,7 @@ pub type OneDimensionalLaunch<'kernel> =
 /// One block's dynamically-sized shared-memory allocation.
 ///
 /// cuda-oxide exposes dynamic shared storage as an address because the launch
-/// determines its extent. RCCL's proc macros already determine that extent;
+/// determines its extent. RCCL's cfg-selected policy determines that extent;
 /// this capability records it once and hands algorithms checked typed regions
 /// instead of making every collective recover and cast the address.
 pub struct AlignedBlockSharedMemory<const ALIGN: usize> {
@@ -90,9 +90,6 @@ pub struct AlignedBlockSharedMemory<const ALIGN: usize> {
 /// Default shared-memory capability for policies requiring at most 16-byte
 /// alignment.
 pub type BlockSharedMemory = AlignedBlockSharedMemory<16>;
-
-#[doc(hidden)]
-pub use cuda_device::SharedArray as __StaticSharedArray;
 
 #[doc(hidden)]
 #[inline(always)]
@@ -150,21 +147,19 @@ impl<const ALIGN: usize> AlignedBlockSharedMemory<ALIGN> {
         }
     }
 
-    /// Bind a proc-macro-sized static shared allocation to the same safe
-    /// region vocabulary used by dynamic collectives.
+    /// Bind a statically-sized shared allocation to the same safe region
+    /// vocabulary used by dynamic collectives.
     ///
     /// # Safety
     ///
-    /// `shared` must name a `static mut SharedArray<u8, N, ALIGN>` in the
-    /// currently executing CUDA kernel. The exported declaration macro is the
-    /// only RCCL caller and constructs exactly that form.
+    /// `base` must be the address of a `static mut SharedArray<u8, N, ALIGN>`
+    /// in the currently executing CUDA kernel. The exported declaration macro
+    /// is the only RCCL caller and constructs exactly that form.
     #[doc(hidden)]
     #[inline(always)]
-    pub unsafe fn from_static_raw<const N: usize>(shared: *mut SharedArray<u8, N, ALIGN>) -> Self {
+    pub unsafe fn from_static_base<const N: usize>(base: *mut u8) -> Self {
         Self {
-            // SAFETY: upheld by the caller; this reviewed boundary turns the
-            // cuda-oxide static into an affine block-scoped capability.
-            base: unsafe { SharedArray::as_raw_mut_ptr(shared) },
+            base,
             bytes: N,
             _not_send_or_sync: PhantomData,
         }
@@ -305,12 +300,18 @@ impl<const ALIGN: usize> AlignedBlockSharedMemory<ALIGN> {
 #[macro_export]
 macro_rules! static_block_shared_memory {
     ($name:ident, $bytes:expr, $align:expr) => {{
-        static mut $name: $crate::device::__StaticSharedArray<u8, { $bytes }, { $align }> =
-            $crate::device::__StaticSharedArray::UNINIT;
+        static mut $name: ::cuda_device::SharedArray<u8, { $bytes }, { $align }> =
+            ::cuda_device::SharedArray::UNINIT;
+        // The static's address already carries CUDA shared address space. Use
+        // Rust's raw-pointer cast directly so this macro has no cross-crate
+        // associated-function call for cuda-oxide to import.
+        let base = (&raw mut $name).cast::<u8>();
         // SAFETY: the macro creates the exact cuda-oxide static required by
-        // `from_static_raw`; callers receive only the safe affine capability.
+        // `from_static_base`; callers receive only the safe affine capability.
         unsafe {
-            $crate::device::AlignedBlockSharedMemory::<{ $align }>::from_static_raw(&raw mut $name)
+            $crate::device::AlignedBlockSharedMemory::<{ $align }>::from_static_base::<{ $bytes }>(
+                base,
+            )
         }
     }};
 }
@@ -591,7 +592,7 @@ impl<IndexSpace: SpaceLayout> DeviceRegion<'_, u64, IndexSpace> {
 /// Counter operations required by CUB's device histogram agents.
 ///
 /// This is a device-memory capability, not schedule metadata.  Architecture,
-/// channel, and loading-policy decisions remain in the proc-macro crate.
+/// channel, and loading-policy decisions remain in ordinary CUB policy code.
 #[doc(hidden)]
 pub trait HistogramCounter: Copy {
     fn zero() -> Self;
@@ -660,22 +661,21 @@ pub fn threadfence_block() {
 
 /// Pinned `TilePrefixCallbackOp` construction delay for primitive scan words.
 #[inline(always)]
-pub fn set_lookback_initial_delay<const SM70: bool>() {
-    if SM70 {
-        // SAFETY: `nanosleep` has no memory or pointer precondition. This safe
-        // wrapper fixes the exact primitive lookback delay selected by CCCL.
-        unsafe { cuda_device::barrier::nanosleep(450) };
-    }
+pub fn set_lookback_initial_delay() {
+    // SAFETY: `nanosleep` has no memory or pointer precondition. This safe
+    // wrapper fixes the exact primitive lookback delay selected by CCCL for
+    // the SM80+ targets supported by the pinned compiler.
+    unsafe { cuda_device::barrier::nanosleep(450) };
 }
 
 /// Pinned primitive lookback retry delay/anti-hoisting operation.
 #[inline(always)]
-pub fn set_lookback_retry_delay<const SM70: bool>() {
-    if !SM70 || thread::gridDim_x() < 500 {
+pub fn set_lookback_retry_delay() {
+    if thread::gridDim_x() < 500 {
         fence::threadfence_block();
     } else {
-        // SAFETY: as above; the SM70+ pinned policy uses a 350-cycle sleep
-        // for grids at or above the threshold.
+        // SAFETY: as above; the supported policy uses a 350-cycle sleep for
+        // grids at or above the threshold.
         unsafe { cuda_device::barrier::nanosleep(350) };
     }
 }

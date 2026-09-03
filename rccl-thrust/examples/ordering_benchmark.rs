@@ -88,7 +88,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // streams active, the legacy default stream supplies the same blocking
     // ordering contract for this benchmark.
     let stream = context.default_stream();
-    let thrust = rccl_thrust::thrust_program!(&context)?;
+    let thrust = rccl_thrust::cuda::Program::load(&context)?;
     let exec = thrust.par(&stream)?;
 
     // The pinned parity suite has separate merge and ordering executables.

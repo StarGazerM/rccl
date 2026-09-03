@@ -12,25 +12,25 @@ The runnable Rust ports are `examples/warp_reduce.rs` for the documented
 overview and focused cases, `examples/warp_reduce_catch2.rs` for the 144
 integer Catch2 executions, and `examples/warp_reduce_catch2_f32.rs` for the
 six floating executions. The ordinary Cargo unit target is
-`tests/warp_reduce_upstream.rs`. The GPU ports use only the public operation
-macros:
+`tests/warp_reduce_upstream.rs`. The GPU ports use ordinary public generic
+functions:
 
 ```rust,ignore
-let aggregate = rccl_cub::warp_reduce!(::<i32, 32>(
+let aggregate = rccl_cub::warp_reduce::<i32, 32>(
     thread_value,
+    32,
     |left, right| left + right,
-));
+);
 ```
 
-The macro-visible arguments are the C++ template facts: scalar type and
-logical-warp width. `warp_reduce_items!(::<T, WIDTH, ITEMS>(...))` also makes
-the C++ array extent explicit, because a proc macro cannot perform the type
-deduction that C++ performs for `T (&)[ITEMS]`. The proc macro annotates the
-ordinary Rust closure with `T`, selects the scalar-specific shuffle/redux
-form, and emits the whole safe expression. There is no public operator type,
+The generic arguments are the C++ template facts: scalar type and logical-warp
+width. `warp_reduce_items::<T, WIDTH, ITEMS>(...)` also makes the C++ array
+extent explicit as a Rust const generic. The closure type remains inferred and
+the ordinary function selects the appropriate shuffle/redux implementation.
+There is no public operator type,
 algorithm policy, temporary-storage type, runtime selection trait, registry,
-or device-lambda substitute. Literal widths forwarded through an ordinary
-declarative Rust macro are accepted; runtime width expressions are rejected.
+or device-lambda substitute. Runtime width expressions are rejected by the
+ordinary const-generic function boundary.
 
 ## Correspondence
 
@@ -38,7 +38,7 @@ declarative Rust macro are accepted; runtime width expressions are rejected.
 |---|---|
 | `warp_reduce.cuh` overview: four 32-lane sums over `0..128` | `overview`; asserts exactly `496, 1520, 2544, 3568` |
 | `WarpReduce::Sum`, full logical warp | `overview`, `i64_sum`, `u8_sum` |
-| custom binary operation | closures passed directly to both public macros |
+| custom binary operation | closures passed directly to both public functions |
 | partial logical warp with uniform `valid_items` | `partial_sum`; independently folds only the first 13 lanes |
 | logical warp smaller than 32 | `logical_16_max`; checks all eight logical warps |
 | four items per thread | `multiple_items`; `[T; 4]` replaces the C++ fixed-size range |

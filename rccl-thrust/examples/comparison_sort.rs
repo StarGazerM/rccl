@@ -22,7 +22,7 @@ fn shuffled_unique(count: usize) -> Vec<u32> {
 fn main() -> Result<(), Box<dyn Error>> {
     let context = CudaContext::new(0)?;
     let stream = context.default_stream();
-    let thrust = rccl_thrust::thrust_program!(&context)?;
+    let thrust = rccl_thrust::cuda::Program::load(&context)?;
     let exec = thrust.par(&stream)?;
 
     let input = shuffled_unique(10_003);

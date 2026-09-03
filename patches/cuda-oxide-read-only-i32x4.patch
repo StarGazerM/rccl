@@ -1,5 +1,109 @@
+diff --git a/crates/cargo-oxide/src/commands/codegen_env.rs b/crates/cargo-oxide/src/commands/codegen_env.rs
+index d4fe2fe2..c86457e7 100644
+--- a/crates/cargo-oxide/src/commands/codegen_env.rs
++++ b/crates/cargo-oxide/src/commands/codegen_env.rs
+@@ -240,6 +240,41 @@ pub(super) fn apply_codegen_configuration_or_exit(
+ /// `arch` is an explicit pin (`--arch`); it becomes `CUDA_OXIDE_TARGET`, the
+ /// hard override the backend honors as-is. The auto-detected GPU arch is *not*
+ /// routed here -- see [`apply_device_arch_hint`].
++fn append_architecture_cfgs(cmd: &mut Command, target_arch: &str) {
++    let Ok(arch) = target_arch.parse::<cuda_artifact_finalizer::CudaArch>() else {
++        return;
++    };
++    let mut encoded = cmd
++        .get_envs()
++        .find(|(name, _)| *name == std::ffi::OsStr::new("CARGO_ENCODED_RUSTFLAGS"))
++        .and_then(|(_, value)| value.map(|value| value.to_string_lossy().into_owned()))
++        .unwrap_or_default();
++    let mut append = |flag: &str| {
++        if !encoded.is_empty() {
++            encoded.push(ENCODED_RUSTFLAGS_SEPARATOR);
++        }
++        encoded.push_str(flag);
++    };
++
++    append("--check-cfg=cfg(cuda_arch,values(any()))");
++    append("--check-cfg=cfg(cuda_arch_ge_80)");
++    append("--check-cfg=cfg(cuda_arch_ge_90)");
++    append("--check-cfg=cfg(cuda_arch_ge_100)");
++    append("--cfg");
++    append(&format!("cuda_arch=\"{}\"", arch.sm()));
++    for (minimum, cfg) in [
++        (80, "cuda_arch_ge_80"),
++        (90, "cuda_arch_ge_90"),
++        (100, "cuda_arch_ge_100"),
++    ] {
++        if arch.capability() >= minimum {
++            append("--cfg");
++            append(cfg);
++        }
++    }
++    cmd.env("CARGO_ENCODED_RUSTFLAGS", encoded);
++}
++
+ pub(super) fn apply_output_mode(
+     cmd: &mut Command,
+     emit_nvvm_ir: bool,
+@@ -248,6 +283,7 @@ pub(super) fn apply_output_mode(
+ ) {
+     if let Some(target_arch) = arch {
+         cmd.env("CUDA_OXIDE_TARGET", target_arch);
++        append_architecture_cfgs(cmd, target_arch);
+     }
+     if emit_nvvm_ir || materialization.enabled() {
+         cmd.env("CUDA_OXIDE_EMIT_NVVM_IR", "1");
+diff --git a/crates/cargo-oxide/src/commands/tests.rs b/crates/cargo-oxide/src/commands/tests.rs
+index bff52840..1f251d83 100644
+--- a/crates/cargo-oxide/src/commands/tests.rs
++++ b/crates/cargo-oxide/src/commands/tests.rs
+@@ -2708,9 +2708,45 @@ fn apply_output_mode_sets_target_for_arch_override() {
+         command_env(&cmd, "CUDA_OXIDE_TARGET").as_deref(),
+         Some("sm_120")
+     );
++    assert_eq!(
++        decoded_rustflags(&command_env(&cmd, "CARGO_ENCODED_RUSTFLAGS").unwrap()),
++        [
++            "--check-cfg=cfg(cuda_arch,values(any()))",
++            "--check-cfg=cfg(cuda_arch_ge_80)",
++            "--check-cfg=cfg(cuda_arch_ge_90)",
++            "--check-cfg=cfg(cuda_arch_ge_100)",
++            "--cfg",
++            "cuda_arch=\"sm_120\"",
++            "--cfg",
++            "cuda_arch_ge_80",
++            "--cfg",
++            "cuda_arch_ge_90",
++            "--cfg",
++            "cuda_arch_ge_100",
++        ]
++    );
+     assert_eq!(command_env(&cmd, "CUDA_OXIDE_EMIT_NVVM_IR"), None);
+ }
+ 
++#[test]
++fn apply_output_mode_sets_only_cumulative_cfgs_reached_by_arch() {
++    let mut cmd = Command::new("cargo");
++
++    apply_output_mode(
++        &mut cmd,
++        false,
++        Some("sm_89"),
++        &MaterializationMode::default(),
++    );
++
++    let flags = command_env(&cmd, "CARGO_ENCODED_RUSTFLAGS").unwrap();
++    let flags = decoded_rustflags(&flags);
++    assert!(flags.contains(&"cuda_arch=\"sm_89\""));
++    assert!(flags.contains(&"cuda_arch_ge_80"));
++    assert!(!flags.contains(&"cuda_arch_ge_90"));
++    assert!(!flags.contains(&"cuda_arch_ge_100"));
++}
++
+ #[test]
+ fn apply_output_mode_sets_nvvm_ir_flag_and_target() {
+     let mut cmd = Command::new("cargo");
 diff --git a/crates/cuda-device/src/lib.rs b/crates/cuda-device/src/lib.rs
-index a3171af..286379c 100644
+index a3171afb..286379c9 100644
 --- a/crates/cuda-device/src/lib.rs
 +++ b/crates/cuda-device/src/lib.rs
 @@ -44,6 +44,7 @@ pub mod int;
@@ -10,8 +114,72 @@ index a3171af..286379c 100644
  pub mod shared;
  pub mod swizzle;
  pub mod tcgen05;
+diff --git a/crates/cuda-device/src/read_only.rs b/crates/cuda-device/src/read_only.rs
+new file mode 100644
+index 00000000..f4d4d3de
+--- /dev/null
++++ b/crates/cuda-device/src/read_only.rs
+@@ -0,0 +1,58 @@
++/*
++ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++//! Read-only global-memory loads.
++//!
++//! [`load`] is the safe Rust equivalent of CUDA's `__ldg`: its shared borrow
++//! proves that the operation cannot write through the supplied reference.  The
++//! cuda-oxide compiler preserves the load as one cache-qualified instruction,
++//! including for the over-aligned vector values in [`crate::vector`].
++
++/// Copy a value through CUDA's read-only global-memory path.
++///
++/// Device compilation recognizes this compiler stub as a memory intrinsic so
++/// a value whose type carries 8- or 16-byte alignment is not scalarized when
++/// its lanes are subsequently consumed.
++#[must_use]
++#[inline(never)]
++pub fn load<T: Copy>(_value: &T) -> T {
++    unreachable!("read_only::load executed outside cuda-oxide device compilation")
++}
++
++/// Return the first index whose value compares greater than `sample`.
++///
++/// This is CUDA's read-only-cache realization of the standard upper-bound
++/// search. The loop maintains `retval <= input.len()` and
++/// `retval + num_items <= input.len()`, so every private indexed load is
++/// proved in bounds. cuda-oxide recognizes that private load boundary and
++/// emits one cache-qualified transaction without duplicating a bounds trap at
++/// every search iteration.
++#[must_use]
++#[inline(always)]
++pub fn upper_bound<T: Copy + PartialOrd>(input: &[T], sample: T) -> i32 {
++    let mut retval = 0i32;
++    let mut num_items = input.len() as i32;
++    while num_items > 0 {
++        let half = num_items >> 1;
++        let probe = retval.wrapping_add(half);
++        if sample < __load_at(input, probe as usize) {
++            num_items = half;
++        } else {
++            let consumed = half.wrapping_add(1);
++            retval = retval.wrapping_add(consumed);
++            num_items = num_items.wrapping_sub(consumed);
++        }
++    }
++    retval
++}
++
++/// Compiler boundary for the one indexed read in [`upper_bound`].
++///
++/// This function is private so arbitrary device code cannot present an
++/// unproved index. The only call site is the interval-preserving search above.
++#[inline(never)]
++fn __load_at<T: Copy>(input: &[T], index: usize) -> T {
++    input[index]
++}
 diff --git a/crates/cuda-device/src/vector.rs b/crates/cuda-device/src/vector.rs
-index 50a7db4..cfe7eae 100644
+index 50a7db4a..cfe7eae5 100644
 --- a/crates/cuda-device/src/vector.rs
 +++ b/crates/cuda-device/src/vector.rs
 @@ -183,6 +183,10 @@ define_vector!(
@@ -25,8 +193,115 @@ index 50a7db4..cfe7eae 100644
  define_vector!(
      /// Four `u16` in one 64-bit transaction.
      U16x4, u16, 4, 8
+diff --git a/crates/cuda-macros/src/cuda_module/mod.rs b/crates/cuda-macros/src/cuda_module/mod.rs
+index c01d58c0..b2eef071 100644
+--- a/crates/cuda-macros/src/cuda_module/mod.rs
++++ b/crates/cuda-macros/src/cuda_module/mod.rs
+@@ -37,8 +37,7 @@ use proc_macro::TokenStream;
+ use proc_macro2::TokenStream as TokenStream2;
+ use quote::quote;
+ use reserved_oxide_symbols::{
+-    DEVICE_CODEGEN_CRATE_ENV, artifact_anchor_symbol, artifact_anchor_symbol_v2,
+-    ptx_merge_required_marker,
++    DEVICE_CODEGEN_CRATE_ENV, artifact_anchor_symbol_v2, ptx_merge_required_marker,
+ };
+ use syn::{
+     Ident, Item, ItemFn, ItemMod, LitStr, Token, parse_macro_input, parse_quote,
+@@ -794,13 +793,12 @@ fn cuda_module_path_description(module_path: &[Ident]) -> String {
+ /// Without this handshake the bundle was silently dropped and `load()`
+ /// failed at runtime with `ModuleNotFound` (issue #72).
+ ///
+-/// Without an owner filter, both sides keep using the legacy package+version
+-/// anchor for compatibility with older wrappers and backends. A non-empty
+-/// owner filter activates the v2 package+version+crate+binary identity. That
+-/// target-specific identity prevents an unselected binary from satisfying a
+-/// selected library's reference (or vice versa); an unselected new macro emits
+-/// no reference at all. The backend also keeps a weak legacy alias for older
+-/// macro expansions in mixed-version builds.
++/// The package+version+crate+binary v2 identity prevents an example, binary,
++/// or test target from satisfying a library's anchor reference merely because
++/// both targets belong to the same Cargo package. The backend also keeps a
++/// weak legacy package-level alias for older macro expansions in mixed-version
++/// builds. An explicit owner filter can suppress an unselected crate's
++/// reference entirely, but it is not required to obtain collision-free names.
+ ///
+ /// The reference is only emitted when the module is guaranteed to produce
+ /// an artifact for this crate. Generic kernels are monomorphized (and
+@@ -841,16 +839,12 @@ fn cuda_module_artifact_anchor_statements(
+     }
+ 
+     let binary_name = std::env::var("CARGO_BIN_NAME").ok();
+-    let anchor = if owner_selection.is_some() {
+-        artifact_anchor_symbol_v2(
+-            &package_name,
+-            &package_version,
+-            &crate_name,
+-            binary_name.as_deref(),
+-        )
+-    } else {
+-        artifact_anchor_symbol(&package_name, &package_version)
+-    };
++    let anchor = cuda_module_artifact_anchor(
++        &package_name,
++        &package_version,
++        &crate_name,
++        binary_name.as_deref(),
++    );
+     let anchor_name = LitStr::new(&anchor, proc_macro2::Span::call_site());
+     let references = kernels
+         .iter()
+@@ -877,6 +871,15 @@ fn cuda_module_artifact_anchor_statements(
+     })
+ }
+ 
++pub(crate) fn cuda_module_artifact_anchor(
++    package_name: &str,
++    package_version: &str,
++    crate_name: &str,
++    binary_name: Option<&str>,
++) -> String {
++    artifact_anchor_symbol_v2(package_name, package_version, crate_name, binary_name)
++}
++
+ pub(crate) fn device_codegen_owner_selection(raw: Option<&str>, crate_name: &str) -> Option<bool> {
+     let crate_name = crate_name.trim().replace('-', "_");
+     raw.and_then(|raw| {
+diff --git a/crates/cuda-macros/src/tests/cuda_module.rs b/crates/cuda-macros/src/tests/cuda_module.rs
+index 1086b356..8ef8a346 100644
+--- a/crates/cuda-macros/src/tests/cuda_module.rs
++++ b/crates/cuda-macros/src/tests/cuda_module.rs
+@@ -5,8 +5,8 @@
+ 
+ use crate::cuda_module::contract::LaunchContractArgs;
+ use crate::cuda_module::{
+-    device_codegen_owner_selection, expand_cuda_module, expand_cuda_module_inner,
+-    transform_cuda_module_items,
++    cuda_module_artifact_anchor, device_codegen_owner_selection, expand_cuda_module,
++    expand_cuda_module_inner, transform_cuda_module_items,
+ };
+ use proc_macro2::TokenStream as TokenStream2;
+ use quote::quote;
+@@ -84,6 +84,18 @@ fn host_cuda_module_still_emits_the_loader() {
+     );
+ }
+ 
++#[test]
++fn concrete_kernel_uses_target_specific_artifact_anchor_by_default() {
++    assert_eq!(
++        cuda_module_artifact_anchor("gpu-package", "1.2.3", "gpu_lib", None),
++        "cuda_oxide_artifact_anchor_246e25db_v2_gpu_package_1_2_3_gpu_lib_nonbin"
++    );
++    assert_eq!(
++        cuda_module_artifact_anchor("gpu-package", "1.2.3", "probe", Some("probe-example")),
++        "cuda_oxide_artifact_anchor_246e25db_v2_gpu_package_1_2_3_probe_bin_probe_example"
++    );
++}
++
+ /// A nested inline module gets its own `LoadedModule`, so it needs the
+ /// same gate as the outer one.
+ #[test]
 diff --git a/crates/dialect-mir/src/ops/memory.rs b/crates/dialect-mir/src/ops/memory.rs
-index b59023d..f382eb8 100644
+index b59023db..f382eb8f 100644
 --- a/crates/dialect-mir/src/ops/memory.rs
 +++ b/crates/dialect-mir/src/ops/memory.rs
 @@ -611,7 +611,8 @@ impl Verify for MirMemmoveOp {
@@ -59,7 +334,7 @@ index b59023d..f382eb8 100644
  
  impl Verify for MirLoadOp {
 diff --git a/crates/mir-importer/src/translator/rvalue/mod.rs b/crates/mir-importer/src/translator/rvalue/mod.rs
-index 654417b..384d242 100644
+index 654417b7..384d2426 100644
 --- a/crates/mir-importer/src/translator/rvalue/mod.rs
 +++ b/crates/mir-importer/src/translator/rvalue/mod.rs
 @@ -54,4 +54,5 @@ pub use place_read::translate_place;
@@ -69,7 +344,7 @@ index 654417b..384d242 100644
 +pub(crate) use pointee::normalize_slice_value_to_data_ptr;
  pub(crate) use promoted::translate_array_constant_into_alloca;
 diff --git a/crates/mir-importer/src/translator/rvalue/pointee.rs b/crates/mir-importer/src/translator/rvalue/pointee.rs
-index f92a13e..538a36a 100644
+index f92a13e1..538a36a2 100644
 --- a/crates/mir-importer/src/translator/rvalue/pointee.rs
 +++ b/crates/mir-importer/src/translator/rvalue/pointee.rs
 @@ -286,7 +286,7 @@ pub(super) fn rust_ty_is_slice(ty: &rustc_public::ty::Ty) -> bool {
@@ -82,10 +357,10 @@ index f92a13e..538a36a 100644
      value: Value,
      block_ptr: Ptr<BasicBlock>,
 diff --git a/crates/mir-importer/src/translator/terminator/intrinsics/memory.rs b/crates/mir-importer/src/translator/terminator/intrinsics/memory.rs
-index da02d41..888a219 100644
+index da02d41f..6b779eef 100644
 --- a/crates/mir-importer/src/translator/terminator/intrinsics/memory.rs
 +++ b/crates/mir-importer/src/translator/terminator/intrinsics/memory.rs
-@@ -211,6 +211,318 @@ pub fn emit_volatile_load(
+@@ -211,6 +211,185 @@ pub fn emit_volatile_load(
      )
  }
  
@@ -268,147 +543,14 @@ index da02d41..888a219 100644
 +    )
 +}
 +
-+/// Emits cuda-device's private indexed read for a host-validated device
-+/// address/count pair.
-+///
-+/// `ReadOnlyRange` is the Rust proof owner: its constructor is host-only and
-+/// its upper-bound loop maintains `retval + half < len`. This boundary keeps
-+/// the pointer and signed count in their CUB `SearchTransform` representation
-+/// instead of reconstructing a fat slice in every unrolled channel.
-+#[allow(clippy::too_many_arguments)]
-+pub fn emit_read_only_load_address_at(
-+    ctx: &mut Context,
-+    body: &mir::Body,
-+    args: &[mir::Operand],
-+    destination: &mir::Place,
-+    target: &Option<usize>,
-+    block_ptr: Ptr<BasicBlock>,
-+    prev_op: Option<Ptr<Operation>>,
-+    value_map: &mut ValueMap,
-+    block_map: &[Ptr<BasicBlock>],
-+    loc: Location,
-+) -> TranslationResult<Ptr<Operation>> {
-+    use dialect_mir::ops::{MirLoadOp, MirPtrOffsetOp};
-+
-+    if args.len() != 2 {
-+        return input_err!(
-+            loc.clone(),
-+            TranslationErr::unsupported(format!(
-+                "read_only::__load_address_at expects a u64 address and index, got {} arguments",
-+                args.len()
-+            ))
-+        );
-+    }
-+
-+    let (integer_address, after_address) = rvalue::translate_operand(
-+        ctx,
-+        body,
-+        &args[0],
-+        value_map,
-+        block_ptr,
-+        prev_op,
-+        loc.clone(),
-+    )?;
-+    let address_ty = integer_address.get_type(ctx);
-+    let is_u64_address = address_ty
-+        .deref(ctx)
-+        .downcast_ref::<IntegerType>()
-+        .is_some_and(|integer| integer.width() == 64);
-+    if !is_u64_address {
-+        return input_err!(
-+            loc.clone(),
-+            TranslationErr::unsupported(
-+                "read_only::__load_address_at address is not a 64-bit integer".to_string()
-+            )
-+        );
-+    }
-+
-+    let element_ty = types::translate_destination_type(ctx, body, destination, &loc)?;
-+    let data_ty: pliron::r#type::TypeHandle = MirPtrType::get_generic_with_kind(
-+        ctx,
-+        element_ty,
-+        false,
-+        MirPointerKind::RawConst,
-+    )
-+    .into();
-+    let cast = Operation::new(
-+        ctx,
-+        MirCastOp::get_concrete_op_info(),
-+        vec![data_ty],
-+        vec![integer_address],
-+        vec![],
-+        0,
-+    );
-+    cast.deref_mut(ctx).set_loc(loc.clone());
-+    let cast_boundary = MirCastOp::new(cast);
-+    cast_boundary.set_attr_cast_kind(ctx, MirCastKindAttr::PointerWithExposedProvenance);
-+    cast_boundary.set_pointer_kind_authority(ctx, MirPointerKindAuthorityAttr::RustCast);
-+    match after_address {
-+        Some(previous) => cast.insert_after(ctx, previous),
-+        None => cast.insert_at_front(block_ptr, ctx),
-+    }
-+
-+    let data = cast.deref(ctx).get_result(0);
-+    let (index, after_index) = rvalue::translate_operand(
-+        ctx,
-+        body,
-+        &args[1],
-+        value_map,
-+        block_ptr,
-+        Some(cast),
-+        loc.clone(),
-+    )?;
-+    let offset = Operation::new(
-+        ctx,
-+        MirPtrOffsetOp::get_concrete_op_info(),
-+        vec![data_ty],
-+        vec![data, index],
-+        vec![],
-+        0,
-+    );
-+    offset.deref_mut(ctx).set_loc(loc.clone());
-+    MirPtrOffsetOp::new(offset).set_inbounds(ctx, true);
-+    match after_index {
-+        Some(previous) => offset.insert_after(ctx, previous),
-+        None => offset.insert_after(ctx, cast),
-+    }
-+
-+    let address = offset.deref(ctx).get_result(0);
-+    let load = Operation::new(
-+        ctx,
-+        MirLoadOp::get_concrete_op_info(),
-+        vec![element_ty],
-+        vec![address],
-+        vec![],
-+        0,
-+    );
-+    load.deref_mut(ctx).set_loc(loc.clone());
-+    MirLoadOp::new(load).set_read_only(ctx, true);
-+    load.insert_after(ctx, offset);
-+
-+    let result = load.deref(ctx).get_result(0);
-+    emit_store_result_and_goto(
-+        ctx,
-+        destination,
-+        result,
-+        target,
-+        block_ptr,
-+        load,
-+        value_map,
-+        block_map,
-+        loc,
-+        "read_only::__load_address_at call without target block",
-+    )
-+}
-+
  /// Emits `core::intrinsics::volatile_store::<T>(ptr, value)`, which backs
  /// `core::ptr::write_volatile`.
  #[allow(clippy::too_many_arguments)]
 diff --git a/crates/mir-importer/src/translator/terminator/mod.rs b/crates/mir-importer/src/translator/terminator/mod.rs
-index 1f75500..b1b860d 100644
+index 1f75500b..70fb86ba 100644
 --- a/crates/mir-importer/src/translator/terminator/mod.rs
 +++ b/crates/mir-importer/src/translator/terminator/mod.rs
-@@ -2898,6 +2898,46 @@ fn try_dispatch_intrinsic(
+@@ -2898,6 +2898,32 @@ fn try_dispatch_intrinsic(
                  loc,
              )?))
          }
@@ -438,25 +580,11 @@ index 1f75500..b1b860d 100644
 +                loc,
 +            )?))
 +        }
-+        "cuda_device::read_only::__load_address_at" => {
-+            Ok(Some(intrinsics::memory::emit_read_only_load_address_at(
-+                ctx,
-+                body,
-+                args,
-+                destination,
-+                target,
-+                block_ptr,
-+                prev_op,
-+                value_map,
-+                block_map,
-+                loc,
-+            )?))
-+        }
          "core::intrinsics::volatile_store" | "std::intrinsics::volatile_store" => {
              Ok(Some(intrinsics::memory::emit_volatile_store(
                  ctx, body, args, target, block_ptr, prev_op, value_map, block_map, loc,
 diff --git a/crates/mir-lower/src/convert/ops/memory/access.rs b/crates/mir-lower/src/convert/ops/memory/access.rs
-index 933b249..9a18406 100644
+index 933b2498..9a184066 100644
 --- a/crates/mir-lower/src/convert/ops/memory/access.rs
 +++ b/crates/mir-lower/src/convert/ops/memory/access.rs
 @@ -12,7 +12,11 @@ use super::common::{
@@ -694,87 +822,9 @@ index 933b249..9a18406 100644
  /// Convert `mir.alloca` to `llvm.alloca`.
  ///
  /// `mir.alloca` carries its element type on the result pointer's pointee, and
-diff --git a/crates/cuda-device/src/read_only.rs b/crates/cuda-device/src/read_only.rs
-new file mode 100644
-index 0000000..ff5c5d1
---- /dev/null
-+++ b/crates/cuda-device/src/read_only.rs
-@@ -0,0 +1,72 @@
-+/*
-+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-+ * SPDX-License-Identifier: Apache-2.0
-+ */
-+
-+//! Read-only global-memory loads.
-+//!
-+//! [`load`] is the safe Rust equivalent of CUDA's `__ldg`: its shared borrow
-+//! proves that the operation cannot write through the supplied reference.  The
-+//! cuda-oxide compiler preserves the load as one cache-qualified instruction,
-+//! including for the over-aligned vector values in [`crate::vector`].
-+
-+/// Copy a value through CUDA's read-only global-memory path.
-+///
-+/// Device compilation recognizes this compiler stub as a memory intrinsic so
-+/// a value whose type carries 8- or 16-byte alignment is not scalarized when
-+/// its lanes are subsequently consumed.
-+#[must_use]
-+#[inline(never)]
-+pub fn load<T: Copy>(_value: &T) -> T {
-+    unreachable!("read_only::load executed outside cuda-oxide device compilation")
-+}
-+
-+/// Return the first index whose value compares greater than `sample`.
-+///
-+/// This is CUDA's read-only-cache realization of the standard upper-bound
-+/// search. The loop maintains `retval <= input.len()` and
-+/// `retval + num_items <= input.len()`, so every private indexed load is
-+/// proved in bounds. cuda-oxide recognizes that private load boundary and
-+/// emits one cache-qualified transaction without duplicating a bounds trap at
-+/// every search iteration.
-+#[must_use]
-+#[inline(always)]
-+pub fn upper_bound<T: Copy + PartialOrd>(input: &[T], sample: T) -> i32 {
-+    let mut retval = 0i32;
-+    let mut num_items = input.len() as i32;
-+    while num_items > 0 {
-+        let half = num_items >> 1;
-+        let probe = retval.wrapping_add(half);
-+        if sample < __load_at(input, probe as usize) {
-+            num_items = half;
-+        } else {
-+            let consumed = half.wrapping_add(1);
-+            retval = retval.wrapping_add(consumed);
-+            num_items = num_items.wrapping_sub(consumed);
-+        }
-+    }
-+    retval
-+}
-+
-+/// Compiler boundary for the one indexed read in [`upper_bound`].
-+///
-+/// This function is private so arbitrary device code cannot present an
-+/// unproved index. The only call site is the interval-preserving search above.
-+#[inline(never)]
-+fn __load_at<T: Copy>(input: &[T], index: usize) -> T {
-+    input[index]
-+}
-+
-+/// Compiler boundary for an indexed read from a host-validated device address.
-+///
-+/// Higher-level safe wrappers retain the allocation borrow and maintain the
-+/// search interval; this stub keeps their address/count representation from
-+/// being widened into a fat slice during device lowering.
-+#[inline(never)]
-+#[allow(
-+    dead_code,
-+    reason = "recognized across the compiler boundary by downstream safe wrappers"
-+)]
-+fn __load_address_at<T: Copy>(_address: u64, _index: usize) -> T {
-+    unreachable!("read-only address load executed outside cuda-oxide device compilation")
-+}
 diff --git a/crates/rustc-codegen-cuda/examples/read_only_load/Cargo.lock b/crates/rustc-codegen-cuda/examples/read_only_load/Cargo.lock
 new file mode 100644
-index 0000000..026990d
+index 00000000..026990d0
 --- /dev/null
 +++ b/crates/rustc-codegen-cuda/examples/read_only_load/Cargo.lock
 @@ -0,0 +1,558 @@
@@ -1338,7 +1388,7 @@ index 0000000..026990d
 +]
 diff --git a/crates/rustc-codegen-cuda/examples/read_only_load/Cargo.toml b/crates/rustc-codegen-cuda/examples/read_only_load/Cargo.toml
 new file mode 100644
-index 0000000..6a15af0
+index 00000000..6a15af06
 --- /dev/null
 +++ b/crates/rustc-codegen-cuda/examples/read_only_load/Cargo.toml
 @@ -0,0 +1,12 @@
@@ -1356,7 +1406,7 @@ index 0000000..6a15af0
 +cuda-core = { path = "../../../cuda-core" }
 diff --git a/crates/rustc-codegen-cuda/examples/read_only_load/src/main.rs b/crates/rustc-codegen-cuda/examples/read_only_load/src/main.rs
 new file mode 100644
-index 0000000..7e42531
+index 00000000..7e42531e
 --- /dev/null
 +++ b/crates/rustc-codegen-cuda/examples/read_only_load/src/main.rs
 @@ -0,0 +1,39 @@
@@ -1401,7 +1451,7 @@ index 0000000..7e42531
 +}
 diff --git a/crates/rustc-codegen-cuda/examples/read_only_load/verify-code-shape.sh b/crates/rustc-codegen-cuda/examples/read_only_load/verify-code-shape.sh
 new file mode 100644
-index 0000000..854bb31
+index 00000000..854bb31e
 --- /dev/null
 +++ b/crates/rustc-codegen-cuda/examples/read_only_load/verify-code-shape.sh
 @@ -0,0 +1,11 @@
@@ -1416,3 +1466,84 @@ index 0000000..854bb31
 +    exit 1
 +fi
 +printf '%s\n' 'read-only vector load code shape: PASS'
+diff --git a/crates/rustc-codegen-cuda/src/lib.rs b/crates/rustc-codegen-cuda/src/lib.rs
+index ddb24829..3e8292f7 100644
+--- a/crates/rustc-codegen-cuda/src/lib.rs
++++ b/crates/rustc-codegen-cuda/src/lib.rs
+@@ -731,11 +731,10 @@ impl CodegenBackend for CudaCodegenBackend {
+                                 &device_config.output_dir,
+                                 &device_config.output_name,
+                                 tcx.sess.target.llvm_target.as_ref(),
+-                                &result,
+-                                artifact,
+-                                device_functions,
+-                                self.config.device_codegen_crates.is_some(),
+-                                materialization_request,
++                                    &result,
++                                    artifact,
++                                    device_functions,
++                                    materialization_request,
+                             ) {
+                                 Ok(path) => {
+                                     if self.config.verbose {
+@@ -844,7 +843,6 @@ fn write_device_artifact_object(
+     result: &device_codegen::DeviceCodegenResult,
+     artifact: &device_codegen::DeviceCodegenArtifact,
+     functions: &[collector::CollectedFunction<'_>],
+-    use_target_specific_anchor: bool,
+     materialization_request: Option<materialize::MaterializationRequest>,
+ ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+     let bundle_name = std::env::var("CARGO_PKG_NAME").unwrap_or_else(|_| output_name.to_string());
+@@ -911,33 +909,28 @@ fn write_device_artifact_object(
+     // this crate is a library, the artifact object becomes an rlib archive
+     // member, and the linker only extracts it if some other object holds an
+     // undefined reference to a symbol defined here. The `#[cuda_module]`
+-    // macro emits that reference from the generated `load_named()`. Normal
+-    // builds preserve the legacy package-level symbol. Owner-filtered builds
+-    // use a target-specific v2 symbol plus a weak legacy alias, so an older
+-    // macro still links without letting a filtered target hide a selected
+-    // target's artifact. Without an anchor, library-crate bundles were
+-    // dead-stripped and `load()` failed at runtime with ModuleNotFound
+-    // (issue #72).
++    // macro emits that reference from the generated `load_named()`. Every
++    // artifact uses a target-specific v2 symbol so a package's example,
++    // binary, test, and library bundles cannot satisfy one another's anchor
++    // references. A weak legacy alias keeps older macro expansions linkable.
++    // Without an anchor, library-crate bundles were dead-stripped and `load()`
++    // failed at runtime with ModuleNotFound (issue #72).
+     let package_version = std::env::var("CARGO_PKG_VERSION").unwrap_or_default();
+     let legacy_anchor =
+         reserved_oxide_symbols::artifact_anchor_symbol(&bundle_name, &package_version);
+-    let object = if use_target_specific_anchor {
+-        let binary_name = std::env::var("CARGO_BIN_NAME").ok();
+-        let target_anchor = reserved_oxide_symbols::artifact_anchor_symbol_v2(
+-            &bundle_name,
+-            &package_version,
+-            output_name,
+-            binary_name.as_deref(),
+-        );
+-        oxide_artifacts::build_host_object_for_target_with_legacy_anchor(
+-            &blob,
+-            host_target,
+-            &target_anchor,
+-            &legacy_anchor,
+-        )?
+-    } else {
+-        oxide_artifacts::build_host_object_for_target(&blob, host_target, Some(&legacy_anchor))?
+-    };
++    let binary_name = std::env::var("CARGO_BIN_NAME").ok();
++    let target_anchor = reserved_oxide_symbols::artifact_anchor_symbol_v2(
++        &bundle_name,
++        &package_version,
++        output_name,
++        binary_name.as_deref(),
++    );
++    let object = oxide_artifacts::build_host_object_for_target_with_legacy_anchor(
++        &blob,
++        host_target,
++        &target_anchor,
++        &legacy_anchor,
++    )?;
+     write_artifact_object(output_dir, output_name, host_target, &object, "embed")
+ }
+ 

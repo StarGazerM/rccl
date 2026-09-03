@@ -1,7 +1,7 @@
 //! Pinned Thrust CUDA set-operation agent, expressed through Rust ownership.
 //!
-//! Policy selection and kernel construction stay in `rccl-cub-macros`; this
-//! module is the safe device algorithm selected by those compile-time facts.
+//! Policy selection and kernel construction use ordinary Rust. This module
+//! owns the generic device algorithm shared by both index widths.
 
 use core::{
     cmp::Ordering,
@@ -83,9 +83,15 @@ where
 /// Signed offset word selected by Thrust's double-index dispatch.
 #[doc(hidden)]
 pub trait SetIndex:
-    Copy + Ord + Add<Output = Self> + Sub<Output = Self> + Mul<Output = Self> + Shr<u32, Output = Self>
+    cuda_core::DeviceCopy
+    + Copy
+    + Ord
+    + Add<Output = Self>
+    + Sub<Output = Self>
+    + Mul<Output = Self>
+    + Shr<u32, Output = Self>
 {
-    type Transaction: Copy;
+    type Transaction: cuda_core::DeviceCopy + Copy;
 
     const ZERO: Self;
     const ONE: Self;
@@ -875,7 +881,7 @@ fn set_state<I: SetIndex>(
 }
 
 #[inline(always)]
-fn wait_for_state<I: SetIndex, const SM70: bool>(
+fn wait_for_state<I: SetIndex>(
     tile_state: &mut DeviceRegion<'_, I::Transaction>,
     tile_index: I,
 ) -> (u64, I) {
@@ -885,7 +891,7 @@ fn wait_for_state<I: SetIndex, const SM70: bool>(
         u32::MAX,
         I::descriptor_status(descriptor) == SCAN_TILE_INVALID,
     ) {
-        set_lookback_retry_delay::<SM70>();
+        set_lookback_retry_delay();
         descriptor = tile_state.read_volatile(physical);
     }
     (
@@ -895,7 +901,7 @@ fn wait_for_state<I: SetIndex, const SM70: bool>(
 }
 
 #[inline(always)]
-fn tile_lookback<I: SetIndex, const SM70: bool>(
+fn tile_lookback<I: SetIndex>(
     tile_state: &mut DeviceRegion<'_, I::Transaction>,
     tile_index: I,
     block_aggregate: I,
@@ -916,12 +922,12 @@ fn tile_lookback<I: SetIndex, const SM70: bool>(
     }
 
     let mut predecessor = tile_index - I::from_usize(thread_index as usize) - I::ONE;
-    set_lookback_initial_delay::<SM70>();
-    let (mut status, value) = wait_for_state::<I, SM70>(tile_state, predecessor);
+    set_lookback_initial_delay();
+    let (mut status, value) = wait_for_state::<I>(tile_state, predecessor);
     let mut exclusive = tail_segmented_sum(value, status == SCAN_TILE_INCLUSIVE, lane);
     while warp::all_sync(u32::MAX, status != SCAN_TILE_INCLUSIVE) {
         predecessor = predecessor - I::from_usize(32);
-        let (next_status, next_value) = wait_for_state::<I, SM70>(tile_state, predecessor);
+        let (next_status, next_value) = wait_for_state::<I>(tile_state, predecessor);
         status = next_status;
         let window = tail_segmented_sum(next_value, status == SCAN_TILE_INCLUSIVE, lane);
         exclusive = window + exclusive;
@@ -938,7 +944,7 @@ fn tile_lookback<I: SetIndex, const SM70: bool>(
 }
 
 #[inline(always)]
-fn block_exclusive_sum<I: SetIndex, const THREADS: usize, const SM70: bool>(
+fn block_exclusive_sum<I: SetIndex, const THREADS: usize>(
     value: I,
     tile_index: I,
     tile_state: &mut DeviceRegion<'_, I::Transaction>,
@@ -980,7 +986,7 @@ fn block_exclusive_sum<I: SetIndex, const THREADS: usize, const SM70: bool>(
         }
     } else {
         if warp_index == 0 {
-            let prefix = tile_lookback::<I, SM70>(tile_state, tile_index, block_aggregate, shared);
+            let prefix = tile_lookback::<I>(tile_state, tile_index, block_aggregate, shared);
             if lane == 0 {
                 block_prefix_storage.write(0, prefix);
                 local_exclusive = prefix;
@@ -1156,7 +1162,6 @@ fn consume_key_tile<
     O,
     const THREADS: usize,
     const ITEMS: usize,
-    const SM70: bool,
     const LAST: bool,
 >(
     first: R1,
@@ -1261,7 +1266,7 @@ where
     thread::sync_threads();
 
     let thread_count = I::from_usize(active.count_ones() as usize);
-    let (thread_prefix, tile_prefix, tile_count) = block_exclusive_sum::<I, THREADS, SM70>(
+    let (thread_prefix, tile_prefix, tile_count) = block_exclusive_sum::<I, THREADS>(
         thread_count,
         I::from_usize(tile_index),
         tile_state,
@@ -1298,18 +1303,7 @@ where
 }
 
 #[inline(always)]
-fn run_set_keys_agent<
-    K,
-    I,
-    F,
-    Op,
-    R1,
-    R2,
-    O,
-    const THREADS: usize,
-    const ITEMS: usize,
-    const SM70: bool,
->(
+fn run_set_keys_agent<K, I, F, Op, R1, R2, O, const THREADS: usize, const ITEMS: usize>(
     first: R1,
     second: R2,
     order: F,
@@ -1334,7 +1328,7 @@ fn run_set_keys_agent<
     let last = tile_index + 1 == thread::gridDim_x() as usize;
     let mut tile_state = DeviceRegion::new(tile_state);
     let result = if last {
-        consume_key_tile::<K, I, F, Op, R1, R2, O, THREADS, ITEMS, SM70, true>(
+        consume_key_tile::<K, I, F, Op, R1, R2, O, THREADS, ITEMS, true>(
             first,
             second,
             partitions,
@@ -1344,7 +1338,7 @@ fn run_set_keys_agent<
             &shared,
         )
     } else {
-        consume_key_tile::<K, I, F, Op, R1, R2, O, THREADS, ITEMS, SM70, false>(
+        consume_key_tile::<K, I, F, Op, R1, R2, O, THREADS, ITEMS, false>(
             first,
             second,
             partitions,
@@ -1363,7 +1357,7 @@ fn run_set_keys_agent<
 /// Key-only set-operation block agent.
 #[doc(hidden)]
 #[inline(always)]
-pub fn set_keys_agent<K, I, F, Op, const THREADS: usize, const ITEMS: usize, const SM70: bool>(
+pub fn set_keys_agent<K, I, F, Op, const THREADS: usize, const ITEMS: usize>(
     first: &[K],
     second: &[K],
     order: F,
@@ -1376,7 +1370,7 @@ pub fn set_keys_agent<K, I, F, Op, const THREADS: usize, const ITEMS: usize, con
     Op: SerialSetOperation,
 {
     let mut output = DeviceRegion::new(output);
-    run_set_keys_agent::<K, I, F, Op, _, _, _, THREADS, ITEMS, SM70>(
+    run_set_keys_agent::<K, I, F, Op, _, _, _, THREADS, ITEMS>(
         first,
         second,
         order,
@@ -1388,15 +1382,7 @@ pub fn set_keys_agent<K, I, F, Op, const THREADS: usize, const ITEMS: usize, con
 /// Set-operation agent over two finite arithmetic input ranges.
 #[doc(hidden)]
 #[inline(always)]
-pub fn set_arithmetic_keys_agent<
-    K,
-    I,
-    F,
-    Op,
-    const THREADS: usize,
-    const ITEMS: usize,
-    const SM70: bool,
->(
+pub fn set_arithmetic_keys_agent<K, I, F, Op, const THREADS: usize, const ITEMS: usize>(
     first: ArithmeticSetRange<K>,
     second: ArithmeticSetRange<K>,
     order: F,
@@ -1409,7 +1395,7 @@ pub fn set_arithmetic_keys_agent<
     Op: SerialSetOperation,
 {
     let mut output = DeviceRegion::new(output);
-    run_set_keys_agent::<K, I, F, Op, _, _, _, THREADS, ITEMS, SM70>(
+    run_set_keys_agent::<K, I, F, Op, _, _, _, THREADS, ITEMS>(
         first,
         second,
         order,
@@ -1421,15 +1407,7 @@ pub fn set_arithmetic_keys_agent<
 /// Key-only set operation whose output is a Rust discard range.
 #[doc(hidden)]
 #[inline(always)]
-pub fn set_keys_discard_agent<
-    K,
-    I,
-    F,
-    Op,
-    const THREADS: usize,
-    const ITEMS: usize,
-    const SM70: bool,
->(
+pub fn set_keys_discard_agent<K, I, F, Op, const THREADS: usize, const ITEMS: usize>(
     first: &[K],
     second: &[K],
     order: F,
@@ -1441,7 +1419,7 @@ pub fn set_keys_discard_agent<
     Op: SerialSetOperation,
 {
     let mut output = DiscardOutput;
-    run_set_keys_agent::<K, I, F, Op, _, _, _, THREADS, ITEMS, SM70>(
+    run_set_keys_agent::<K, I, F, Op, _, _, _, THREADS, ITEMS>(
         first,
         second,
         order,
@@ -1453,7 +1431,7 @@ pub fn set_keys_discard_agent<
 /// Key/value set-operation block agent.
 #[doc(hidden)]
 #[inline(always)]
-pub fn set_pairs_agent<K, V, I, F, Op, const THREADS: usize, const ITEMS: usize, const SM70: bool>(
+pub fn set_pairs_agent<K, V, I, F, Op, const THREADS: usize, const ITEMS: usize>(
     first_keys: &[K],
     second_keys: &[K],
     first_values: &[V],
@@ -1483,7 +1461,7 @@ pub fn set_pairs_agent<K, V, I, F, Op, const THREADS: usize, const ITEMS: usize,
     let mut tile_state = DeviceRegion::new(tile_state);
     let mut output_keys = DeviceRegion::new(output_keys);
     let result = if last {
-        consume_key_tile::<K, I, F, Op, _, _, _, THREADS, ITEMS, SM70, true>(
+        consume_key_tile::<K, I, F, Op, _, _, _, THREADS, ITEMS, true>(
             first_keys,
             second_keys,
             partitions,
@@ -1493,7 +1471,7 @@ pub fn set_pairs_agent<K, V, I, F, Op, const THREADS: usize, const ITEMS: usize,
             &shared,
         )
     } else {
-        consume_key_tile::<K, I, F, Op, _, _, _, THREADS, ITEMS, SM70, false>(
+        consume_key_tile::<K, I, F, Op, _, _, _, THREADS, ITEMS, false>(
             first_keys,
             second_keys,
             partitions,

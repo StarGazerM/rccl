@@ -1,8 +1,412 @@
 use core::ops::Range;
 
 use cuda_core::{CudaStream, DeviceBuffer, DeviceCopy};
+use cuda_host::KernelSliceArg;
 
-use crate::DeviceAlgorithmError;
+use crate::{
+    ArithmeticRange, DeviceAlgorithmError, DeviceRange,
+    histogram_backend::{HistogramFourSampleLoad, HistogramOffset, HistogramSample},
+};
+
+mod sealed {
+    pub trait HistogramScalar {}
+}
+
+/// Primitive scalar layouts supported by the pinned CUB histogram graph.
+///
+/// This is a representation capability, not architecture policy.  The trait
+/// is closed so aliases of supported primitive types work while unsupported
+/// layouts cannot accidentally select a kernel by size alone.
+#[doc(hidden)]
+pub trait HistogramScalar: sealed::HistogramScalar + DeviceCopy {
+    const SIZE: usize;
+}
+
+macro_rules! histogram_scalars {
+    ($($scalar:ty),+ $(,)?) => {$ (
+        impl sealed::HistogramScalar for $scalar {}
+
+        impl HistogramScalar for $scalar {
+            const SIZE: usize = core::mem::size_of::<Self>();
+        }
+    )+ };
+}
+
+histogram_scalars!(i8, u8, i16, u16, i32, u32, i64, u64, f32, f64);
+
+/// Closed architecture policy selected by cfgs injected by `cargo oxide`.
+/// It is intentionally absent from every public operation signature.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[doc(hidden)]
+pub struct HistogramPolicy {
+    pub threads: u32,
+    pub pixels: usize,
+    pub rle: bool,
+}
+
+#[doc(hidden)]
+pub const fn histogram_policy(
+    sample_size: usize,
+    counter_size: usize,
+    active_channels: usize,
+    channels: usize,
+    even: bool,
+) -> HistogramPolicy {
+    // These inputs are used only by architecture-specific cfg branches. Keep
+    // the architecture-neutral host build warning-free without changing the
+    // selected device policy.
+    let _ = (counter_size, channels, even);
+    #[cfg(cuda_arch_ge_100)]
+    if channels == 1 && active_channels == 1 && counter_size == 4 && sample_size == 1 {
+        return if even {
+            HistogramPolicy {
+                threads: 928,
+                pixels: 12,
+                rle: false,
+            }
+        } else {
+            HistogramPolicy {
+                threads: 448,
+                pixels: 12,
+                rle: false,
+            }
+        };
+    }
+
+    #[cfg(cuda_arch_ge_90)]
+    if channels == 1 && active_channels == 1 && counter_size == 4 {
+        if sample_size == 1 {
+            return HistogramPolicy {
+                threads: 768,
+                pixels: 12,
+                rle: false,
+            };
+        }
+        if sample_size == 2 {
+            return HistogramPolicy {
+                threads: 960,
+                pixels: 10,
+                rle: true,
+            };
+        }
+    }
+
+    let sample_words = sample_size.div_ceil(core::mem::size_of::<i32>());
+    let pixels = 16 / active_channels / sample_words;
+    HistogramPolicy {
+        threads: 384,
+        pixels: if pixels == 0 { 1 } else { pixels },
+        rle: true,
+    }
+}
+
+#[doc(hidden)]
+pub const fn histogram_shared_bytes(
+    counter_size: usize,
+    active_channels: usize,
+    shared: bool,
+) -> usize {
+    let counters = if shared { 257 } else { 1 };
+    // CUB's TempStorage follows the privatized counters with `int tile_idx`
+    // and the one-byte empty `BlockLoadDirect::TempStorage` union member.
+    let raw = active_channels * counters * counter_size + core::mem::size_of::<i32>() + 1;
+    raw.div_ceil(counter_size) * counter_size
+}
+
+/// Mutable launch storage shared by the init and sweep kernels.
+#[doc(hidden)]
+pub struct HistogramLaunchStorage<'a, C: DeviceCopy, const ACTIVE: usize> {
+    pub output: &'a mut DeviceBuffer<C>,
+    pub privatized: &'a mut DeviceBuffer<C>,
+    pub queue: &'a mut DeviceBuffer<i32>,
+    pub output_lengths: [usize; ACTIVE],
+    pub output_offsets: [usize; ACTIVE],
+    pub privatized_lengths: [usize; ACTIVE],
+    pub privatized_offsets: [usize; ACTIVE],
+}
+
+/// One immutable device allocation plus validated per-channel level ranges.
+#[derive(Clone, Copy)]
+#[doc(hidden)]
+pub struct HistogramLevelStorage<'a, L: DeviceCopy, const ACTIVE: usize> {
+    pub storage: &'a DeviceBuffer<L>,
+    pub lengths: [usize; ACTIVE],
+    pub offsets: [usize; ACTIVE],
+}
+
+/// Resolved CUB sweep geometry after host validation.
+#[derive(Clone, Copy)]
+#[doc(hidden)]
+pub struct HistogramLaunchGeometry<O> {
+    pub num_row_pixels: O,
+    pub num_rows: O,
+    pub row_stride_samples: O,
+    pub tiles_per_row: i32,
+    pub blocks_per_row: usize,
+    pub blocks_per_col: usize,
+}
+
+/// Generated-module boundary for histogram entry points.
+///
+/// cuda-oxide creates the concrete `LoadedModule` in the caller's expansion,
+/// so one declarative implementation bridge is unavoidable.  Policy,
+/// validation, allocation, geometry, and shared/global routing live in the
+/// ordinary functions below this trait.
+#[doc(hidden)]
+pub trait HistogramInitKernel<C, const ACTIVE: usize>
+where
+    C: HistogramScalar + rccl_memory::device::HistogramCounter,
+{
+    fn launch_histogram_init(
+        &self,
+        stream: &CudaStream,
+        storage: HistogramLaunchStorage<'_, C, ACTIVE>,
+    ) -> Result<(), DeviceAlgorithmError>;
+}
+
+#[doc(hidden)]
+pub trait HistogramKernel<
+    S,
+    C,
+    L,
+    O,
+    const CHANNELS: usize,
+    const ACTIVE: usize,
+    const THREADS: u32,
+    const PIXELS: usize,
+    const RLE: bool,
+    const BYTE_SAMPLE: bool,
+    const SHARED: bool,
+    const SHARED_BYTES: usize,
+>: HistogramInitKernel<C, ACTIVE> where
+    S: HistogramScalar + HistogramSample<L> + HistogramFourSampleLoad,
+    C: HistogramScalar + rccl_memory::device::HistogramCounter,
+    L: HistogramScalar + PartialOrd,
+    O: HistogramOffset,
+{
+    fn histogram_even_occupancy(&self) -> Result<u32, DeviceAlgorithmError>;
+
+    fn histogram_range_occupancy(&self) -> Result<u32, DeviceAlgorithmError>;
+
+    fn histogram_even_arithmetic_occupancy(&self) -> Result<u32, DeviceAlgorithmError>
+    where
+        S: TryFrom<usize> + core::ops::Add<Output = S> + core::ops::Mul<Output = S>;
+
+    fn histogram_range_arithmetic_occupancy(&self) -> Result<u32, DeviceAlgorithmError>
+    where
+        S: TryFrom<usize> + core::ops::Add<Output = S> + core::ops::Mul<Output = S>;
+
+    #[allow(clippy::too_many_arguments)]
+    fn launch_histogram_even<Samples>(
+        &self,
+        stream: &CudaStream,
+        samples: &Samples,
+        transforms: [<S as HistogramSample<L>>::EvenTransform; ACTIVE],
+        storage: HistogramLaunchStorage<'_, C, ACTIVE>,
+        geometry: HistogramLaunchGeometry<O>,
+    ) -> Result<(), DeviceAlgorithmError>
+    where
+        Samples: KernelSliceArg<Elem = S>;
+
+    #[allow(clippy::too_many_arguments)]
+    fn launch_histogram_range<Samples>(
+        &self,
+        stream: &CudaStream,
+        samples: &Samples,
+        levels: HistogramLevelStorage<'_, L, ACTIVE>,
+        storage: HistogramLaunchStorage<'_, C, ACTIVE>,
+        geometry: HistogramLaunchGeometry<O>,
+    ) -> Result<(), DeviceAlgorithmError>
+    where
+        Samples: KernelSliceArg<Elem = S>,
+        L: PartialOrd;
+
+    #[allow(clippy::too_many_arguments)]
+    fn launch_histogram_even_arithmetic(
+        &self,
+        stream: &CudaStream,
+        samples: &ArithmeticRange<S>,
+        transforms: [<S as HistogramSample<L>>::EvenTransform; ACTIVE],
+        storage: HistogramLaunchStorage<'_, C, ACTIVE>,
+        geometry: HistogramLaunchGeometry<O>,
+    ) -> Result<(), DeviceAlgorithmError>
+    where
+        S: TryFrom<usize> + core::ops::Add<Output = S> + core::ops::Mul<Output = S>;
+
+    #[allow(clippy::too_many_arguments)]
+    fn launch_histogram_range_arithmetic(
+        &self,
+        stream: &CudaStream,
+        samples: &ArithmeticRange<S>,
+        levels: HistogramLevelStorage<'_, L, ACTIVE>,
+        storage: HistogramLaunchStorage<'_, C, ACTIVE>,
+        geometry: HistogramLaunchGeometry<O>,
+    ) -> Result<(), DeviceAlgorithmError>
+    where
+        S: TryFrom<usize> + core::ops::Add<Output = S> + core::ops::Mul<Output = S>,
+        L: PartialOrd;
+}
+
+/// The four offset/storage specializations reachable from one histogram call.
+#[doc(hidden)]
+pub trait HistogramPolicyKernels<
+    S,
+    C,
+    L,
+    const CHANNELS: usize,
+    const ACTIVE: usize,
+    const THREADS: u32,
+    const PIXELS: usize,
+    const RLE: bool,
+    const BYTE_SAMPLE: bool,
+    const SHARED_BYTES: usize,
+    const GLOBAL_BYTES: usize,
+>:
+    HistogramKernel<
+        S,
+        C,
+        L,
+        i32,
+        CHANNELS,
+        ACTIVE,
+        THREADS,
+        PIXELS,
+        RLE,
+        BYTE_SAMPLE,
+        true,
+        SHARED_BYTES,
+    > + HistogramKernel<
+        S,
+        C,
+        L,
+        usize,
+        CHANNELS,
+        ACTIVE,
+        THREADS,
+        PIXELS,
+        RLE,
+        BYTE_SAMPLE,
+        true,
+        SHARED_BYTES,
+    > + HistogramKernel<
+        S,
+        C,
+        L,
+        i32,
+        CHANNELS,
+        ACTIVE,
+        THREADS,
+        PIXELS,
+        RLE,
+        BYTE_SAMPLE,
+        false,
+        GLOBAL_BYTES,
+    > + HistogramKernel<
+        S,
+        C,
+        L,
+        usize,
+        CHANNELS,
+        ACTIVE,
+        THREADS,
+        PIXELS,
+        RLE,
+        BYTE_SAMPLE,
+        false,
+        GLOBAL_BYTES,
+    > where
+    S: HistogramScalar + HistogramSample<L> + HistogramFourSampleLoad,
+    C: HistogramScalar + rccl_memory::device::HistogramCounter,
+    L: HistogramScalar + PartialOrd,
+{
+}
+
+impl<
+    S,
+    C,
+    L,
+    M,
+    const CHANNELS: usize,
+    const ACTIVE: usize,
+    const THREADS: u32,
+    const PIXELS: usize,
+    const RLE: bool,
+    const BYTE_SAMPLE: bool,
+    const SHARED_BYTES: usize,
+    const GLOBAL_BYTES: usize,
+>
+    HistogramPolicyKernels<
+        S,
+        C,
+        L,
+        CHANNELS,
+        ACTIVE,
+        THREADS,
+        PIXELS,
+        RLE,
+        BYTE_SAMPLE,
+        SHARED_BYTES,
+        GLOBAL_BYTES,
+    > for M
+where
+    S: HistogramScalar + HistogramSample<L> + HistogramFourSampleLoad,
+    C: HistogramScalar + rccl_memory::device::HistogramCounter,
+    L: HistogramScalar + PartialOrd,
+    M: HistogramKernel<
+            S,
+            C,
+            L,
+            i32,
+            CHANNELS,
+            ACTIVE,
+            THREADS,
+            PIXELS,
+            RLE,
+            BYTE_SAMPLE,
+            true,
+            SHARED_BYTES,
+        > + HistogramKernel<
+            S,
+            C,
+            L,
+            usize,
+            CHANNELS,
+            ACTIVE,
+            THREADS,
+            PIXELS,
+            RLE,
+            BYTE_SAMPLE,
+            true,
+            SHARED_BYTES,
+        > + HistogramKernel<
+            S,
+            C,
+            L,
+            i32,
+            CHANNELS,
+            ACTIVE,
+            THREADS,
+            PIXELS,
+            RLE,
+            BYTE_SAMPLE,
+            false,
+            GLOBAL_BYTES,
+        > + HistogramKernel<
+            S,
+            C,
+            L,
+            usize,
+            CHANNELS,
+            ACTIVE,
+            THREADS,
+            PIXELS,
+            RLE,
+            BYTE_SAMPLE,
+            false,
+            GLOBAL_BYTES,
+        >,
+{
+}
 
 /// A device-wide histogram whose channel storage is one affine allocation.
 ///
@@ -168,6 +572,28 @@ impl<L: DeviceCopy, const ACTIVE_CHANNELS: usize> DeviceHistogramLevels<L, ACTIV
         [usize; ACTIVE_CHANNELS],
     ) {
         (&self.levels, self.lengths, self.offsets)
+    }
+}
+
+/// Shared host view over owned and borrowed level-range containers.
+#[doc(hidden)]
+pub trait HistogramLevels<L: DeviceCopy, const ACTIVE: usize> {
+    fn histogram_level_parts(&self) -> (&DeviceBuffer<L>, [usize; ACTIVE], [usize; ACTIVE]);
+}
+
+impl<L: DeviceCopy, const ACTIVE: usize> HistogramLevels<L, ACTIVE>
+    for DeviceHistogramLevels<L, ACTIVE>
+{
+    fn histogram_level_parts(&self) -> (&DeviceBuffer<L>, [usize; ACTIVE], [usize; ACTIVE]) {
+        self.__parts()
+    }
+}
+
+impl<L: DeviceCopy, const ACTIVE: usize> HistogramLevels<L, ACTIVE>
+    for DeviceHistogramLevelsView<'_, L, ACTIVE>
+{
+    fn histogram_level_parts(&self) -> (&DeviceBuffer<L>, [usize; ACTIVE], [usize; ACTIVE]) {
+        self.__parts()
     }
 }
 
@@ -346,6 +772,1411 @@ impl<C: DeviceCopy, const ACTIVE_CHANNELS: usize> DeviceHistogramWorkspace<C, AC
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn histogram_workspace_variant<
+    S,
+    C,
+    L,
+    M,
+    O,
+    const CHANNELS: usize,
+    const ACTIVE: usize,
+    const EVEN: bool,
+    const THREADS: u32,
+    const PIXELS: usize,
+    const RLE: bool,
+    const BYTE_SAMPLE: bool,
+    const SHARED: bool,
+    const SHARED_BYTES: usize,
+>(
+    stream: &CudaStream,
+    module: &M,
+    privatized_lengths: [usize; ACTIVE],
+    region: (usize, usize, usize),
+    narrow_offsets: bool,
+) -> Result<DeviceHistogramWorkspace<C, ACTIVE>, DeviceAlgorithmError>
+where
+    S: HistogramScalar + HistogramSample<L> + HistogramFourSampleLoad,
+    C: HistogramScalar + rccl_memory::device::HistogramCounter,
+    L: HistogramScalar + PartialOrd,
+    M: HistogramKernel<
+            S,
+            C,
+            L,
+            O,
+            CHANNELS,
+            ACTIVE,
+            THREADS,
+            PIXELS,
+            RLE,
+            BYTE_SAMPLE,
+            SHARED,
+            SHARED_BYTES,
+        >,
+    O: HistogramOffset,
+{
+    let blocks_per_sm = if EVEN {
+        module.histogram_even_occupancy()?
+    } else {
+        module.histogram_range_occupancy()?
+    };
+    let sms = stream
+        .context()
+        .multiprocessor_count()
+        .map_err(DeviceAlgorithmError::Driver)?;
+    let occupancy = (blocks_per_sm as usize)
+        .checked_mul(sms as usize)
+        .ok_or(DeviceAlgorithmError::SizeOverflow)?;
+    let tile_pixels = (THREADS as usize)
+        .checked_mul(PIXELS)
+        .ok_or(DeviceAlgorithmError::SizeOverflow)?;
+    let tiles_per_row = region.0.div_ceil(tile_pixels);
+    let blocks_per_row = occupancy.min(tiles_per_row);
+    let blocks_per_col = occupancy
+        .checked_div(blocks_per_row)
+        .unwrap_or(0)
+        .min(region.1);
+    DeviceHistogramWorkspace::__new(
+        stream,
+        privatized_lengths,
+        blocks_per_row,
+        blocks_per_col,
+        region,
+        narrow_offsets,
+    )
+}
+
+/// Allocate the reusable histogram workspace using the cfg-selected policy.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn device_histogram_workspace<
+    S,
+    C,
+    L,
+    Samples,
+    M,
+    const CHANNELS: usize,
+    const ACTIVE: usize,
+    const EVEN: bool,
+    const THREADS: u32,
+    const PIXELS: usize,
+    const RLE: bool,
+    const BYTE_SAMPLE: bool,
+    const SHARED_BYTES: usize,
+    const GLOBAL_BYTES: usize,
+>(
+    stream: &CudaStream,
+    module: &M,
+    samples: &Samples,
+    region: HistogramRegion,
+    output: &DeviceHistogram<C, ACTIVE>,
+) -> Result<DeviceHistogramWorkspace<C, ACTIVE>, DeviceAlgorithmError>
+where
+    S: HistogramScalar + HistogramSample<L> + HistogramFourSampleLoad,
+    C: HistogramScalar + rccl_memory::device::HistogramCounter,
+    L: HistogramScalar + PartialOrd,
+    Samples: DeviceRange + ?Sized,
+    M: HistogramPolicyKernels<
+            S,
+            C,
+            L,
+            CHANNELS,
+            ACTIVE,
+            THREADS,
+            PIXELS,
+            RLE,
+            BYTE_SAMPLE,
+            SHARED_BYTES,
+            GLOBAL_BYTES,
+        >,
+{
+    let resolved = region.__resolve::<CHANNELS>(samples.len())?;
+    let output_lengths = *output.lengths();
+    if output_lengths.contains(&0) {
+        return Err(DeviceAlgorithmError::InvalidHistogramShape(
+            "every histogram channel requires at least one bin",
+        ));
+    }
+    if output_lengths
+        .iter()
+        .any(|&length| length >= i32::MAX as usize)
+    {
+        return Err(DeviceAlgorithmError::InvalidHistogramShape(
+            "histogram channel exceeds CUB's signed level-count domain",
+        ));
+    }
+    let max_bins = output_lengths.iter().copied().max().unwrap_or(0);
+    let privatized_lengths = if BYTE_SAMPLE {
+        [256; ACTIVE]
+    } else {
+        output_lengths
+    };
+    let narrow_offsets = histogram_uses_i32_offsets::<S>(resolved.1, resolved.2);
+    if BYTE_SAMPLE || max_bins <= 256 {
+        if narrow_offsets {
+            histogram_workspace_variant::<
+                S,
+                C,
+                L,
+                M,
+                i32,
+                CHANNELS,
+                ACTIVE,
+                EVEN,
+                THREADS,
+                PIXELS,
+                RLE,
+                BYTE_SAMPLE,
+                true,
+                SHARED_BYTES,
+            >(stream, module, privatized_lengths, resolved, true)
+        } else {
+            histogram_workspace_variant::<
+                S,
+                C,
+                L,
+                M,
+                usize,
+                CHANNELS,
+                ACTIVE,
+                EVEN,
+                THREADS,
+                PIXELS,
+                RLE,
+                BYTE_SAMPLE,
+                true,
+                SHARED_BYTES,
+            >(stream, module, privatized_lengths, resolved, false)
+        }
+    } else if narrow_offsets {
+        histogram_workspace_variant::<
+            S,
+            C,
+            L,
+            M,
+            i32,
+            CHANNELS,
+            ACTIVE,
+            EVEN,
+            THREADS,
+            PIXELS,
+            RLE,
+            BYTE_SAMPLE,
+            false,
+            GLOBAL_BYTES,
+        >(stream, module, privatized_lengths, resolved, true)
+    } else {
+        histogram_workspace_variant::<
+            S,
+            C,
+            L,
+            M,
+            usize,
+            CHANNELS,
+            ACTIVE,
+            EVEN,
+            THREADS,
+            PIXELS,
+            RLE,
+            BYTE_SAMPLE,
+            false,
+            GLOBAL_BYTES,
+        >(stream, module, privatized_lengths, resolved, false)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn histogram_arithmetic_workspace_variant<
+    S,
+    C,
+    L,
+    M,
+    O,
+    const CHANNELS: usize,
+    const ACTIVE: usize,
+    const EVEN: bool,
+    const THREADS: u32,
+    const PIXELS: usize,
+    const RLE: bool,
+    const BYTE_SAMPLE: bool,
+    const SHARED: bool,
+    const SHARED_BYTES: usize,
+>(
+    stream: &CudaStream,
+    module: &M,
+    privatized_lengths: [usize; ACTIVE],
+    region: (usize, usize, usize),
+    narrow_offsets: bool,
+) -> Result<DeviceHistogramWorkspace<C, ACTIVE>, DeviceAlgorithmError>
+where
+    S: HistogramScalar
+        + HistogramSample<L>
+        + HistogramFourSampleLoad
+        + TryFrom<usize>
+        + core::ops::Add<Output = S>
+        + core::ops::Mul<Output = S>,
+    C: HistogramScalar + rccl_memory::device::HistogramCounter,
+    L: HistogramScalar + PartialOrd,
+    M: HistogramKernel<
+            S,
+            C,
+            L,
+            O,
+            CHANNELS,
+            ACTIVE,
+            THREADS,
+            PIXELS,
+            RLE,
+            BYTE_SAMPLE,
+            SHARED,
+            SHARED_BYTES,
+        >,
+    O: HistogramOffset,
+{
+    let blocks_per_sm = if EVEN {
+        module.histogram_even_arithmetic_occupancy()?
+    } else {
+        module.histogram_range_arithmetic_occupancy()?
+    };
+    let sms = stream
+        .context()
+        .multiprocessor_count()
+        .map_err(DeviceAlgorithmError::Driver)?;
+    let occupancy = (blocks_per_sm as usize)
+        .checked_mul(sms as usize)
+        .ok_or(DeviceAlgorithmError::SizeOverflow)?;
+    let tile_pixels = (THREADS as usize)
+        .checked_mul(PIXELS)
+        .ok_or(DeviceAlgorithmError::SizeOverflow)?;
+    let tiles_per_row = region.0.div_ceil(tile_pixels);
+    let blocks_per_row = occupancy.min(tiles_per_row);
+    let blocks_per_col = occupancy
+        .checked_div(blocks_per_row)
+        .unwrap_or(0)
+        .min(region.1);
+    DeviceHistogramWorkspace::__new(
+        stream,
+        privatized_lengths,
+        blocks_per_row,
+        blocks_per_col,
+        region,
+        narrow_offsets,
+    )
+}
+
+/// Arithmetic-range workspace variant with its honest sample capability bound.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn device_histogram_arithmetic_workspace<
+    S,
+    C,
+    L,
+    M,
+    const CHANNELS: usize,
+    const ACTIVE: usize,
+    const EVEN: bool,
+    const THREADS: u32,
+    const PIXELS: usize,
+    const RLE: bool,
+    const BYTE_SAMPLE: bool,
+    const SHARED_BYTES: usize,
+    const GLOBAL_BYTES: usize,
+>(
+    stream: &CudaStream,
+    module: &M,
+    samples: &ArithmeticRange<S>,
+    region: HistogramRegion,
+    output: &DeviceHistogram<C, ACTIVE>,
+) -> Result<DeviceHistogramWorkspace<C, ACTIVE>, DeviceAlgorithmError>
+where
+    S: HistogramScalar
+        + HistogramSample<L>
+        + HistogramFourSampleLoad
+        + TryFrom<usize>
+        + core::ops::Add<Output = S>
+        + core::ops::Mul<Output = S>,
+    C: HistogramScalar + rccl_memory::device::HistogramCounter,
+    L: HistogramScalar + PartialOrd,
+    M: HistogramPolicyKernels<
+            S,
+            C,
+            L,
+            CHANNELS,
+            ACTIVE,
+            THREADS,
+            PIXELS,
+            RLE,
+            BYTE_SAMPLE,
+            SHARED_BYTES,
+            GLOBAL_BYTES,
+        >,
+{
+    let resolved = region.__resolve::<CHANNELS>(samples.len())?;
+    let output_lengths = *output.lengths();
+    if output_lengths.contains(&0) {
+        return Err(DeviceAlgorithmError::InvalidHistogramShape(
+            "every histogram channel requires at least one bin",
+        ));
+    }
+    if output_lengths
+        .iter()
+        .any(|&length| length >= i32::MAX as usize)
+    {
+        return Err(DeviceAlgorithmError::InvalidHistogramShape(
+            "histogram channel exceeds CUB's signed level-count domain",
+        ));
+    }
+    let max_bins = output_lengths.iter().copied().max().unwrap_or(0);
+    let privatized_lengths = if BYTE_SAMPLE {
+        [256; ACTIVE]
+    } else {
+        output_lengths
+    };
+    let narrow_offsets = histogram_uses_i32_offsets::<S>(resolved.1, resolved.2);
+    if BYTE_SAMPLE || max_bins <= 256 {
+        if narrow_offsets {
+            histogram_arithmetic_workspace_variant::<
+                S,
+                C,
+                L,
+                M,
+                i32,
+                CHANNELS,
+                ACTIVE,
+                EVEN,
+                THREADS,
+                PIXELS,
+                RLE,
+                BYTE_SAMPLE,
+                true,
+                SHARED_BYTES,
+            >(stream, module, privatized_lengths, resolved, true)
+        } else {
+            histogram_arithmetic_workspace_variant::<
+                S,
+                C,
+                L,
+                M,
+                usize,
+                CHANNELS,
+                ACTIVE,
+                EVEN,
+                THREADS,
+                PIXELS,
+                RLE,
+                BYTE_SAMPLE,
+                true,
+                SHARED_BYTES,
+            >(stream, module, privatized_lengths, resolved, false)
+        }
+    } else if narrow_offsets {
+        histogram_arithmetic_workspace_variant::<
+            S,
+            C,
+            L,
+            M,
+            i32,
+            CHANNELS,
+            ACTIVE,
+            EVEN,
+            THREADS,
+            PIXELS,
+            RLE,
+            BYTE_SAMPLE,
+            false,
+            GLOBAL_BYTES,
+        >(stream, module, privatized_lengths, resolved, true)
+    } else {
+        histogram_arithmetic_workspace_variant::<
+            S,
+            C,
+            L,
+            M,
+            usize,
+            CHANNELS,
+            ACTIVE,
+            EVEN,
+            THREADS,
+            PIXELS,
+            RLE,
+            BYTE_SAMPLE,
+            false,
+            GLOBAL_BYTES,
+        >(stream, module, privatized_lengths, resolved, false)
+    }
+}
+
+struct PreparedHistogramLaunch<'a, C: DeviceCopy, const ACTIVE: usize> {
+    storage: HistogramLaunchStorage<'a, C, ACTIVE>,
+    blocks_per_row: usize,
+    blocks_per_col: usize,
+    narrow_offsets: bool,
+}
+
+fn prepare_histogram_launch<'a, C, const ACTIVE: usize>(
+    output: &'a mut DeviceHistogram<C, ACTIVE>,
+    workspace: &'a mut DeviceHistogramWorkspace<C, ACTIVE>,
+    resolved: (usize, usize, usize),
+    byte_sample: bool,
+) -> Result<PreparedHistogramLaunch<'a, C, ACTIVE>, DeviceAlgorithmError>
+where
+    C: DeviceCopy,
+{
+    let (output, output_lengths, output_offsets) = output.__parts_mut();
+    let DeviceHistogramWorkspaceParts {
+        privatized,
+        queue,
+        privatized_lengths,
+        privatized_offsets,
+        blocks_per_row,
+        blocks_per_col,
+        region,
+        narrow_offsets,
+    } = workspace.__parts_mut();
+    if region != resolved {
+        return Err(DeviceAlgorithmError::InvalidHistogramShape(
+            "histogram workspace does not match this image region",
+        ));
+    }
+    let expected_privatized_lengths = if byte_sample {
+        [256; ACTIVE]
+    } else {
+        output_lengths
+    };
+    if privatized_lengths != expected_privatized_lengths {
+        return Err(DeviceAlgorithmError::InvalidHistogramShape(
+            "histogram workspace does not match the output bin layout",
+        ));
+    }
+    Ok(PreparedHistogramLaunch {
+        storage: HistogramLaunchStorage {
+            output,
+            privatized,
+            queue,
+            output_lengths,
+            output_offsets,
+            privatized_lengths,
+            privatized_offsets,
+        },
+        blocks_per_row,
+        blocks_per_col,
+        narrow_offsets,
+    })
+}
+
+fn histogram_geometry<O, const THREADS: u32, const PIXELS: usize>(
+    resolved: (usize, usize, usize),
+    blocks_per_row: usize,
+    blocks_per_col: usize,
+) -> Result<HistogramLaunchGeometry<O>, DeviceAlgorithmError>
+where
+    O: HistogramOffset,
+{
+    let tile_pixels = (THREADS as usize)
+        .checked_mul(PIXELS)
+        .ok_or(DeviceAlgorithmError::SizeOverflow)?;
+    let tiles_per_row = resolved.0.div_ceil(tile_pixels);
+    if tiles_per_row > i32::MAX as usize {
+        return Err(DeviceAlgorithmError::InvalidHistogramShape(
+            "histogram row exceeds CUB's signed tile-count domain",
+        ));
+    }
+    Ok(HistogramLaunchGeometry {
+        num_row_pixels: <O as HistogramOffset>::from_usize(resolved.0),
+        num_rows: <O as HistogramOffset>::from_usize(resolved.1),
+        row_stride_samples: <O as HistogramOffset>::from_usize(resolved.2),
+        tiles_per_row: tiles_per_row as i32,
+        blocks_per_row,
+        blocks_per_col,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn launch_histogram_even_variant<
+    S,
+    C,
+    L,
+    Samples,
+    M,
+    O,
+    const CHANNELS: usize,
+    const ACTIVE: usize,
+    const THREADS: u32,
+    const PIXELS: usize,
+    const RLE: bool,
+    const BYTE_SAMPLE: bool,
+    const SHARED: bool,
+    const SHARED_BYTES: usize,
+>(
+    stream: &CudaStream,
+    module: &M,
+    samples: &Samples,
+    transforms: [<S as HistogramSample<L>>::EvenTransform; ACTIVE],
+    prepared: PreparedHistogramLaunch<'_, C, ACTIVE>,
+    resolved: (usize, usize, usize),
+) -> Result<(), DeviceAlgorithmError>
+where
+    S: HistogramScalar + HistogramSample<L> + HistogramFourSampleLoad,
+    C: HistogramScalar + rccl_memory::device::HistogramCounter,
+    L: HistogramScalar + PartialOrd,
+    Samples: KernelSliceArg<Elem = S>,
+    M: HistogramKernel<
+            S,
+            C,
+            L,
+            O,
+            CHANNELS,
+            ACTIVE,
+            THREADS,
+            PIXELS,
+            RLE,
+            BYTE_SAMPLE,
+            SHARED,
+            SHARED_BYTES,
+        >,
+    O: HistogramOffset,
+{
+    let geometry = histogram_geometry::<O, THREADS, PIXELS>(
+        resolved,
+        prepared.blocks_per_row,
+        prepared.blocks_per_col,
+    )?;
+    let blocks = prepared
+        .blocks_per_row
+        .checked_mul(prepared.blocks_per_col)
+        .ok_or(DeviceAlgorithmError::SizeOverflow)?;
+    if blocks == 0 {
+        HistogramInitKernel::launch_histogram_init(module, stream, prepared.storage)
+    } else {
+        module.launch_histogram_even::<Samples>(
+            stream,
+            samples,
+            transforms,
+            prepared.storage,
+            geometry,
+        )
+    }
+}
+
+/// Launch an even histogram using ordinary Rust validation and routing.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn device_histogram_even<
+    S,
+    C,
+    L,
+    Samples,
+    M,
+    const CHANNELS: usize,
+    const ACTIVE: usize,
+    const THREADS: u32,
+    const PIXELS: usize,
+    const RLE: bool,
+    const BYTE_SAMPLE: bool,
+    const SHARED_BYTES: usize,
+    const GLOBAL_BYTES: usize,
+>(
+    stream: &CudaStream,
+    module: &M,
+    samples: &Samples,
+    region: HistogramRegion,
+    output: &mut DeviceHistogram<C, ACTIVE>,
+    lower_levels: [L; ACTIVE],
+    upper_levels: [L; ACTIVE],
+    workspace: &mut DeviceHistogramWorkspace<C, ACTIVE>,
+) -> Result<(), DeviceAlgorithmError>
+where
+    S: HistogramScalar + HistogramSample<L> + HistogramFourSampleLoad,
+    C: HistogramScalar + rccl_memory::device::HistogramCounter,
+    L: HistogramScalar + PartialOrd,
+    Samples: DeviceRange + KernelSliceArg<Elem = S>,
+    M: HistogramPolicyKernels<
+            S,
+            C,
+            L,
+            CHANNELS,
+            ACTIVE,
+            THREADS,
+            PIXELS,
+            RLE,
+            BYTE_SAMPLE,
+            SHARED_BYTES,
+            GLOBAL_BYTES,
+        >,
+{
+    let resolved = region.__resolve::<CHANNELS>(DeviceRange::len(samples))?;
+    let narrow_offsets = histogram_uses_i32_offsets::<S>(resolved.1, resolved.2);
+    let prepared = prepare_histogram_launch(output, workspace, resolved, BYTE_SAMPLE)?;
+    if prepared.narrow_offsets != narrow_offsets {
+        return Err(DeviceAlgorithmError::InvalidHistogramShape(
+            "histogram workspace does not match the image offset domain",
+        ));
+    }
+    for channel in 0..ACTIVE {
+        if S::even_may_overflow(
+            lower_levels[channel],
+            upper_levels[channel],
+            prepared.storage.output_lengths[channel],
+        ) {
+            return Err(DeviceAlgorithmError::InvalidHistogramShape(
+                "even histogram bounds or bin arithmetic are invalid",
+            ));
+        }
+    }
+    let transforms = core::array::from_fn(|channel| {
+        S::even_transform(
+            lower_levels[channel],
+            upper_levels[channel],
+            prepared.storage.output_lengths[channel] as i32,
+        )
+    });
+    let max_bins = prepared
+        .storage
+        .output_lengths
+        .iter()
+        .copied()
+        .max()
+        .unwrap_or(0);
+    if BYTE_SAMPLE || max_bins <= 256 {
+        if narrow_offsets {
+            launch_histogram_even_variant::<
+                S,
+                C,
+                L,
+                Samples,
+                M,
+                i32,
+                CHANNELS,
+                ACTIVE,
+                THREADS,
+                PIXELS,
+                RLE,
+                BYTE_SAMPLE,
+                true,
+                SHARED_BYTES,
+            >(stream, module, samples, transforms, prepared, resolved)
+        } else {
+            launch_histogram_even_variant::<
+                S,
+                C,
+                L,
+                Samples,
+                M,
+                usize,
+                CHANNELS,
+                ACTIVE,
+                THREADS,
+                PIXELS,
+                RLE,
+                BYTE_SAMPLE,
+                true,
+                SHARED_BYTES,
+            >(stream, module, samples, transforms, prepared, resolved)
+        }
+    } else if narrow_offsets {
+        launch_histogram_even_variant::<
+            S,
+            C,
+            L,
+            Samples,
+            M,
+            i32,
+            CHANNELS,
+            ACTIVE,
+            THREADS,
+            PIXELS,
+            RLE,
+            BYTE_SAMPLE,
+            false,
+            GLOBAL_BYTES,
+        >(stream, module, samples, transforms, prepared, resolved)
+    } else {
+        launch_histogram_even_variant::<
+            S,
+            C,
+            L,
+            Samples,
+            M,
+            usize,
+            CHANNELS,
+            ACTIVE,
+            THREADS,
+            PIXELS,
+            RLE,
+            BYTE_SAMPLE,
+            false,
+            GLOBAL_BYTES,
+        >(stream, module, samples, transforms, prepared, resolved)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn launch_histogram_even_arithmetic_variant<
+    S,
+    C,
+    L,
+    M,
+    O,
+    const CHANNELS: usize,
+    const ACTIVE: usize,
+    const THREADS: u32,
+    const PIXELS: usize,
+    const RLE: bool,
+    const BYTE_SAMPLE: bool,
+    const SHARED: bool,
+    const SHARED_BYTES: usize,
+>(
+    stream: &CudaStream,
+    module: &M,
+    samples: &ArithmeticRange<S>,
+    transforms: [<S as HistogramSample<L>>::EvenTransform; ACTIVE],
+    prepared: PreparedHistogramLaunch<'_, C, ACTIVE>,
+    resolved: (usize, usize, usize),
+) -> Result<(), DeviceAlgorithmError>
+where
+    S: HistogramScalar
+        + HistogramSample<L>
+        + HistogramFourSampleLoad
+        + TryFrom<usize>
+        + core::ops::Add<Output = S>
+        + core::ops::Mul<Output = S>,
+    C: HistogramScalar + rccl_memory::device::HistogramCounter,
+    L: HistogramScalar + PartialOrd,
+    M: HistogramKernel<
+            S,
+            C,
+            L,
+            O,
+            CHANNELS,
+            ACTIVE,
+            THREADS,
+            PIXELS,
+            RLE,
+            BYTE_SAMPLE,
+            SHARED,
+            SHARED_BYTES,
+        >,
+    O: HistogramOffset,
+{
+    let geometry = histogram_geometry::<O, THREADS, PIXELS>(
+        resolved,
+        prepared.blocks_per_row,
+        prepared.blocks_per_col,
+    )?;
+    let blocks = prepared
+        .blocks_per_row
+        .checked_mul(prepared.blocks_per_col)
+        .ok_or(DeviceAlgorithmError::SizeOverflow)?;
+    if blocks == 0 {
+        HistogramInitKernel::launch_histogram_init(module, stream, prepared.storage)
+    } else {
+        module.launch_histogram_even_arithmetic(
+            stream,
+            samples,
+            transforms,
+            prepared.storage,
+            geometry,
+        )
+    }
+}
+
+/// Arithmetic-range variant of [`device_histogram_even`].
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn device_histogram_even_arithmetic<
+    S,
+    C,
+    L,
+    M,
+    const CHANNELS: usize,
+    const ACTIVE: usize,
+    const THREADS: u32,
+    const PIXELS: usize,
+    const RLE: bool,
+    const BYTE_SAMPLE: bool,
+    const SHARED_BYTES: usize,
+    const GLOBAL_BYTES: usize,
+>(
+    stream: &CudaStream,
+    module: &M,
+    samples: &ArithmeticRange<S>,
+    region: HistogramRegion,
+    output: &mut DeviceHistogram<C, ACTIVE>,
+    lower_levels: [L; ACTIVE],
+    upper_levels: [L; ACTIVE],
+    workspace: &mut DeviceHistogramWorkspace<C, ACTIVE>,
+) -> Result<(), DeviceAlgorithmError>
+where
+    S: HistogramScalar
+        + HistogramSample<L>
+        + HistogramFourSampleLoad
+        + TryFrom<usize>
+        + core::ops::Add<Output = S>
+        + core::ops::Mul<Output = S>,
+    C: HistogramScalar + rccl_memory::device::HistogramCounter,
+    L: HistogramScalar + PartialOrd,
+    M: HistogramPolicyKernels<
+            S,
+            C,
+            L,
+            CHANNELS,
+            ACTIVE,
+            THREADS,
+            PIXELS,
+            RLE,
+            BYTE_SAMPLE,
+            SHARED_BYTES,
+            GLOBAL_BYTES,
+        >,
+{
+    let resolved = region.__resolve::<CHANNELS>(samples.len())?;
+    let narrow_offsets = histogram_uses_i32_offsets::<S>(resolved.1, resolved.2);
+    let prepared = prepare_histogram_launch(output, workspace, resolved, BYTE_SAMPLE)?;
+    if prepared.narrow_offsets != narrow_offsets {
+        return Err(DeviceAlgorithmError::InvalidHistogramShape(
+            "histogram workspace does not match the image offset domain",
+        ));
+    }
+    for channel in 0..ACTIVE {
+        if S::even_may_overflow(
+            lower_levels[channel],
+            upper_levels[channel],
+            prepared.storage.output_lengths[channel],
+        ) {
+            return Err(DeviceAlgorithmError::InvalidHistogramShape(
+                "even histogram bounds or bin arithmetic are invalid",
+            ));
+        }
+    }
+    let transforms = core::array::from_fn(|channel| {
+        S::even_transform(
+            lower_levels[channel],
+            upper_levels[channel],
+            prepared.storage.output_lengths[channel] as i32,
+        )
+    });
+    let max_bins = prepared
+        .storage
+        .output_lengths
+        .iter()
+        .copied()
+        .max()
+        .unwrap_or(0);
+    if BYTE_SAMPLE || max_bins <= 256 {
+        if narrow_offsets {
+            launch_histogram_even_arithmetic_variant::<
+                S,
+                C,
+                L,
+                M,
+                i32,
+                CHANNELS,
+                ACTIVE,
+                THREADS,
+                PIXELS,
+                RLE,
+                BYTE_SAMPLE,
+                true,
+                SHARED_BYTES,
+            >(stream, module, samples, transforms, prepared, resolved)
+        } else {
+            launch_histogram_even_arithmetic_variant::<
+                S,
+                C,
+                L,
+                M,
+                usize,
+                CHANNELS,
+                ACTIVE,
+                THREADS,
+                PIXELS,
+                RLE,
+                BYTE_SAMPLE,
+                true,
+                SHARED_BYTES,
+            >(stream, module, samples, transforms, prepared, resolved)
+        }
+    } else if narrow_offsets {
+        launch_histogram_even_arithmetic_variant::<
+            S,
+            C,
+            L,
+            M,
+            i32,
+            CHANNELS,
+            ACTIVE,
+            THREADS,
+            PIXELS,
+            RLE,
+            BYTE_SAMPLE,
+            false,
+            GLOBAL_BYTES,
+        >(stream, module, samples, transforms, prepared, resolved)
+    } else {
+        launch_histogram_even_arithmetic_variant::<
+            S,
+            C,
+            L,
+            M,
+            usize,
+            CHANNELS,
+            ACTIVE,
+            THREADS,
+            PIXELS,
+            RLE,
+            BYTE_SAMPLE,
+            false,
+            GLOBAL_BYTES,
+        >(stream, module, samples, transforms, prepared, resolved)
+    }
+}
+
+fn validate_histogram_levels<'a, L, Levels, const ACTIVE: usize>(
+    levels: &'a Levels,
+    output_lengths: [usize; ACTIVE],
+) -> Result<HistogramLevelStorage<'a, L, ACTIVE>, DeviceAlgorithmError>
+where
+    L: DeviceCopy + Copy,
+    Levels: HistogramLevels<L, ACTIVE> + ?Sized,
+{
+    let (storage, level_lengths, level_offsets) = levels.histogram_level_parts();
+    for channel in 0..ACTIVE {
+        let expected = output_lengths[channel]
+            .checked_add(1)
+            .ok_or(DeviceAlgorithmError::SizeOverflow)?;
+        if level_lengths[channel] != expected {
+            return Err(DeviceAlgorithmError::LengthMismatch {
+                role: "histogram range levels",
+                expected,
+                actual: level_lengths[channel],
+            });
+        }
+        let Some(end) = level_offsets[channel].checked_add(level_lengths[channel]) else {
+            return Err(DeviceAlgorithmError::SizeOverflow);
+        };
+        if level_lengths[channel] > i32::MAX as usize || end > storage.len() {
+            return Err(DeviceAlgorithmError::InvalidHistogramShape(
+                "histogram level ranges must be nonempty and lie in their device allocation",
+            ));
+        }
+    }
+    Ok(HistogramLevelStorage {
+        storage,
+        lengths: level_lengths,
+        offsets: level_offsets,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn launch_histogram_range_variant<
+    S,
+    C,
+    L,
+    Samples,
+    M,
+    O,
+    const CHANNELS: usize,
+    const ACTIVE: usize,
+    const THREADS: u32,
+    const PIXELS: usize,
+    const RLE: bool,
+    const BYTE_SAMPLE: bool,
+    const SHARED: bool,
+    const SHARED_BYTES: usize,
+>(
+    stream: &CudaStream,
+    module: &M,
+    samples: &Samples,
+    levels: HistogramLevelStorage<'_, L, ACTIVE>,
+    prepared: PreparedHistogramLaunch<'_, C, ACTIVE>,
+    resolved: (usize, usize, usize),
+) -> Result<(), DeviceAlgorithmError>
+where
+    S: HistogramScalar + HistogramSample<L> + HistogramFourSampleLoad,
+    C: HistogramScalar + rccl_memory::device::HistogramCounter,
+    L: HistogramScalar + PartialOrd,
+    Samples: KernelSliceArg<Elem = S>,
+    M: HistogramKernel<
+            S,
+            C,
+            L,
+            O,
+            CHANNELS,
+            ACTIVE,
+            THREADS,
+            PIXELS,
+            RLE,
+            BYTE_SAMPLE,
+            SHARED,
+            SHARED_BYTES,
+        >,
+    O: HistogramOffset,
+{
+    let geometry = histogram_geometry::<O, THREADS, PIXELS>(
+        resolved,
+        prepared.blocks_per_row,
+        prepared.blocks_per_col,
+    )?;
+    let blocks = prepared
+        .blocks_per_row
+        .checked_mul(prepared.blocks_per_col)
+        .ok_or(DeviceAlgorithmError::SizeOverflow)?;
+    if blocks == 0 {
+        HistogramInitKernel::launch_histogram_init(module, stream, prepared.storage)
+    } else {
+        module.launch_histogram_range::<Samples>(
+            stream,
+            samples,
+            levels,
+            prepared.storage,
+            geometry,
+        )
+    }
+}
+
+/// Launch a boundary-defined histogram using ordinary Rust routing.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn device_histogram_range<
+    S,
+    C,
+    L,
+    Samples,
+    Levels,
+    M,
+    const CHANNELS: usize,
+    const ACTIVE: usize,
+    const THREADS: u32,
+    const PIXELS: usize,
+    const RLE: bool,
+    const BYTE_SAMPLE: bool,
+    const SHARED_BYTES: usize,
+    const GLOBAL_BYTES: usize,
+>(
+    stream: &CudaStream,
+    module: &M,
+    samples: &Samples,
+    region: HistogramRegion,
+    output: &mut DeviceHistogram<C, ACTIVE>,
+    levels: &Levels,
+    workspace: &mut DeviceHistogramWorkspace<C, ACTIVE>,
+) -> Result<(), DeviceAlgorithmError>
+where
+    S: HistogramScalar + HistogramSample<L> + HistogramFourSampleLoad,
+    C: HistogramScalar + rccl_memory::device::HistogramCounter,
+    L: HistogramScalar + PartialOrd,
+    Samples: DeviceRange + KernelSliceArg<Elem = S>,
+    Levels: HistogramLevels<L, ACTIVE> + ?Sized,
+    M: HistogramPolicyKernels<
+            S,
+            C,
+            L,
+            CHANNELS,
+            ACTIVE,
+            THREADS,
+            PIXELS,
+            RLE,
+            BYTE_SAMPLE,
+            SHARED_BYTES,
+            GLOBAL_BYTES,
+        >,
+{
+    let resolved = region.__resolve::<CHANNELS>(DeviceRange::len(samples))?;
+    let output_lengths = *output.lengths();
+    let levels = validate_histogram_levels(levels, output_lengths)?;
+    let narrow_offsets = histogram_uses_i32_offsets::<S>(resolved.1, resolved.2);
+    let prepared = prepare_histogram_launch(output, workspace, resolved, BYTE_SAMPLE)?;
+    if prepared.narrow_offsets != narrow_offsets {
+        return Err(DeviceAlgorithmError::InvalidHistogramShape(
+            "histogram workspace does not match the image offset domain",
+        ));
+    }
+    let max_bins = prepared
+        .storage
+        .output_lengths
+        .iter()
+        .copied()
+        .max()
+        .unwrap_or(0);
+    if BYTE_SAMPLE || max_bins <= 256 {
+        if narrow_offsets {
+            launch_histogram_range_variant::<
+                S,
+                C,
+                L,
+                Samples,
+                M,
+                i32,
+                CHANNELS,
+                ACTIVE,
+                THREADS,
+                PIXELS,
+                RLE,
+                BYTE_SAMPLE,
+                true,
+                SHARED_BYTES,
+            >(stream, module, samples, levels, prepared, resolved)
+        } else {
+            launch_histogram_range_variant::<
+                S,
+                C,
+                L,
+                Samples,
+                M,
+                usize,
+                CHANNELS,
+                ACTIVE,
+                THREADS,
+                PIXELS,
+                RLE,
+                BYTE_SAMPLE,
+                true,
+                SHARED_BYTES,
+            >(stream, module, samples, levels, prepared, resolved)
+        }
+    } else if narrow_offsets {
+        launch_histogram_range_variant::<
+            S,
+            C,
+            L,
+            Samples,
+            M,
+            i32,
+            CHANNELS,
+            ACTIVE,
+            THREADS,
+            PIXELS,
+            RLE,
+            BYTE_SAMPLE,
+            false,
+            GLOBAL_BYTES,
+        >(stream, module, samples, levels, prepared, resolved)
+    } else {
+        launch_histogram_range_variant::<
+            S,
+            C,
+            L,
+            Samples,
+            M,
+            usize,
+            CHANNELS,
+            ACTIVE,
+            THREADS,
+            PIXELS,
+            RLE,
+            BYTE_SAMPLE,
+            false,
+            GLOBAL_BYTES,
+        >(stream, module, samples, levels, prepared, resolved)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn launch_histogram_range_arithmetic_variant<
+    S,
+    C,
+    L,
+    M,
+    O,
+    const CHANNELS: usize,
+    const ACTIVE: usize,
+    const THREADS: u32,
+    const PIXELS: usize,
+    const RLE: bool,
+    const BYTE_SAMPLE: bool,
+    const SHARED: bool,
+    const SHARED_BYTES: usize,
+>(
+    stream: &CudaStream,
+    module: &M,
+    samples: &ArithmeticRange<S>,
+    levels: HistogramLevelStorage<'_, L, ACTIVE>,
+    prepared: PreparedHistogramLaunch<'_, C, ACTIVE>,
+    resolved: (usize, usize, usize),
+) -> Result<(), DeviceAlgorithmError>
+where
+    S: HistogramScalar
+        + HistogramSample<L>
+        + HistogramFourSampleLoad
+        + TryFrom<usize>
+        + core::ops::Add<Output = S>
+        + core::ops::Mul<Output = S>,
+    C: HistogramScalar + rccl_memory::device::HistogramCounter,
+    L: HistogramScalar + PartialOrd,
+    M: HistogramKernel<
+            S,
+            C,
+            L,
+            O,
+            CHANNELS,
+            ACTIVE,
+            THREADS,
+            PIXELS,
+            RLE,
+            BYTE_SAMPLE,
+            SHARED,
+            SHARED_BYTES,
+        >,
+    O: HistogramOffset,
+{
+    let geometry = histogram_geometry::<O, THREADS, PIXELS>(
+        resolved,
+        prepared.blocks_per_row,
+        prepared.blocks_per_col,
+    )?;
+    let blocks = prepared
+        .blocks_per_row
+        .checked_mul(prepared.blocks_per_col)
+        .ok_or(DeviceAlgorithmError::SizeOverflow)?;
+    if blocks == 0 {
+        HistogramInitKernel::launch_histogram_init(module, stream, prepared.storage)
+    } else {
+        module.launch_histogram_range_arithmetic(
+            stream,
+            samples,
+            levels,
+            prepared.storage,
+            geometry,
+        )
+    }
+}
+
+/// Arithmetic-range variant of [`device_histogram_range`].
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn device_histogram_range_arithmetic<
+    S,
+    C,
+    L,
+    Levels,
+    M,
+    const CHANNELS: usize,
+    const ACTIVE: usize,
+    const THREADS: u32,
+    const PIXELS: usize,
+    const RLE: bool,
+    const BYTE_SAMPLE: bool,
+    const SHARED_BYTES: usize,
+    const GLOBAL_BYTES: usize,
+>(
+    stream: &CudaStream,
+    module: &M,
+    samples: &ArithmeticRange<S>,
+    region: HistogramRegion,
+    output: &mut DeviceHistogram<C, ACTIVE>,
+    levels: &Levels,
+    workspace: &mut DeviceHistogramWorkspace<C, ACTIVE>,
+) -> Result<(), DeviceAlgorithmError>
+where
+    S: HistogramScalar
+        + HistogramSample<L>
+        + HistogramFourSampleLoad
+        + TryFrom<usize>
+        + core::ops::Add<Output = S>
+        + core::ops::Mul<Output = S>,
+    C: HistogramScalar + rccl_memory::device::HistogramCounter,
+    L: HistogramScalar + PartialOrd,
+    Levels: HistogramLevels<L, ACTIVE> + ?Sized,
+    M: HistogramPolicyKernels<
+            S,
+            C,
+            L,
+            CHANNELS,
+            ACTIVE,
+            THREADS,
+            PIXELS,
+            RLE,
+            BYTE_SAMPLE,
+            SHARED_BYTES,
+            GLOBAL_BYTES,
+        >,
+{
+    let resolved = region.__resolve::<CHANNELS>(samples.len())?;
+    let output_lengths = *output.lengths();
+    let levels = validate_histogram_levels(levels, output_lengths)?;
+    let narrow_offsets = histogram_uses_i32_offsets::<S>(resolved.1, resolved.2);
+    let prepared = prepare_histogram_launch(output, workspace, resolved, BYTE_SAMPLE)?;
+    if prepared.narrow_offsets != narrow_offsets {
+        return Err(DeviceAlgorithmError::InvalidHistogramShape(
+            "histogram workspace does not match the image offset domain",
+        ));
+    }
+    let max_bins = prepared
+        .storage
+        .output_lengths
+        .iter()
+        .copied()
+        .max()
+        .unwrap_or(0);
+    if BYTE_SAMPLE || max_bins <= 256 {
+        if narrow_offsets {
+            launch_histogram_range_arithmetic_variant::<
+                S,
+                C,
+                L,
+                M,
+                i32,
+                CHANNELS,
+                ACTIVE,
+                THREADS,
+                PIXELS,
+                RLE,
+                BYTE_SAMPLE,
+                true,
+                SHARED_BYTES,
+            >(stream, module, samples, levels, prepared, resolved)
+        } else {
+            launch_histogram_range_arithmetic_variant::<
+                S,
+                C,
+                L,
+                M,
+                usize,
+                CHANNELS,
+                ACTIVE,
+                THREADS,
+                PIXELS,
+                RLE,
+                BYTE_SAMPLE,
+                true,
+                SHARED_BYTES,
+            >(stream, module, samples, levels, prepared, resolved)
+        }
+    } else if narrow_offsets {
+        launch_histogram_range_arithmetic_variant::<
+            S,
+            C,
+            L,
+            M,
+            i32,
+            CHANNELS,
+            ACTIVE,
+            THREADS,
+            PIXELS,
+            RLE,
+            BYTE_SAMPLE,
+            false,
+            GLOBAL_BYTES,
+        >(stream, module, samples, levels, prepared, resolved)
+    } else {
+        launch_histogram_range_arithmetic_variant::<
+            S,
+            C,
+            L,
+            M,
+            usize,
+            CHANNELS,
+            ACTIVE,
+            THREADS,
+            PIXELS,
+            RLE,
+            BYTE_SAMPLE,
+            false,
+            GLOBAL_BYTES,
+        >(stream, module, samples, levels, prepared, resolved)
+    }
+}
+
 fn channel_layout<const CHANNELS: usize>(
     lengths: [usize; CHANNELS],
 ) -> Result<([usize; CHANNELS], usize), DeviceAlgorithmError> {
@@ -360,36 +2191,12 @@ fn channel_layout<const CHANNELS: usize>(
     Ok((offsets, total))
 }
 
-/// Materialize CUB's host-initialized array of `SearchTransform` ranges while
-/// retaining one shared borrow of their owning device allocation.
-#[doc(hidden)]
-pub fn histogram_read_only_slices<'a, L: DeviceCopy + Copy, const CHANNELS: usize>(
-    storage: &'a DeviceBuffer<L>,
-    lengths: [usize; CHANNELS],
-    offsets: [usize; CHANNELS],
-) -> Result<cuda_host::ReadOnlySlices<'a, L, CHANNELS>, DeviceAlgorithmError> {
-    let mut overflowed = false;
-    let ranges = core::array::from_fn(|channel| {
-        let begin = offsets[channel];
-        let end = begin.checked_add(lengths[channel]).unwrap_or_else(|| {
-            overflowed = true;
-            begin
-        });
-        begin..end
-    });
-    if overflowed {
-        return Err(DeviceAlgorithmError::SizeOverflow);
-    }
-    cuda_host::ReadOnlySlices::try_from_ranges(storage, ranges).ok_or(
-        DeviceAlgorithmError::InvalidHistogramShape(
-            "histogram level ranges must be nonempty and lie in their device allocation",
-        ),
-    )
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{HistogramRegion, histogram_uses_i32_offsets};
+    use super::{
+        HistogramPolicy, HistogramRegion, histogram_policy, histogram_shared_bytes,
+        histogram_uses_i32_offsets,
+    };
     use crate::DeviceAlgorithmError;
 
     #[test]
@@ -439,5 +2246,21 @@ mod tests {
         assert!(histogram_uses_i32_offsets::<u32>(2, 1_000_000));
         assert!(!histogram_uses_i32_offsets::<u32>(1, i32::MAX as usize));
         assert!(!histogram_uses_i32_offsets::<u8>(usize::MAX, 2));
+    }
+
+    #[test]
+    #[cfg(not(cuda_arch_ge_90))]
+    fn fallback_policy_matches_pinned_policy500_arithmetic() {
+        assert_eq!(
+            histogram_policy(4, 4, 1, 1, true),
+            HistogramPolicy {
+                threads: 384,
+                pixels: 16,
+                rle: true,
+            }
+        );
+        assert_eq!(histogram_policy(8, 8, 3, 4, false).pixels, 2);
+        assert_eq!(histogram_shared_bytes(4, 3, true), 3_092);
+        assert_eq!(histogram_shared_bytes(4, 3, false), 20);
     }
 }

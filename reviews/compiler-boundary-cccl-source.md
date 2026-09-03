@@ -38,6 +38,7 @@ claimed.
    `DeviceReduce::SumTypo`. `scripts/check-cccl-cub-examples.sh` exited 1 and
    displayed the exact `Sum` versus `SumTypo` diff.
 
-Both faults were removed before the final gate. GPU launch/output fault
-injection remains mandatory when the first real operation macro is exported;
-parser and inventory failures cannot stand in for runtime evidence.
+Both faults were removed before the final gate. The parser and typed compiler
+catalog were subsequently deleted with the entire RCCL proc-macro crate.
+GPU launch/output fault injection remains mandatory for real operations;
+source-inventory failures cannot stand in for runtime evidence.

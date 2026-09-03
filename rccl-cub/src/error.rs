@@ -1,4 +1,4 @@
-/// Failure reported by a generated device-wide ordering operation.
+/// Failure reported by a device-wide operation.
 #[derive(Debug)]
 pub enum DeviceAlgorithmError {
     LengthMismatch {
@@ -17,6 +17,7 @@ pub enum DeviceAlgorithmError {
         key_bits: u32,
     },
     InvalidHistogramShape(&'static str),
+    UnsupportedTarget(&'static str),
     SizeOverflow,
     Memory(rccl_memory::MemoryError),
     Driver(cuda_core::DriverError),
@@ -51,6 +52,7 @@ impl core::fmt::Display for DeviceAlgorithmError {
                 "radix bit range {begin}..{end} is outside 0..={key_bits} or reversed"
             ),
             Self::InvalidHistogramShape(message) => formatter.write_str(message),
+            Self::UnsupportedTarget(message) => formatter.write_str(message),
             Self::SizeOverflow => formatter.write_str("combined device range length overflowed"),
             Self::Memory(error) => error.fmt(formatter),
             Self::Driver(error) => error.fmt(formatter),
@@ -69,6 +71,7 @@ impl std::error::Error for DeviceAlgorithmError {
             | Self::WorkspaceTooSmall { .. }
             | Self::InvalidBitRange { .. }
             | Self::InvalidHistogramShape(_)
+            | Self::UnsupportedTarget(_)
             | Self::SizeOverflow => None,
         }
     }

@@ -21,9 +21,9 @@ printf '%s  %s\n' \
   "$test_source" | sha256sum --check --status
 
 for required in \
-  'rccl_thrust::thrust_program!(&context)' \
+  'rccl_thrust::cuda::Program::load(&context)' \
   'repeat_n(10_i32, data.len())' \
-  'rccl_thrust::transform!(&exec, &mut data, repeated' \
+  'rccl_thrust::transform(&exec, &mut data, repeated' \
   '[13, 17, 12, 15]'; do
   if ! rg -q -F "$required" rccl-thrust/examples/constant_iterator.rs; then
     printf '%s\n' "constant_iterator port lost required evidence: $required" >&2

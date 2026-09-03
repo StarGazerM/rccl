@@ -40,7 +40,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let context = CudaContext::new(0)?;
     let stream = context.default_stream();
-    let cub = rccl_cub::cub_program!(&context)?;
+    let cub = rccl_cub::cuda::Program::load(&context)?;
     let launch = cub.on(&stream)?;
 
     let input_host = random_u32(count);
@@ -50,13 +50,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     let input_values = DeviceBuffer::from_host(&stream, &input_host)?;
     let mut output_keys = DeviceBuffer::<u32>::zeroed(&stream, count)?;
     let mut output_values = DeviceBuffer::<u32>::zeroed(&stream, count)?;
-    let mut workspace = rccl_cub::device_merge_sort_pairs_workspace!(::<u32, u32>(&launch, count))?;
+    let mut workspace = rccl_cub::device_merge_sort_pairs_workspace::<u32, u32>(&launch, count)?;
 
     let mut gpu_samples = Vec::with_capacity(iterations);
     let mut end_to_end_samples = Vec::with_capacity(iterations);
     {
         let mut operation = || {
-            rccl_cub::device_merge_sort_pairs_copy!(::<u32, u32>(
+            rccl_cub::device_merge_sort_pairs_copy(
                 &launch,
                 &input_keys,
                 &input_values,
@@ -64,7 +64,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 &mut output_keys,
                 &mut output_values,
                 |left: &u32, right: &u32| left.cmp(right),
-            ))
+            )
         };
         operation()?;
         operation()?;

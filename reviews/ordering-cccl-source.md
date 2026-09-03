@@ -27,20 +27,19 @@ Sources read for the currently exported intersection:
 - `thrust/thrust/system/cuda/detail/sort.h`;
 - `thrust/testing/merge.cu` and `merge_key_value.cu`.
 
-The direct public Rust calls are the `device_merge_*!`,
-`device_merge_sort_*!`, and `device_radix_sort_*!` CUB macros. Thrust exposes
-ordinary `sort*` and `merge*` methods; declarative backend impls lower those
-methods through the exact CUB operation macros. Thrust owns no ordering
-kernel.
+Direct public operations are ordinary `device_merge_*`,
+`device_merge_sort_*`, and `device_radix_sort_*` functions. Their workspace
+constructors are ordinary functions too. Thrust exposes ordinary `sort*` and
+`merge*` methods and lowers them through the same concrete CUB program.
+Thrust owns no ordering kernel.
 
-## TMP boundary
+## Generic and const boundary
 
 C++ deduces `KeyT`, `ValueT`, iterator value types, and policy inputs before
-instantiating dispatch and agents. A stable Rust proc macro cannot query
-rustc's later inference. The public method lets rustc infer its traits
-normally, while the closed primitive backend catalog supplies the concrete
-type token to each CUB policy macro. Every fact that changes CUB lowering is
-still macro input:
+instantiating dispatch and agents. RCCL leaves those types to rustc generics
+and sealed capabilities. Only literal kernel extents cross the private
+dispatch boundary because stable Rust cannot yet use every generic
+`size_of::<T>()` expression as a const argument. Relevant facts are:
 
 - key and value types select layout-dependent merge policy;
 - primitive radix category selects unsigned, sign-bit, or floating bit
@@ -51,12 +50,13 @@ still macro input:
 - fixed extents and offset category must likewise be explicit when their forms
   are implemented. Primitive radix bit windows are runtime `Range<u32>`
   values, matching CUB's runtime `begin_bit`/`end_bit`; only the maximum
-  policy shape is macro-selected.
+  policy shape is selected by internal literal dispatch.
 
-Primitive aliases and custom records currently fail closed because their
-layout/decomposition is opaque to the macro. No `TypeId`, runtime trait
+Primitive aliases work because rustc sees the underlying trait implementation.
+Custom radix records still fail closed until they have an explicit
+ordering-preserving decomposition capability. No `TypeId`, runtime trait
 object, type registry, inferred fallback, or comparison-sort substitution is
-used to hide that missing TMP input.
+used to hide that missing semantic input.
 
 Temporary storage is not a Thrust semantic operand. Pinned CUDA Thrust first
 queries CUB for `storage_size`, creates `temporary_array<std::uint8_t,
@@ -70,11 +70,11 @@ single `d_temp_storage` operand without importing byte pointers into Rust.
 CUDA modules and architecture tags are not algorithm operands either. Pinned
 Thrust uses `cuda::par.on(stream)` and pinned CUB receives the stream as an
 ordinary call operand; neither API receives a module or an `sm_XX` token.
-RCCL now constructs one typed program owner with `thrust_program!` or
-`cub_program!`, binds CUB with `program.on(&stream)`, and constructs the
-ordinary Thrust policy with `program.par(&stream)`. The CUB proc macro reads
-the target selected by cuda-oxide. Parser tests reject a caller-provided
-architecture token rather than ignoring it.
+RCCL now constructs a concrete `rccl_thrust::cuda::Program` or
+`rccl_cub::cuda::Program`, binds CUB with `program.on(&stream)`, and constructs
+the ordinary Thrust policy with `program.par(&stream)`. CUB policy reads compiler
+cfgs emitted from cuda-oxide's selected `--arch`; no operation parses or
+accepts an architecture token.
 
 ## Public call-shape comparison
 
@@ -83,9 +83,9 @@ architecture token rather than ignoring it.
 | `thrust::cuda::par.on(stream)` | `let exec = thrust.par(&stream)?` | the typed `Program` owns the cuda-oxide program artifact; the execution value contains only runtime stream/allocation state |
 | `thrust::sort(policy, first, last, comp)` | `range.sort_by(&exec, closure)` | one mutable device range replaces the iterator pair; inference replaces explicit template/type arguments; a Rust closure replaces the comparator object |
 | `thrust::merge(policy, first1, last1, first2, last2, result, comp)` | `first.view().merge_by(second.view(), closure).write_into(output.view_mut(), &exec)` | one expression retains both input borrows and the output is exclusively borrowed only by the terminal operation |
-| CUB query/execute with one `d_temp_storage` and `temp_storage_bytes` pair | one `device_*_workspace!` construction followed by `device_*!(..., &mut workspace, ...)` | a typed opaque owner replaces the byte pointer/size pair; internal scratch and agent state are private |
+| CUB query/execute with one `d_temp_storage` and `temp_storage_bytes` pair | one `device_*_workspace::<T>(...)` construction followed by `device_*(..., &mut workspace, ...)` | ordinary functions construct and consume a typed opaque owner replacing the byte pointer/size pair; internal scratch and agent state are private |
 | CUB stream/environment operand | `let launch = cub.on(&stream)?`, then `&launch` | the stream binding is reusable runtime state; no invented CUB execution policy, module argument, or architecture token |
-| CUB block/warp primitive inside a user `__global__` kernel | `#[rccl_cub::program] mod kernels { #[kernel] fn ... { warp_reduce!(...) } }`, then one `kernels::program!(&context)` bind | cuda-oxide requires an explicit Rust program boundary; the paired item/expression macros prove artifact provenance and keep its unsafe loader out of user code |
+| CUB block/warp primitive inside a user `__global__` kernel | `#[cuda_device::cuda_module] mod kernels { #[kernel] fn ... { warp_reduce::<T, N>(...) } }`, then one `unsafe { kernels::load(&context) }` bind | user kernels use cuda-oxide's actual module boundary directly; RCCL adds no syntax or program macro |
 
 The extra `Program` construction is a cuda-oxide program-lifetime boundary,
 not an algorithm operand. It occurs once before example or benchmark work;
@@ -123,13 +123,13 @@ neither the benchmarked operation nor its comparator receives a module.
   payloads use an independently stable CPU reference, so key-only agreement
   cannot hide a scatter or selector error.
 - A zero-width window starts with different contents in the two allocations
-  and uses the macro-selected zero-sized single-tile workspace. It must
+  and uses the ordinary zero-sized single-tile workspace selection. It must
   preserve the original selected range without launching. Reversed ranges
   return their specific error and leave selection and contents unchanged.
 - The exact Policy800 single-tile boundaries are tested on both sides: 4,864
   `u32` keys and key/value pairs receive zero one-sweep state, while 4,865
   keys receive the exact bins/lookback/counter extents and run the one-sweep
-  route. Macro expansion tests assert both sides of that conditional, so an
+  route. Source and GPU tests assert both sides of that conditional, so an
   unconditional single-tile route or unconditional workspace allocation
   cannot pass the current fixtures.
 - Single-tile probes require exactly one selector transition and compare every
@@ -214,8 +214,8 @@ also rejected and removed: widening all hot shared-memory indices through a
 new u32 access surface, and replacing the safe shuffle validity branch with an
 arithmetic mask. Neither may be reintroduced merely because result tests pass.
 
-The multi-block Policy800 mapping now also fixes histogram width at the
-macro-selected 128 threads, reads the CUDA lane register instead of deriving a
+The multi-block Policy800 mapping also fixes histogram width at 128 threads,
+reads the CUDA lane register instead of deriving a
 lane from `threadIdx.x`, computes one pass digit mask for the named
 `ShiftDigitExtractor` equivalent, keeps key and rank register arrays
 uninitialized until their fully unrolled writes, and uses the exact guarded
@@ -223,13 +223,13 @@ uninitialized until their fully unrolled writes, and uses the exact guarded
 255. Full and partial warp-striped input capabilities consume a borrowed slice
 and the checked lane coordinate: the partial form narrows the final valid
 prefix once and preserves CUB's per-register activity predicate without
-exposing a pointer view in the algorithm. Macro-generated entry variants own
+exposing a pointer view in the algorithm. Generated entry variants own
 the exact CUB static union extents:
 34,304/32,768 bytes for supported key policies and
-28,160/26,624/32,768 bytes for supported pair policies. Macro-visible layouts
-select the entry; neither a runtime type registry nor a maximum-sized fallback
+28,160/26,624/32,768 bytes for supported pair policies. Sealed Rust layout
+capabilities select the entry; neither a runtime type registry nor a maximum-sized fallback
 exists. Histogram and exclusive-sum storage are likewise static at 4,096 or
-8,192 bytes and 2,336 bytes. The operation macros end `DoubleBuffer` borrows
+8,192 bytes and 2,336 bytes. The ordinary pass functions end `DoubleBuffer` borrows
 with lexical scopes; a forced `drop` on a non-`Drop` carrier is
 source-rejected. Generated CUDA entry points carry only a checked
 `clippy::too_many_arguments` expectation with the pinned launch ABI as its

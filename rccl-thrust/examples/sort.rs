@@ -8,7 +8,7 @@ use std::error::Error;
 fn main() -> Result<(), Box<dyn Error>> {
     let context = CudaContext::new(0)?;
     let stream = context.default_stream();
-    let thrust = rccl_thrust::thrust_program!(&context)?;
+    let thrust = rccl_thrust::cuda::Program::load(&context)?;
     let exec = thrust.par(&stream)?;
 
     // Exact integer rows printed by pinned `thrust/examples/sort.cu`. The

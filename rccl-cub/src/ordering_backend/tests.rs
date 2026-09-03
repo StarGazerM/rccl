@@ -569,7 +569,7 @@ fn radix_histogram_keeps_runtime_pass_state_and_compile_time_item_extent() {
     );
     assert!(
         !histogram.contains("blockDim_x"),
-        "Policy800 histogram block width is proc-macro TMP, not runtime agent state"
+        "Policy800 histogram block width is a const policy, not runtime agent state"
     );
     assert!(
         !histogram.contains("digit(\n                    initialized_value(&ordered_keys[item]),\n                    current_bit,\n                    num_bits,"),

@@ -8,11 +8,10 @@ Pinned sources:
 - `cub/cub/warp/warp_reduce.cuh`;
 - `cub/test/warp/catch2_test_warp_reduce.cu`.
 
-Public Rust calls under test are `rccl_cub::warp_reduce!` and
-`rccl_cub::warp_reduce_items!`. They expand to safe Rust expressions calling a
-closure-based device helper. The generated expressions contain no `unsafe`,
-raw pointer, `static mut`, `Arc`, erased callable, operator policy, or compiler
-artifact control.
+Public Rust calls under test are the ordinary const-generic functions
+`rccl_cub::warp_reduce` and `rccl_cub::warp_reduce_items`. They contain no
+`unsafe`, raw pointer, `static mut`, `Arc`, erased callable, operator policy,
+or compiler artifact control.
 
 ## Masking review
 
@@ -62,11 +61,9 @@ All faults were temporary and removed before the final gate.
 | Return the local `f32` value instead of shuffling a neighbor | new floating redux matrix | overview executable passed, then matrix exited 101 in floating case 0; first group was `-95.0` instead of `99.0` |
 | Make all four benchmark addition closures semantically equal but syntactically ineligible for the hardware-add specialization | equal-work performance gate | results remained exact, but the best-median RCCL/CCCL ratio was `2.011273`, exceeding the `1.001` measurement-equivalence limit |
 
-Parser negative tests independently reject runtime tile widths, unsupported
-widths `9` and `7`, missing operands, and extra operands. The macro-boundary
-gate independently rejects runtime compiler metadata and loader/ABI control. A
-parser regression test also proves that an integer literal forwarded through
-`macro_rules!` remains accepted rather than being mistaken for a runtime width.
+The const-generic boundary rejects runtime tile widths. Unsupported widths `9`
+and `7` have no `WarpTile` implementation. The program-boundary gate
+independently rejects runtime compiler metadata and loader/ABI control.
 
 ## Remaining upstream cases
 

@@ -5,8 +5,8 @@
 
 use crate::cuda_module::contract::LaunchContractArgs;
 use crate::cuda_module::{
-    device_codegen_owner_selection, expand_cuda_module, expand_cuda_module_inner,
-    transform_cuda_module_items,
+    cuda_module_artifact_anchor, device_codegen_owner_selection, expand_cuda_module,
+    expand_cuda_module_inner, transform_cuda_module_items,
 };
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
@@ -81,6 +81,23 @@ fn host_cuda_module_still_emits_the_loader() {
     assert!(
         expanded.contains("::cuda_host::") && expanded.contains("LoadedModule"),
         "host expansion must keep the loader: {expanded}"
+    );
+}
+
+#[test]
+fn concrete_kernel_uses_target_specific_artifact_anchor_by_default() {
+    assert_eq!(
+        cuda_module_artifact_anchor("gpu-package", "1.2.3", "gpu_lib", None),
+        "cuda_oxide_artifact_anchor_246e25db_v2_gpu_package_1_2_3_gpu_lib_nonbin"
+    );
+    assert_eq!(
+        cuda_module_artifact_anchor(
+            "gpu-package",
+            "1.2.3",
+            "probe",
+            Some("probe-example"),
+        ),
+        "cuda_oxide_artifact_anchor_246e25db_v2_gpu_package_1_2_3_probe_bin_probe_example"
     );
 }
 
@@ -1046,27 +1063,6 @@ fn aliased_disjoint_index_space_is_checked_by_rust_type_resolution() {
         "the bound must preserve the original index-space alias: {expanded}"
     );
     assert!(expanded.contains("__LaunchContractDisjointSlice<u32,2u8>"));
-}
-
-#[test]
-fn absolute_read_only_slice_sets_use_the_lifetime_bearing_host_owner() {
-    let module: ItemMod = parse_quote! {
-        mod kernels {
-            #[kernel]
-            pub fn search<L: Copy, const ACTIVE: usize>(
-                levels: ::cuda_device::read_only::ReadOnlySlices<L, ACTIVE>,
-            ) {}
-        }
-    };
-    let expanded = expand_to_compact_string(module);
-    assert!(
-        expanded.contains("levels:::cuda_host::ReadOnlySlices<'_,L,ACTIVE>"),
-        "the sync launcher must retain the host allocation borrow: {expanded}"
-    );
-    assert!(
-        !expanded.contains("ReadOnlySlices<'_,L,ACTIVE>::cuda_host::KernelScalar"),
-        "the anonymous borrow lifetime must not leak into a where predicate: {expanded}"
-    );
 }
 
 #[test]

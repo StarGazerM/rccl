@@ -17,7 +17,7 @@ fn input_value(index: usize) -> u32 {
 fn main() -> Result<(), Box<dyn Error>> {
     let context = CudaContext::new(0)?;
     let stream = context.default_stream();
-    let thrust = rccl_thrust::thrust_program!(&context)?;
+    let thrust = rccl_thrust::cuda::Program::load(&context)?;
     let exec = thrust.par(&stream)?;
 
     let host_input = (0..ITEMS).map(input_value).collect::<Vec<_>>();
@@ -25,7 +25,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let repeated = repeat_n(ADD, ITEMS);
 
     for _ in 0..WARMUPS {
-        rccl_thrust::transform!(&exec, &mut data, repeated, |left, right| left + right)?;
+        rccl_thrust::transform(&exec, &mut data, repeated, |left, right| left + right)?;
     }
     stream.synchronize()?;
 
@@ -34,7 +34,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     for _ in 0..SAMPLES {
         let start = stream.record_event(timing)?;
         for _ in 0..LAUNCHES {
-            rccl_thrust::transform!(&exec, &mut data, repeated, |left, right| left + right)?;
+            rccl_thrust::transform(&exec, &mut data, repeated, |left, right| left + right)?;
         }
         let end = stream.record_event(timing)?;
         end.synchronize()?;

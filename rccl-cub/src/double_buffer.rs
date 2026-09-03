@@ -46,6 +46,16 @@ where
 }
 
 impl<First, Second> DoubleBuffer<First, Second> {
+    #[doc(hidden)]
+    pub fn __from_equal_parts(first: First, second: Second, len: usize) -> Self {
+        Self {
+            first,
+            second,
+            current_is_first: true,
+            len,
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.len
     }
