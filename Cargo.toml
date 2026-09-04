@@ -3,17 +3,19 @@ name = "rccl"
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0 OR MIT"
-description = "Umbrella crate for RCCL's Thrust-shaped and CUB-level CUDA primitives"
+description = "Umbrella crate for RCCL's Thrust-shaped, CUB-level, and cuCollections-style CUDA primitives"
 
 [workspace]
 members = [
+    "rccl-cuco",
     "rccl-cub",
     "rccl-memory",
     "rccl-thrust",
 ]
-exclude = ["vendor/cuda-device", "vendor/cuda-host", "vendor/cuda-macros"]
+exclude = ["vendor/cuda-core", "vendor/cuda-device", "vendor/cuda-host", "vendor/cuda-macros"]
 
 [dependencies]
+rccl-cuco = { path = "rccl-cuco" }
 rccl-cub = { path = "rccl-cub" }
 rccl-thrust = { path = "rccl-thrust" }
 
@@ -29,6 +31,7 @@ lto = false
 # synchronous launches so one CUB temporary allocation can expose disjoint,
 # typed regions without manufacturing DeviceBuffer owners.
 [patch."https://github.com/NVlabs/cuda-oxide.git"]
+cuda-core = { path = "vendor/cuda-core" }
 cuda-device = { path = "vendor/cuda-device" }
 cuda-host = { path = "vendor/cuda-host" }
 cuda-macros = { path = "vendor/cuda-macros" }

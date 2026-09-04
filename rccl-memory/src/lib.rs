@@ -37,6 +37,7 @@ use std::{
 
 mod adaptors;
 mod buffer;
+mod completion;
 pub mod device;
 mod fixed;
 mod pool;
@@ -52,6 +53,7 @@ pub use adaptors::{
     StatisticsMemoryResource, StatisticsSnapshot, ThreadSafeMemoryResource,
 };
 pub use buffer::{DeviceBuffer, DeviceScalar, DeviceUninitBuffer};
+pub use completion::{CudaCompletion, RecordedCudaEvent, cross_stream_dependency};
 pub use fixed::{BinningMemoryResource, FixedSizeMemoryResource};
 pub use pool::{PoolMemoryResource, SuballocatorStats};
 pub use range::{ContiguousDeviceRange, ContiguousDeviceRangeMut, copy_device_range};

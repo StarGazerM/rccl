@@ -47,7 +47,7 @@ where
 
 impl<First, Second> DoubleBuffer<First, Second> {
     #[doc(hidden)]
-    pub fn __from_equal_parts(first: First, second: Second, len: usize) -> Self {
+    pub(crate) fn __from_equal_parts(first: First, second: Second, len: usize) -> Self {
         Self {
             first,
             second,

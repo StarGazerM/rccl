@@ -1,17 +1,25 @@
 #!/usr/bin/env sh
-# Build the exact cuda-oxide compiler required by RCCL's architecture cfgs and
-# read-only vector loads.
+# Build the exact cuda-oxide compiler required by RCCL's architecture cfgs,
+# read-only vector loads, and bounds-proved per-thread tiles.
 set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
-oxide_commit=97f8b2b7882f0c15ad9ce9b53abed5553920caa8
-oxide_toolchain=nightly-2026-08-28
+oxide_commit='97f8b2b7882f0c15ad9ce9b53abed5553920caa8'
+oxide_toolchain='nightly-2026-08-28'
+oxide_patch_rel='patches/cuda-oxide-read-only-i32x4.patch'
+oxide_patch_sha256='9d92f1e838614af92514b062fc3f0540bf22dee6dcbe1596cfd045d6341f163f'
 oxide_checkout=${1:-"$repo_root/target/cuda-oxide-patched"}
-oxide_patch="$repo_root/patches/cuda-oxide-read-only-i32x4.patch"
+oxide_patch="$repo_root/$oxide_patch_rel"
 
 if [ ! -f "$oxide_patch" ]; then
   printf 'missing cuda-oxide patch: %s\n' "$oxide_patch" >&2
+  exit 1
+fi
+actual_patch_sha256=$(sha256sum "$oxide_patch" | awk '{print $1}')
+if [ "$actual_patch_sha256" != "$oxide_patch_sha256" ]; then
+  printf 'cuda-oxide patch checksum mismatch: expected %s, found %s\n' \
+    "$oxide_patch_sha256" "$actual_patch_sha256" >&2
   exit 1
 fi
 
@@ -63,4 +71,4 @@ cargo +"$oxide_toolchain" install \
   cargo +"$oxide_toolchain" oxide setup
 )
 
-printf '%s\n' "cuda-oxide $oxide_commit with RCCL architecture cfgs and read-only vector lowering is installed"
+printf '%s\n' "cuda-oxide $oxide_commit with RCCL architecture cfgs, read-only vectors, and ThreadTile lowering is installed"

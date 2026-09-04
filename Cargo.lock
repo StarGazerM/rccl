@@ -135,7 +135,6 @@ dependencies = [
 [[package]]
 name = "cuda-core"
 version = "0.2.1"
-source = "git+https://github.com/NVlabs/cuda-oxide.git?rev=97f8b2b7882f0c15ad9ce9b53abed5553920caa8#97f8b2b7882f0c15ad9ce9b53abed5553920caa8"
 dependencies = [
  "anyhow",
  "cuda-bindings",
@@ -389,11 +388,22 @@ name = "rccl"
 version = "0.1.0"
 dependencies = [
  "rccl-cub",
+ "rccl-cuco",
  "rccl-thrust",
 ]
 
 [[package]]
 name = "rccl-cub"
+version = "0.1.0"
+dependencies = [
+ "cuda-core",
+ "cuda-device",
+ "cuda-host",
+ "rccl-memory",
+]
+
+[[package]]
+name = "rccl-cuco"
 version = "0.1.0"
 dependencies = [
  "cuda-core",

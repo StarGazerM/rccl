@@ -150,6 +150,47 @@ complete dependency-ordered plan, including the related-example/unit-test
 stage and adversarial error-masking iteration, is in
 [CCCL_THRUST_CUB_COVERAGE_PLAN.md](CCCL_THRUST_CUB_COVERAGE_PLAN.md).
 
+## Reproducible CUDA toolchain
+
+The CUDA compiler contract is intentionally single-source and checked:
+
+| Input | Required identity |
+|---|---|
+| Rust | `nightly-2026-08-28` from `rust-toolchain.toml` |
+| cuda-oxide | `97f8b2b7882f0c15ad9ce9b53abed5553920caa8` |
+| compiler patch | `patches/cuda-oxide-read-only-i32x4.patch` |
+| patch SHA-256 | `9d92f1e838614af92514b062fc3f0540bf22dee6dcbe1596cfd045d6341f163f` |
+| default CUDA/NVVM/libdevice | NVIDIA HPC SDK 25.5, CUDA 12.9, as recorded in `.cargo/config.toml` |
+
+`scripts/setup-cuda-oxide.sh` is the only compiler setup flow. The canonical
+patch contains the architecture cfg, read-only vector, safe bounds-proved
+`ThreadTile`, and ordering/warp-vote semantic and code-shape fixture changes.
+Setup verifies its checksum before applying it to the pinned cuda-oxide commit.
+The root manifest's three vendored crate overrides and every cuda-oxide Git
+dependency remain tied to that same commit; `Cargo.lock` records no other
+cuda-oxide source revision. CUDA path defaults remain overridable through the
+environment.
+
+Run the identity check and its deterministic rejection fixtures from any
+working directory:
+
+```bash
+scripts/check-oxide-contract.sh
+scripts/test-oxide-contract-negative.sh
+```
+
+`scripts/check-clean-clone.sh` clones only a selected committed tree (default
+`HEAD`) into a temporary directory, checks the contract and negative fixtures,
+and runs locked metadata and workspace checks there. It never copies or
+injects working-tree or untracked files, and it does not mutate the caller's
+checkout. Therefore a newly added gate cannot claim a clean-clone pass until
+the gate and its dependencies are committed.
+
+`scripts/check-sm86-compile.sh` compiles every workspace example registered
+behind `cuda-oxide-example` for `sm_86`. This is explicitly compile-only
+evidence: it neither executes the binaries nor establishes SM86 correctness or
+performance.
+
 ## Verification
 
 ```bash

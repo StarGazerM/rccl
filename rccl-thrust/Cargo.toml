@@ -74,3 +74,75 @@ name = "set_operations_benchmark"
 path = "examples/set_operations_benchmark.rs"
 test = false
 required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "runtime_safety"
+path = "examples/runtime_safety.rs"
+test = false
+required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "range_lowering"
+path = "examples/range_lowering.rs"
+test = false
+required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "range_benchmark"
+path = "examples/range_benchmark.rs"
+test = false
+required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "copy_gather_generation"
+path = "examples/copy_gather_generation.rs"
+test = false
+required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "copy_gather_generation_benchmark"
+path = "examples/copy_gather_generation_benchmark.rs"
+test = false
+required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "device_scan"
+path = "examples/device_scan.rs"
+test = false
+required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "compaction"
+path = "examples/compaction.rs"
+test = false
+required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "compaction_benchmark"
+path = "examples/compaction_benchmark.rs"
+test = false
+required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "grouped_reduction"
+path = "examples/grouped_reduction.rs"
+test = false
+required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "grouped_reduction_benchmark"
+path = "examples/grouped_reduction_benchmark.rs"
+test = false
+required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "record_sort"
+path = "examples/record_sort.rs"
+test = false
+required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "record_sort_benchmark"
+path = "examples/record_sort_benchmark.rs"
+test = false
+required-features = ["cuda-oxide-example"]

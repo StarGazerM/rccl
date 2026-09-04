@@ -504,14 +504,12 @@ pub fn merge_sort_block_pairs_agent<
     let tile_base = tile_index * tile_items;
     let items_in_tile = input_keys.len().saturating_sub(tile_base).min(tile_items);
     if tile_index + 1 < thread::gridDim_x() as usize {
-        let input_keys =
-            WarpStripedBlockInput::<K, THREADS, ITEMS>::new(input_keys, launch, tile_items);
-        let input_values =
-            WarpStripedBlockInput::<V, THREADS, ITEMS>::new(input_values, launch, tile_items);
-        let output_keys =
-            WarpStripedBlockWrite::<K, THREADS, ITEMS>::new(output_keys, launch, tile_items);
-        let output_values =
-            WarpStripedBlockWrite::<V, THREADS, ITEMS>::new(output_values, launch, tile_items);
+        let tile =
+            WarpStripedBlockTile::<THREADS, ITEMS>::new(launch, input_keys.len(), tile_items);
+        let input_keys = tile.input(input_keys);
+        let input_values = tile.input(input_values);
+        let output_keys = tile.output(output_keys);
+        let output_values = tile.output(output_values);
         merge_sort_block_pairs_tile::<K, V, F, _, _, THREADS, ITEMS, SHARED_BYTES, false>(
             input_keys,
             input_values,
@@ -521,14 +519,12 @@ pub fn merge_sort_block_pairs_agent<
             output_values,
         );
     } else {
-        let input_keys =
-            WarpStripedBlockInput::<K, THREADS, ITEMS>::new(input_keys, launch, items_in_tile);
-        let input_values =
-            WarpStripedBlockInput::<V, THREADS, ITEMS>::new(input_values, launch, items_in_tile);
-        let output_keys =
-            WarpStripedBlockWrite::<K, THREADS, ITEMS>::new(output_keys, launch, items_in_tile);
-        let output_values =
-            WarpStripedBlockWrite::<V, THREADS, ITEMS>::new(output_values, launch, items_in_tile);
+        let tile =
+            WarpStripedBlockTile::<THREADS, ITEMS>::new(launch, input_keys.len(), items_in_tile);
+        let input_keys = tile.input(input_keys);
+        let input_values = tile.input(input_values);
+        let output_keys = tile.output(output_keys);
+        let output_values = tile.output(output_values);
         merge_sort_block_pairs_tile::<K, V, F, _, _, THREADS, ITEMS, SHARED_BYTES, true>(
             input_keys,
             input_values,
@@ -565,10 +561,9 @@ pub fn merge_sort_block_pairs_in_place_agent<
     let len = output_keys.len();
     let items_in_tile = len.saturating_sub(tile_base).min(tile_items);
     if tile_index + 1 < thread::gridDim_x() as usize {
-        let input_keys =
-            WarpStripedBlockRead::<K, THREADS, ITEMS>::new(output_keys, launch, tile_items);
-        let input_values =
-            WarpStripedBlockRead::<V, THREADS, ITEMS>::new(output_values, launch, tile_items);
+        let tile = WarpStripedBlockTile::<THREADS, ITEMS>::new(launch, len, tile_items);
+        let input_keys = tile.read(output_keys);
+        let input_values = tile.read(output_values);
         merge_sort_block_pairs_in_place_tile::<K, V, F, THREADS, ITEMS, SHARED_BYTES, false>(
             input_keys,
             input_values,
@@ -576,10 +571,9 @@ pub fn merge_sort_block_pairs_in_place_agent<
             tile_items as u32,
         );
     } else {
-        let input_keys =
-            WarpStripedBlockRead::<K, THREADS, ITEMS>::new(output_keys, launch, items_in_tile);
-        let input_values =
-            WarpStripedBlockRead::<V, THREADS, ITEMS>::new(output_values, launch, items_in_tile);
+        let tile = WarpStripedBlockTile::<THREADS, ITEMS>::new(launch, len, items_in_tile);
+        let input_keys = tile.read(output_keys);
+        let input_values = tile.read(output_values);
         merge_sort_block_pairs_in_place_tile::<K, V, F, THREADS, ITEMS, SHARED_BYTES, true>(
             input_keys,
             input_values,
@@ -1623,10 +1617,10 @@ pub fn merge_sort_merge_pairs_agent<
     let tile_base = tile_index * tile_items;
     let items_in_tile = (source_keys.len() - tile_base).min(tile_items);
     if items_in_tile == tile_items {
-        let output_keys =
-            WarpStripedBlockWrite::<K, THREADS, ITEMS>::new(output_keys, launch, tile_items);
-        let output_values =
-            WarpStripedBlockWrite::<V, THREADS, ITEMS>::new(output_values, launch, tile_items);
+        let tile =
+            WarpStripedBlockTile::<THREADS, ITEMS>::new(launch, output_keys.len(), tile_items);
+        let output_keys = tile.output(output_keys);
+        let output_values = tile.output(output_values);
         merge_sort_merge_pairs_tile::<K, V, F, THREADS, ITEMS, SHARED_BYTES, true>(
             (source_keys, source_values),
             partitions,
@@ -1636,10 +1630,10 @@ pub fn merge_sort_merge_pairs_agent<
             (output_keys, output_values),
         );
     } else {
-        let output_keys =
-            WarpStripedBlockWrite::<K, THREADS, ITEMS>::new(output_keys, launch, items_in_tile);
-        let output_values =
-            WarpStripedBlockWrite::<V, THREADS, ITEMS>::new(output_values, launch, items_in_tile);
+        let tile =
+            WarpStripedBlockTile::<THREADS, ITEMS>::new(launch, output_keys.len(), items_in_tile);
+        let output_keys = tile.output(output_keys);
+        let output_values = tile.output(output_values);
         merge_sort_merge_pairs_tile::<K, V, F, THREADS, ITEMS, SHARED_BYTES, false>(
             (source_keys, source_values),
             partitions,
@@ -1702,28 +1696,20 @@ fn merge_sort_merge_pairs_tile<
     let first_count = (first_end - first_begin) as i32;
     let second_count = (second_end - second_begin) as i32;
     let local_count = first_count + second_count;
-    let keys = output_keys.blocked_concatenated_input::<K, FULL>(
-        source_keys,
-        start + first_begin,
-        first_count,
-        source_keys,
-        start + size + second_begin,
-        second_count,
-    );
-    let values = output_keys.blocked_concatenated_input::<V, FULL>(
-        source_values,
-        start + first_begin,
-        first_count,
-        source_values,
-        start + size + second_begin,
-        second_count,
-    );
     let mut local_keys = [MaybeUninit::<K>::uninit(); ITEMS];
-    let mut local_values = [MaybeUninit::<V>::uninit(); ITEMS];
-    for_each_thread_item!(ITEMS, item, {
-        keys.load_into(item, &mut local_keys[item]);
-        values.load_into(item, &mut local_values[item]);
-    });
+    {
+        let keys = output_keys.blocked_concatenated_input::<K, FULL>(
+            source_keys,
+            start + first_begin,
+            first_count,
+            source_keys,
+            start + size + second_begin,
+            second_count,
+        );
+        for_each_thread_item!(ITEMS, item, {
+            keys.load_into(item, &mut local_keys[item]);
+        });
+    }
     let exchange_items = block_exchange_storage_items::<THREADS, ITEMS>();
     let shared_memory = BlockSharedMemory::new(SHARED_BYTES);
     let mut shared_keys = shared_memory
@@ -1732,6 +1718,24 @@ fn merge_sort_merge_pairs_tile<
         let index = THREADS as i32 * item as i32 + thread_index as i32;
         shared_keys.write(index as usize, local_keys[item]);
     });
+
+    // CUB stages keys before preloading values. Keeping the two checked
+    // concatenated ranges in disjoint lexical scopes prevents their pointer
+    // and extent state from overlapping in registers.
+    let mut local_values = [MaybeUninit::<V>::uninit(); ITEMS];
+    {
+        let values = output_keys.blocked_concatenated_input::<V, FULL>(
+            source_values,
+            start + first_begin,
+            first_count,
+            source_values,
+            start + size + second_begin,
+            second_count,
+        );
+        for_each_thread_item!(ITEMS, item, {
+            values.load_into(item, &mut local_values[item]);
+        });
+    }
     thread::sync_threads();
 
     let local_diagonal = local_count.min(ITEMS as i32 * thread_index as i32);

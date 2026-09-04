@@ -219,12 +219,13 @@ pub(crate) fn temporary_layout<const N: usize>(
         cursor = align_up(cursor, alignments[index])?;
         offsets[index] = cursor;
         cursor = cursor
-            .checked_add(align_up(sizes[index], alignments[index])?)
+            .checked_add(align_up(sizes[index], DEVICE_ALLOCATION_ALIGNMENT)?)
             .ok_or(MemoryError::SizeOverflow)?;
         index += 1;
     }
-    // CUB alias_temporaries reserves this tail so its input pointer may be
-    // advanced to a 256-byte boundary even when the caller's byte range is not.
+    // CUB alias_temporaries rounds every allocation request to 256 bytes, then
+    // reserves this tail so its input pointer may be advanced to a 256-byte
+    // boundary even when the caller's byte range is not.
     let total = cursor
         .checked_add(DEVICE_ALLOCATION_ALIGNMENT - 1)
         .ok_or(MemoryError::SizeOverflow)?;

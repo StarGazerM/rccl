@@ -287,13 +287,13 @@ not confuse them with an owning vector container.
 
 | Family | Pinned headers and operation families | Current state | Main dependency |
 |---|---|---|---|
-| Elementwise traversal | `for_each`, `transform`, `tabulate`, `generate`, `sequence` | partial: binary in-place transform with one finite constant range | range-expression algebra + DeviceFor/Transform |
-| Copy and initialization | `copy`, `fill`, `uninitialized_copy`, `uninitialized_fill` | missing | contiguous fast path + general read/write range path |
+| Elementwise traversal | `for_each`, `transform`, `tabulate`, `generate`, `sequence` | partial: binary in-place transform with one finite constant range; full-buffer `tabulate`; arithmetic `sequence` composed through tabulate exactly like generic Thrust | range-expression algebra + DeviceFor/Transform |
+| Copy and initialization | `copy`, `fill`, `uninitialized_copy`, `uninitialized_fill` | partial: full-buffer `fill` through the DeviceTransform family; copy and uninitialized construction remain missing | contiguous fast path + general read/write range path |
 | Gather/scatter | `gather`, `scatter` including conditional forms | missing | permutation/index range + bounds contract |
 | Reordering | `reverse`, `shuffle`, `swap`/`swap_ranges` | missing | indexed ranges + random engine |
 | Search and predicates | `find`, `count`, `logical`, `equal`, `mismatch` | missing | transform/reduce/select foundations |
 | Ordered queries | `binary_search`, `extrema` | missing | ordering callables + reduce/search agents |
-| Reductions | `reduce`, `inner_product`, `transform_reduce` including reduce-by-key | missing | thread/warp/block/device reduce |
+| Reductions | `reduce`, `inner_product`, `transform_reduce` including reduce-by-key | partial: Thrust default `reduce` maps to the implemented CUB `DeviceReduce::Sum` slice for contiguous `u32`/`i32`/`f32`, with CUB's single-tile versus two-pass split, occupancy/SM subscription workspace sizing, and synchronous device-result readback; external exclusive-Runpod `vj3icxcclyqg8f` parity on that slice is `1.000365`/`1.000784`/`1.000182` for `u32`/`i32`/`f32` at `temp_bytes=17407`; custom binary ops, transform-reduce, inner-product, extrema, and reduce-by-key remain missing | complete DeviceReduce operator/type matrix + DeviceReduceByKey/TransformReduce agents |
 | Scans/differences | `scan`, `transform_scan`, `adjacent_difference` including scan-by-key | missing | thread/warp/block/device scan |
 | Compaction | `remove`, `unique`, `partition` including copy, stable, by-key, and point/query forms | missing | scan + select/partition agents |
 | Replacement | `replace` and copy/predicate variants | missing | elementwise traversal |

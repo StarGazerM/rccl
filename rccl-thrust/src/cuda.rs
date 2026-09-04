@@ -1,16 +1,16 @@
 use cuda_core::{CudaContext, CudaStream, DeviceBuffer, DeviceCopy};
-use rccl_memory::{BorrowedCudaMemoryResource, DeviceAllocator, MemoryError};
+use rccl_memory::{BorrowedCudaMemoryResource, CudaCompletion, DeviceAllocator, MemoryError};
 use std::{error::Error, fmt, sync::Arc};
 
-/// A synchronous Thrust execution policy borrowing one stream and the fixed
-/// RCCL kernel program.
+/// A stream-bound Thrust execution context borrowing the fixed RCCL kernel
+/// program.
 pub struct Execution<'stream, 'program, A: DeviceAllocator> {
     launch: rccl_cub::cuda::Launch<'stream, 'program>,
     allocator: A,
 }
 
-impl<A: DeviceAllocator> Execution<'_, '_, A> {
-    pub fn stream(&self) -> &CudaStream {
+impl<'stream, 'program, A: DeviceAllocator> Execution<'stream, 'program, A> {
+    pub fn stream(&self) -> &'stream CudaStream {
         self.launch.stream()
     }
 
@@ -18,7 +18,31 @@ impl<A: DeviceAllocator> Execution<'_, '_, A> {
         &self.allocator
     }
 
-    pub(crate) fn launch(&self) -> &rccl_cub::cuda::Launch<'_, '_> {
+    /// Submit CUDA work while retaining this execution context (including its
+    /// program and allocator) together with every operation resource.
+    ///
+    /// # Safety
+    ///
+    /// Every resource accessed by the submitted GPU work must be present in
+    /// `resources`, and the work must be enqueued only on this execution's
+    /// stream.
+    pub unsafe fn submit<'borrow, Resources, T, E, F>(
+        &'borrow self,
+        resources: Resources,
+        submit: F,
+    ) -> CudaCompletion<'borrow, T, E, (&'borrow Self, Resources)>
+    where
+        F: FnOnce(&Self, &mut Resources) -> Result<T, E>,
+    {
+        // SAFETY: the caller supplies the resource-retention contract.
+        unsafe {
+            CudaCompletion::from_submission(self.stream(), (self, resources), |retained| {
+                submit(retained.0, &mut retained.1)
+            })
+        }
+    }
+
+    pub(crate) fn launch(&self) -> &rccl_cub::cuda::Launch<'stream, 'program> {
         &self.launch
     }
 
@@ -34,6 +58,7 @@ impl<A: DeviceAllocator> Execution<'_, '_, A> {
     {
         rccl_cub::thrust_integration::transform_repeat_in_place(&self.launch, output, repeated, op)
     }
+
 
     pub(crate) fn synchronize(
         &self,

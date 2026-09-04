@@ -4,6 +4,16 @@
 //! user-selectable policies. Device modules use the separate `__private`
 //! namespace required by cuda-oxide's split compilation.
 
+#[doc(hidden)]
+pub use crate::compaction::{
+    CompactionWorkspace, compaction_workspace_in, device_select_flagged, device_select_if,
+    device_stable_partition_by, device_unique_copy_by,
+};
+#[doc(hidden)]
+pub use crate::grouped_reduction::{
+    BooleanOr, BooleanProvenance, GroupReduceOperator, IndependentProbabilityOr, NaturalBagAdd,
+    device_reduce_by_key, grouped_reduction_workspace_in,
+};
 pub use crate::ordering_backend::{
     SerialSetOperation, SetDifference, SetIntersection, SetSymmetricDifference, SetUnion,
 };

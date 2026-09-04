@@ -38,3 +38,21 @@ fn default_pool_policy_retains_and_reuses_memory() {
     assert!(config.opportunistic_reuse);
     assert!(config.internal_dependencies);
 }
+
+#[test]
+fn completion_guard_retains_resources_and_synchronizes_on_drop() {
+    let source = include_str!("completion.rs");
+    assert!(source.contains("resources: Option<Resources>"));
+    assert!(source.contains("impl<T, E, Resources> Drop for CudaCompletion"));
+    assert!(source.contains(".record_err(self.stream.synchronize())"));
+    assert!(!source.contains("fn detach"));
+}
+
+#[test]
+fn recorded_event_api_hides_cuda_handles_and_builds_stream_dependencies() {
+    let source = include_str!("completion.rs");
+    assert!(source.contains("pub struct RecordedCudaEvent"));
+    assert!(source.contains("pub fn cross_stream_dependency("));
+    assert!(source.contains("event.wait_on(consumer)?"));
+    assert!(!source.contains("pub fn cu_event"));
+}

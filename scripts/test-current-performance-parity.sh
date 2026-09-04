@@ -28,12 +28,15 @@ cleanup() {
   rm -f -- \
     constant_iterator_benchmark.options \
     constant_iterator_benchmark.target \
+    device_reduce_sum_benchmark.options \
+    device_reduce_sum_benchmark.target \
     warp_reduce_benchmark.options \
     warp_reduce_benchmark.target
 }
 trap cleanup EXIT
 
 for source in \
+  benchmarks/reduce-reference.cu \
   benchmarks/thrust-transform-constant-reference.cu \
   benchmarks/warp-reduce-reference.cu; do
   output="$build_dir/$(basename "$source" .cu)"
@@ -46,6 +49,8 @@ done
 
 cargo oxide build --features cuda-oxide-example -- \
   --release --package rccl-cub --example warp_reduce_benchmark
+cargo oxide build --features cuda-oxide-example -- \
+  --release --package rccl-cub --example device_reduce_sum_benchmark
 cargo oxide build --features cuda-oxide-example -- \
   --release --package rccl-thrust --example constant_iterator_benchmark
 
@@ -87,11 +92,16 @@ warp_cccl="$build_dir/warp-cccl.txt"
 warp_rccl="$build_dir/warp-rccl.txt"
 transform_cccl="$build_dir/transform-cccl.txt"
 transform_rccl="$build_dir/transform-rccl.txt"
+reduce_cccl="$build_dir/reduce-cccl.txt"
+reduce_rccl="$build_dir/reduce-rccl.txt"
 for _ in 1 2 3 4 5 6 7; do
   "$build_dir/warp-reduce-reference" | tee -a "$warp_cccl"
   ./target/release/examples/warp_reduce_benchmark | tee -a "$warp_rccl"
   "$build_dir/thrust-transform-constant-reference" | tee -a "$transform_cccl"
   ./target/release/examples/constant_iterator_benchmark | tee -a "$transform_rccl"
+  "$build_dir/reduce-reference" "${RCCL_REDUCE_ITEMS:-67108864}" | tee -a "$reduce_cccl"
+  ./target/release/examples/device_reduce_sum_benchmark \
+    --items "${RCCL_REDUCE_ITEMS:-67108864}" | tee -a "$reduce_rccl"
 done
 
 require_no_regression \
@@ -104,5 +114,12 @@ require_no_regression \
   "$(minimum_metric median_ms < "$transform_cccl")" \
   "$(minimum_metric median_ms < "$transform_rccl")" \
   '1.001'
+for reduce_type in u32 i32 f32; do
+  require_no_regression \
+    "CUB DeviceReduce::Sum ${reduce_type}" \
+    "$(awk -v type=\"$reduce_type\" '($1 == \"CCCL_REDUCE\") { for (field = 1; field <= NF; ++field) { split($field, pair, \"=\"); if (pair[1] == \"type\" && pair[2] == type) matched = 1; if (pair[1] == \"median_ms\") metric = pair[2] + 0 } if (matched && (!seen || metric < minimum)) { minimum = metric; seen = 1 } matched = 0 } END { if (!seen) exit 1; printf \"%.9f\", minimum }' \"$reduce_cccl\")" \
+    "$(awk -v type=\"$reduce_type\" '($1 == \"RCCL_REDUCE\") { for (field = 1; field <= NF; ++field) { split($field, pair, \"=\"); if (pair[1] == \"type\" && pair[2] == type) matched = 1; if (pair[1] == \"median_ms\") metric = pair[2] + 0 } if (matched && (!seen || metric < minimum)) { minimum = metric; seen = 1 } matched = 0 } END { if (!seen) exit 1; printf \"%.9f\", minimum }' \"$reduce_rccl\")" \
+    '1.001'
+done
 
 printf '%s\n' 'Current implemented CCCL result and no-performance-regression gate: PASS'

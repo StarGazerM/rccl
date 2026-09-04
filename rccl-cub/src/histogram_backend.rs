@@ -150,34 +150,15 @@ pub trait HistogramRead<S>: Copy {
 /// Bounds-proved scalar loads for one thread's register tile.
 #[doc(hidden)]
 pub trait HistogramThreadTileRead<S>: Copy {
-    type Pixel: HistogramThreadPixelRead<S>;
-
-    fn pixel<const PIXEL: usize>(&self) -> Option<Self::Pixel>;
-}
-
-/// One active pixel from a bounds-proved thread tile.
-#[doc(hidden)]
-pub trait HistogramThreadPixelRead<S>: Copy {
-    fn load<const CHANNEL: usize>(&self) -> S;
-}
-
-impl<S: Copy, const CHANNELS: usize> HistogramThreadPixelRead<S>
-    for read_only::ThreadPixel<'_, S, CHANNELS>
-{
-    #[inline(always)]
-    fn load<const CHANNEL: usize>(&self) -> S {
-        self.load::<CHANNEL>()
-    }
+    fn load<const PIXEL: usize, const CHANNEL: usize>(&self) -> Option<S>;
 }
 
 impl<'a, S: Copy, const PIXELS: usize, const CHANNELS: usize, const FULL: bool>
     HistogramThreadTileRead<S> for read_only::ThreadTile<'a, S, PIXELS, CHANNELS, FULL>
 {
-    type Pixel = read_only::ThreadPixel<'a, S, CHANNELS>;
-
     #[inline(always)]
-    fn pixel<const PIXEL: usize>(&self) -> Option<Self::Pixel> {
-        self.pixel::<PIXEL>()
+    fn load<const PIXEL: usize, const CHANNEL: usize>(&self) -> Option<S> {
+        self.load::<PIXEL, CHANNEL>()
     }
 }
 
@@ -577,52 +558,23 @@ pub struct ArithmeticHistogramThreadTile<
     valid_samples: usize,
 }
 
-#[derive(Clone, Copy)]
-pub struct ArithmeticHistogramThreadPixel<S, const CHANNELS: usize> {
-    samples: ArithmeticHistogramRange<S>,
-    start: usize,
-}
-
-impl<S, const CHANNELS: usize> HistogramThreadPixelRead<S>
-    for ArithmeticHistogramThreadPixel<S, CHANNELS>
-where
-    S: Copy + TryFrom<usize> + core::ops::Add<Output = S> + core::ops::Mul<Output = S>,
-{
-    #[inline(always)]
-    fn load<const CHANNEL: usize>(&self) -> S {
-        if CHANNEL >= CHANNELS {
-            cuda_device::debug::trap();
-        }
-        let Some(index) = self.start.checked_add(CHANNEL) else {
-            cuda_device::debug::trap();
-        };
-        let Ok(offset) = S::try_from(index) else {
-            cuda_device::debug::trap();
-        };
-        self.samples.start + self.samples.step * offset
-    }
-}
-
 impl<S, const PIXELS: usize, const CHANNELS: usize, const FULL: bool> HistogramThreadTileRead<S>
     for ArithmeticHistogramThreadTile<S, PIXELS, CHANNELS, FULL>
 where
     S: Copy + TryFrom<usize> + core::ops::Add<Output = S> + core::ops::Mul<Output = S>,
 {
-    type Pixel = ArithmeticHistogramThreadPixel<S, CHANNELS>;
-
     #[inline(always)]
-    fn pixel<const PIXEL: usize>(&self) -> Option<Self::Pixel> {
-        if PIXEL >= PIXELS {
+    fn load<const PIXEL: usize, const CHANNEL: usize>(&self) -> Option<S> {
+        if PIXEL >= PIXELS || CHANNEL >= CHANNELS {
             return None;
         }
-        let local = PIXEL * CHANNELS;
-        if !FULL && local + CHANNELS > self.valid_samples {
+        let local = PIXEL.checked_mul(CHANNELS)?;
+        if !FULL && local.checked_add(CHANNELS)? > self.valid_samples {
             return None;
         }
-        Some(ArithmeticHistogramThreadPixel {
-            samples: self.samples,
-            start: self.start + local,
-        })
+        let index = self.start.checked_add(local)?.checked_add(CHANNEL)?;
+        let offset = S::try_from(index).ok()?;
+        Some(self.samples.start + self.samples.step * offset)
     }
 }
 
@@ -1806,11 +1758,11 @@ fn consume_tile<
             cuda_device::debug::trap();
         };
         histogram_pixels!(PIXELS_PER_THREAD, pixel, {
-            if let Some(pixel_samples) = tile.pixel::<pixel>() {
-                histogram_channels!(CHANNELS, channel, {
-                    thread_samples[pixel][channel] = pixel_samples.load::<channel>();
-                });
-            }
+            histogram_channels!(CHANNELS, channel, {
+                if let Some(sample) = tile.load::<pixel, channel>() {
+                    thread_samples[pixel][channel] = sample;
+                }
+            });
         });
     }
 
@@ -1919,8 +1871,8 @@ fn consume_single_channel_tile<
             cuda_device::debug::trap();
         };
         histogram_pixels!(PIXELS_PER_THREAD, pixel, {
-            if let Some(pixel_sample) = tile.pixel::<pixel>() {
-                thread_samples[pixel] = pixel_sample.load::<0>();
+            if let Some(sample) = tile.load::<pixel, 0>() {
+                thread_samples[pixel] = sample;
             }
         });
     }

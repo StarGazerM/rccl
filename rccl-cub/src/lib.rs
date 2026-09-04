@@ -4,6 +4,9 @@
 //! architecture policy is selected by cargo-oxide's target cfgs, while
 //! algorithm control remains ordinary internal Rust.
 
+mod block_scan;
+mod compaction;
+mod compaction_kernels;
 mod dispatch;
 mod double_buffer;
 mod error;
@@ -12,11 +15,17 @@ mod histogram_backend;
 mod histogram_dispatch;
 mod histogram_kernels;
 mod merge;
+mod grouped_reduction;
 mod merge_sort;
 mod ordering_backend;
 mod ordering_kernels;
 mod radix;
 mod range;
+mod range_kernels;
+mod reduce;
+mod reduce_kernels;
+mod scan;
+mod scan_kernels;
 mod set_kernels;
 mod set_operation;
 mod warp;
@@ -46,17 +55,37 @@ pub use histogram::{
 };
 pub use histogram_backend::{HistogramFourSampleLoad, HistogramSample};
 pub use histogram_dispatch::{
-    device_histogram_even, device_histogram_even_arithmetic,
-    device_histogram_even_arithmetic_workspace, device_histogram_even_workspace,
+    device_histogram_even, device_histogram_even_arithmetic, device_histogram_even_arithmetic_in,
+    device_histogram_even_arithmetic_workspace, device_histogram_even_arithmetic_workspace_in,
+    device_histogram_even_in, device_histogram_even_workspace, device_histogram_even_workspace_in,
     device_histogram_range, device_histogram_range_arithmetic,
-    device_histogram_range_arithmetic_workspace, device_histogram_range_workspace,
+    device_histogram_range_arithmetic_in, device_histogram_range_arithmetic_workspace,
+    device_histogram_range_arithmetic_workspace_in, device_histogram_range_in,
+    device_histogram_range_workspace, device_histogram_range_workspace_in,
 };
 pub use radix::{RadixKey, RadixValue};
 pub use range::{
     ArithmeticRange, ContiguousRange, DeviceRange, KeyValue, RandomAccessRange, ReadRange,
     WriteRange, arithmetic_range,
 };
+#[doc(hidden)]
+pub use range::{
+    DeviceArithmetic, DeviceArithmeticRange, DeviceConstant, DeviceDiscard, DeviceIndex,
+    DeviceIndexedWrite, DeviceMap, DeviceMapInOut, DeviceMapWrite, DeviceOffset, DevicePermutation,
+    DeviceReadAt, DeviceReverse, DeviceSliceRead, DeviceSliceWrite, DeviceStride, DeviceWriteAt,
+    DeviceZip,
+};
 pub use rccl_memory::device::HistogramCounter;
+pub use reduce::{
+    DeviceReduceSumWorkspace, DeviceReduceSumWorkspaceCounts, ReduceSumValue, device_reduce_sum,
+    device_reduce_sum_in, device_reduce_sum_workspace, device_reduce_sum_workspace_counts,
+    device_reduce_sum_workspace_in,
+};
+pub use scan::{
+    DeviceScanValue, DeviceScanWorkspace, DeviceScanWorkspaceCounts, device_exclusive_sum_in_place,
+    device_inclusive_sum_in_place, device_scan_workspace, device_scan_workspace_counts,
+    device_scan_workspace_in,
+};
 pub use warp::{warp_reduce, warp_reduce_items};
 pub use workspace::{
     DeviceMergeSortKeysWorkspace, DeviceMergeSortPairsWorkspace, DeviceMergeWorkspace,

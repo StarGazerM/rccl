@@ -135,6 +135,33 @@ where
             { merge_sort_items(16) },
             { merge_sort_shared_bytes(merge_sort_items(16), 16, 0) },
         >(modules, stream, keys, workspace, order),
+        12 => merge_sort_keys_for::<
+            K,
+            F,
+            S,
+            P,
+            Keys,
+            { merge_sort_items(12) },
+            { merge_sort_shared_bytes(merge_sort_items(12), 12, 0) },
+        >(modules, stream, keys, workspace, order),
+        20 => merge_sort_keys_for::<
+            K,
+            F,
+            S,
+            P,
+            Keys,
+            { merge_sort_items(20) },
+            { merge_sort_shared_bytes(merge_sort_items(20), 20, 0) },
+        >(modules, stream, keys, workspace, order),
+        24 => merge_sort_keys_for::<
+            K,
+            F,
+            S,
+            P,
+            Keys,
+            { merge_sort_items(24) },
+            { merge_sort_shared_bytes(merge_sort_items(24), 24, 0) },
+        >(modules, stream, keys, workspace, order),
         _ => Err(unsupported_layout()),
     }
 }
@@ -259,6 +286,36 @@ where
             Output,
             { merge_sort_items(16) },
             { merge_sort_shared_bytes(merge_sort_items(16), 16, 0) },
+        >(execution, input, workspace, output, order),
+        12 => merge_sort_keys_copy_for::<
+            K,
+            F,
+            S,
+            P,
+            Input,
+            Output,
+            { merge_sort_items(12) },
+            { merge_sort_shared_bytes(merge_sort_items(12), 12, 0) },
+        >(execution, input, workspace, output, order),
+        20 => merge_sort_keys_copy_for::<
+            K,
+            F,
+            S,
+            P,
+            Input,
+            Output,
+            { merge_sort_items(20) },
+            { merge_sort_shared_bytes(merge_sort_items(20), 20, 0) },
+        >(execution, input, workspace, output, order),
+        24 => merge_sort_keys_copy_for::<
+            K,
+            F,
+            S,
+            P,
+            Input,
+            Output,
+            { merge_sort_items(24) },
+            { merge_sort_shared_bytes(merge_sort_items(24), 24, 0) },
         >(execution, input, workspace, output, order),
         _ => Err(unsupported_layout()),
     }
@@ -1047,6 +1104,9 @@ where
         4 => merge_sort_pair_key!(modules, stream, keys, values, workspace, order, 4),
         8 => merge_sort_pair_key!(modules, stream, keys, values, workspace, order, 8),
         16 => merge_sort_pair_key!(modules, stream, keys, values, workspace, order, 16),
+        12 => merge_sort_pair_key!(modules, stream, keys, values, workspace, order, 12),
+        20 => merge_sort_pair_key!(modules, stream, keys, values, workspace, order, 20),
+        24 => merge_sort_pair_key!(modules, stream, keys, values, workspace, order, 24),
         _ => Err(unsupported_layout()),
     }
 }
@@ -1310,6 +1370,36 @@ where
             output_values,
             order,
             16
+        ),
+        12 => merge_sort_pair_copy_key!(
+            execution,
+            input_keys,
+            input_values,
+            workspace,
+            output_keys,
+            output_values,
+            order,
+            12
+        ),
+        20 => merge_sort_pair_copy_key!(
+            execution,
+            input_keys,
+            input_values,
+            workspace,
+            output_keys,
+            output_values,
+            order,
+            20
+        ),
+        24 => merge_sort_pair_copy_key!(
+            execution,
+            input_keys,
+            input_values,
+            workspace,
+            output_keys,
+            output_values,
+            order,
+            24
         ),
         _ => Err(unsupported_layout()),
     }

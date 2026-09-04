@@ -373,6 +373,28 @@ unsafe impl<T: DeviceCopy, A: DeviceAllocator> ContiguousDeviceRangeMut<T>
 {
 }
 
+// SAFETY: `DeviceBuffer` owns the reported allocation, keeps its allocator and
+// stream alive, and exposes exactly the element extent allocated for `T`.
+unsafe impl<T: DeviceCopy, A: DeviceAllocator> cuda_host::KernelSliceArg
+    for DeviceBuffer<'_, T, A>
+{
+    type Elem = T;
+
+    fn cu_deviceptr(&self) -> sys::CUdeviceptr {
+        self.cu_deviceptr()
+    }
+
+    fn len(&self) -> usize {
+        self.len()
+    }
+}
+
+// SAFETY: `&mut DeviceBuffer` preserves exclusive write access for the launch.
+unsafe impl<T: DeviceCopy, A: DeviceAllocator> cuda_host::KernelSliceArgMut
+    for DeviceBuffer<'_, T, A>
+{
+}
+
 /// Typed device storage whose elements may not yet be initialized.
 ///
 /// This type deliberately does not implement `ContiguousDeviceRange<T>` and cannot copy

@@ -15,36 +15,18 @@
 /// CUDA block algorithms commonly prove a complete global-memory tile once,
 /// then issue several statically unrolled register loads from that tile. A
 /// Rust slice access at every unrolled coordinate would repeat the same bounds
-/// failure edge and retain it in PTX. This capability keeps the shared borrow,
-/// validates the complete per-thread extent in [`Self::new`], and only exposes
-/// coordinates whose pixel and channel are const parameters.
+/// failure edge and retain it in PTX. This capability keeps only the proved
+/// subslice: its data pointer is the tile base and its length is the live
+/// sample count. [`Self::load`] exposes only const-selected coordinates and
+/// lowers those two scalar fields directly to SSA.
 ///
 /// `FULL` preserves the same specialization as CUB's complete and partial
-/// tile overloads. In the partial form, [`Self::pixel`] returns `None` exactly
-/// for pixels beyond `valid_samples`; the backing slice extent was still
+/// tile overloads. In the partial form, [`Self::load`] returns `None` exactly
+/// for pixels beyond the live sample count; the backing slice extent was still
 /// checked once by the constructor.
 #[derive(Clone, Copy)]
 pub struct ThreadTile<'a, T, const PIXELS: usize, const CHANNELS: usize, const FULL: bool> {
     samples: &'a [T],
-    valid_samples: usize,
-}
-
-/// One active pixel borrowed from a [`ThreadTile`].
-#[derive(Clone, Copy)]
-pub struct ThreadPixel<'a, T, const CHANNELS: usize> {
-    samples: &'a [T],
-    base: usize,
-}
-
-impl<'a, T: Copy, const CHANNELS: usize> ThreadPixel<'a, T, CHANNELS> {
-    /// Load one compile-time channel from this active pixel.
-    #[inline(always)]
-    pub fn load<const CHANNEL: usize>(&self) -> T {
-        if CHANNEL >= CHANNELS {
-            crate::debug::trap();
-        }
-        __load_at(self.samples, self.base + CHANNEL)
-    }
 }
 
 impl<'a, T: Copy, const PIXELS: usize, const CHANNELS: usize, const FULL: bool>
@@ -72,32 +54,30 @@ impl<'a, T: Copy, const PIXELS: usize, const CHANNELS: usize, const FULL: bool>
         if valid_samples == 0 {
             return Some(Self {
                 samples: &input[..0],
-                valid_samples,
             });
         }
         let end = start.checked_add(valid_samples)?;
         let samples = input.get(start..end)?;
-        Some(Self {
-            samples,
-            valid_samples,
-        })
+        Some(Self { samples })
     }
 
-    /// Borrow one statically selected pixel when its complete channel group is
-    /// active. `None` is only the normal partial-tile inactive state.
+    /// Load one statically selected channel from a statically selected pixel.
+    ///
+    /// `None` is the normal partial-tile inactive state. The `FULL`
+    /// specialization needs no dynamic access check because construction of
+    /// this private-field capability proved the complete tile. In both forms,
+    /// the private compiler intrinsic performs the access without rebuilding
+    /// the slice assertion.
     #[inline(always)]
-    pub fn pixel<const PIXEL: usize>(&self) -> Option<ThreadPixel<'a, T, CHANNELS>> {
-        if PIXEL >= PIXELS {
+    pub fn load<const PIXEL: usize, const CHANNEL: usize>(&self) -> Option<T> {
+        if PIXEL >= PIXELS || CHANNEL >= CHANNELS {
             return None;
         }
         let local = PIXEL * CHANNELS;
-        if !FULL && local + CHANNELS > self.valid_samples {
+        if !FULL && local + CHANNELS > self.samples.len() {
             return None;
         }
-        Some(ThreadPixel {
-            samples: self.samples,
-            base: local,
-        })
+        Some(__load_at(self.samples, local + CHANNEL))
     }
 }
 
@@ -143,8 +123,8 @@ pub fn upper_bound<T: Copy + PartialOrd>(input: &[T], sample: T) -> i32 {
 ///
 /// This function is private so arbitrary device code cannot present an
 /// unproved index. Its call sites are the interval-preserving search above and
-/// the [`ThreadPixel`] token, whose private fields can only be produced after
-/// [`ThreadTile`] has validated the complete active extent.
+/// [`ThreadTile::load`], whose private slice can only be produced after
+/// [`ThreadTile::new`] has validated the complete active extent.
 #[inline(never)]
 fn __load_at<T: Copy>(input: &[T], index: usize) -> T {
     input[index]
@@ -155,22 +135,23 @@ mod tests {
     use super::ThreadTile;
 
     #[test]
-    fn thread_tile_proves_one_extent_and_keeps_partial_pixels_explicit() {
+    fn thread_tile_proves_one_extent_and_keeps_partial_loads_explicit() {
         let samples = [0i32; 12];
         let full =
             ThreadTile::<_, 2, 2, true>::new(&samples, 4, 4).expect("complete two-pixel extent");
-        assert!(full.pixel::<0>().is_some());
-        assert!(full.pixel::<1>().is_some());
+        assert_eq!(full.load::<0, 0>(), Some(0));
+        assert_eq!(full.load::<1, 1>(), Some(0));
 
         let partial =
             ThreadTile::<_, 2, 2, false>::new(&samples, 8, 2).expect("one complete active pixel");
-        assert!(partial.pixel::<0>().is_some());
-        assert!(partial.pixel::<1>().is_none());
-
+        assert_eq!(partial.load::<0, 0>(), Some(0));
+        assert_eq!(partial.load::<0, 1>(), Some(0));
+        assert_eq!(partial.load::<1, 0>(), None);
+        assert_eq!(partial.load::<0, 2>(), None);
         assert!(ThreadTile::<_, 2, 2, true>::new(&samples, 9, 4).is_none());
         assert!(ThreadTile::<_, 2, 2, false>::new(&samples, 0, 3).is_none());
         let inactive = ThreadTile::<_, 2, 2, false>::new(&samples, usize::MAX, 0)
             .expect("inactive CUDA threads never form their nominal address");
-        assert!(inactive.pixel::<0>().is_none());
+        assert_eq!(inactive.load::<0, 0>(), None);
     }
 }

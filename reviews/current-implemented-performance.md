@@ -6,18 +6,25 @@ Reference: CCCL `571f2fc3bc53cd710e306ad43d58995c1fe4219f`
 Backend: pinned cuda-oxide `6bc513bbcdda781b13a328cf692df86f2215acf9`
 Runtime device: SM89
 
-Refresh status (2026-08-31): no replacement timing row is recorded while PID
-2614460 (`VLLM::EngineCore`, owned by another user) holds 46,392 MiB on the
-only GPU. The current-subset and ordering scripts now reject that state before
-building or sampling, just as the set-operation gate already does. The older
-isolated measurements below remain failure evidence; a shared-device run is
-not used to overwrite them or manufacture a pass.
+Refresh status (2026-09-03): local `scripts/test-current-performance-parity.sh` execution cannot run while PID 1527736 (`VLLM::EngineCore`) and other users occupy the single GPU. The script therefore exits before sampling and no local row is updated or rewritten.
+Runpod checkpoint evidence is used for reduce parity only: Runpod `vj3icxcclyqg8f` on exclusive RTX 6000 Ada reports `DeviceReduce::Sum` ratios on 67,108,864 items at `u32=1.000365`, `i32=1.000784`, `f32=1.000182` with `temp_bytes=17407`.
 
 `scripts/test-current-performance-parity.sh` builds the Rust programs through
 the standard cuda-oxide workflow and independently compiles the two pinned
 CCCL reference programs. Each pair has identical element type, element count,
 initialization, launch work, warm-ups, samples, repeated launches, event
 synchronization, and full result oracle.
+
+## `DeviceReduce::Sum` external reduce checkpoint (exclusive Runpod)
+
+| Type | RCCL / CCCL median ratio | Temp bytes |
+|---|---:|---:|
+| `u32` | `1.000365` | `17407` |
+| `i32` | `1.000784` | `17407` |
+| `f32` | `1.000182` | `17407` |
+
+This checkpoint is timing parity evidence only for the currently implemented contiguous `u32`/`i32`/`f32` slices on Runpod pod `vj3icxcclyqg8f`; it does not claim full `reduce`/`scan`/`reduce_by_key` parity.
+
 
 | Implemented intersection | RCCL minimum median | CCCL minimum median | RCCL / CCCL | Gate result |
 |---|---:|---:|---:|---:|

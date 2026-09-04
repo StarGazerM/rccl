@@ -1,7 +1,9 @@
 use core::ops::Range;
 
-use cuda_core::{CudaStream, DeviceBuffer, DeviceCopy};
-use cuda_host::KernelSliceArg;
+use cuda_core::{CudaStream, DeviceBuffer as CudaDeviceBuffer, DeviceCopy};
+use cuda_host::{KernelSliceArg, KernelSliceArgMut};
+use rccl_memory::DeviceAllocator;
+type DeviceBuffer<T> = CudaDeviceBuffer<T>;
 
 use crate::{
     ArithmeticRange, DeviceAlgorithmError, DeviceRange,
@@ -115,14 +117,22 @@ pub const fn histogram_shared_bytes(
 
 /// Mutable launch storage shared by the init and sweep kernels.
 #[doc(hidden)]
-pub struct HistogramLaunchStorage<'a, C: DeviceCopy, const ACTIVE: usize> {
-    pub output: &'a mut DeviceBuffer<C>,
-    pub privatized: &'a mut DeviceBuffer<C>,
-    pub queue: &'a mut DeviceBuffer<i32>,
+pub struct HistogramLaunchStorage<
+    'a,
+    C: DeviceCopy,
+    const ACTIVE: usize,
+    Output = CudaDeviceBuffer<C>,
+    Privatized = CudaDeviceBuffer<C>,
+    Queue = CudaDeviceBuffer<i32>,
+> {
+    pub output: &'a mut Output,
+    pub privatized: &'a mut Privatized,
+    pub queue: &'a mut Queue,
     pub output_lengths: [usize; ACTIVE],
     pub output_offsets: [usize; ACTIVE],
     pub privatized_lengths: [usize; ACTIVE],
     pub privatized_offsets: [usize; ACTIVE],
+    pub __marker: core::marker::PhantomData<C>,
 }
 
 /// One immutable device allocation plus validated per-channel level ranges.
@@ -157,11 +167,14 @@ pub trait HistogramInitKernel<C, const ACTIVE: usize>
 where
     C: HistogramScalar + rccl_memory::device::HistogramCounter,
 {
-    fn launch_histogram_init(
+    fn launch_histogram_init<Output, Queue>(
         &self,
         stream: &CudaStream,
-        storage: HistogramLaunchStorage<'_, C, ACTIVE>,
-    ) -> Result<(), DeviceAlgorithmError>;
+        storage: HistogramLaunchStorage<'_, C, ACTIVE, Output, Output, Queue>,
+    ) -> Result<(), DeviceAlgorithmError>
+    where
+        Output: KernelSliceArgMut<Elem = C>,
+        Queue: KernelSliceArgMut<Elem = i32>;
 }
 
 #[doc(hidden)]
@@ -197,52 +210,60 @@ pub trait HistogramKernel<
         S: TryFrom<usize> + core::ops::Add<Output = S> + core::ops::Mul<Output = S>;
 
     #[allow(clippy::too_many_arguments)]
-    fn launch_histogram_even<Samples>(
+    fn launch_histogram_even<Samples, Output, Queue>(
         &self,
         stream: &CudaStream,
         samples: &Samples,
         transforms: [<S as HistogramSample<L>>::EvenTransform; ACTIVE],
-        storage: HistogramLaunchStorage<'_, C, ACTIVE>,
-        geometry: HistogramLaunchGeometry<O>,
-    ) -> Result<(), DeviceAlgorithmError>
-    where
-        Samples: KernelSliceArg<Elem = S>;
-
-    #[allow(clippy::too_many_arguments)]
-    fn launch_histogram_range<Samples>(
-        &self,
-        stream: &CudaStream,
-        samples: &Samples,
-        levels: HistogramLevelStorage<'_, L, ACTIVE>,
-        storage: HistogramLaunchStorage<'_, C, ACTIVE>,
+        storage: HistogramLaunchStorage<'_, C, ACTIVE, Output, Output, Queue>,
         geometry: HistogramLaunchGeometry<O>,
     ) -> Result<(), DeviceAlgorithmError>
     where
         Samples: KernelSliceArg<Elem = S>,
+        Output: KernelSliceArgMut<Elem = C>,
+        Queue: KernelSliceArgMut<Elem = i32>;
+
+    #[allow(clippy::too_many_arguments)]
+    fn launch_histogram_range<Samples, Output, Queue>(
+        &self,
+        stream: &CudaStream,
+        samples: &Samples,
+        levels: HistogramLevelStorage<'_, L, ACTIVE>,
+        storage: HistogramLaunchStorage<'_, C, ACTIVE, Output, Output, Queue>,
+        geometry: HistogramLaunchGeometry<O>,
+    ) -> Result<(), DeviceAlgorithmError>
+    where
+        Samples: KernelSliceArg<Elem = S>,
+        Output: KernelSliceArgMut<Elem = C>,
+        Queue: KernelSliceArgMut<Elem = i32>,
         L: PartialOrd;
 
     #[allow(clippy::too_many_arguments)]
-    fn launch_histogram_even_arithmetic(
+    fn launch_histogram_even_arithmetic<Output, Queue>(
         &self,
         stream: &CudaStream,
         samples: &ArithmeticRange<S>,
         transforms: [<S as HistogramSample<L>>::EvenTransform; ACTIVE],
-        storage: HistogramLaunchStorage<'_, C, ACTIVE>,
+        storage: HistogramLaunchStorage<'_, C, ACTIVE, Output, Output, Queue>,
         geometry: HistogramLaunchGeometry<O>,
     ) -> Result<(), DeviceAlgorithmError>
     where
+        Output: KernelSliceArgMut<Elem = C>,
+        Queue: KernelSliceArgMut<Elem = i32>,
         S: TryFrom<usize> + core::ops::Add<Output = S> + core::ops::Mul<Output = S>;
 
     #[allow(clippy::too_many_arguments)]
-    fn launch_histogram_range_arithmetic(
+    fn launch_histogram_range_arithmetic<Output, Queue>(
         &self,
         stream: &CudaStream,
         samples: &ArithmeticRange<S>,
         levels: HistogramLevelStorage<'_, L, ACTIVE>,
-        storage: HistogramLaunchStorage<'_, C, ACTIVE>,
+        storage: HistogramLaunchStorage<'_, C, ACTIVE, Output, Output, Queue>,
         geometry: HistogramLaunchGeometry<O>,
     ) -> Result<(), DeviceAlgorithmError>
     where
+        Output: KernelSliceArgMut<Elem = C>,
+        Queue: KernelSliceArgMut<Elem = i32>,
         S: TryFrom<usize> + core::ops::Add<Output = S> + core::ops::Mul<Output = S>,
         L: PartialOrd;
 }
@@ -408,15 +429,36 @@ where
 {
 }
 
+#[doc(hidden)]
+pub trait HistogramHostCopy<C: DeviceCopy> {
+    fn to_host_vec(&self, stream: &CudaStream) -> Result<Vec<C>, DeviceAlgorithmError>;
+}
+
+impl<C: DeviceCopy> HistogramHostCopy<C> for CudaDeviceBuffer<C> {
+    fn to_host_vec(&self, stream: &CudaStream) -> Result<Vec<C>, DeviceAlgorithmError> {
+        CudaDeviceBuffer::to_host_vec(self, stream).map_err(DeviceAlgorithmError::Driver)
+    }
+}
+
+impl<C, A> HistogramHostCopy<C> for rccl_memory::DeviceBuffer<'_, C, A>
+where
+    C: DeviceCopy,
+    A: DeviceAllocator,
+{
+    fn to_host_vec(&self, _stream: &CudaStream) -> Result<Vec<C>, DeviceAlgorithmError> {
+        rccl_memory::DeviceBuffer::to_host_vec(self).map_err(DeviceAlgorithmError::Memory)
+    }
+}
+
 /// A device-wide histogram whose channel storage is one affine allocation.
-///
 /// Channel `i` occupies `lengths()[i]` consecutive counters.  Keeping the
 /// channels together replaces CUB's host array of raw output pointers while
 /// preserving its independently-sized channel histograms.
-pub struct DeviceHistogram<C: DeviceCopy, const ACTIVE_CHANNELS: usize> {
-    counters: DeviceBuffer<C>,
+pub struct DeviceHistogram<C: DeviceCopy, const ACTIVE_CHANNELS: usize, B = CudaDeviceBuffer<C>> {
+    counters: B,
     lengths: [usize; ACTIVE_CHANNELS],
     offsets: [usize; ACTIVE_CHANNELS],
+    _marker: core::marker::PhantomData<C>,
 }
 
 impl<C: DeviceCopy, const ACTIVE_CHANNELS: usize> DeviceHistogram<C, ACTIVE_CHANNELS> {
@@ -425,14 +467,45 @@ impl<C: DeviceCopy, const ACTIVE_CHANNELS: usize> DeviceHistogram<C, ACTIVE_CHAN
         lengths: [usize; ACTIVE_CHANNELS],
     ) -> Result<Self, DeviceAlgorithmError> {
         let (offsets, total) = channel_layout(lengths)?;
-        let counters = DeviceBuffer::zeroed(stream, total).map_err(DeviceAlgorithmError::Driver)?;
+        let counters =
+            CudaDeviceBuffer::zeroed(stream, total).map_err(DeviceAlgorithmError::Driver)?;
         Ok(Self {
             counters,
             lengths,
             offsets,
+            _marker: core::marker::PhantomData,
         })
     }
+}
 
+impl<'stream, C, A, const ACTIVE_CHANNELS: usize>
+    DeviceHistogram<C, ACTIVE_CHANNELS, rccl_memory::DeviceBuffer<'stream, C, A>>
+where
+    C: DeviceCopy,
+    A: DeviceAllocator,
+{
+    pub fn new_in(
+        allocator: A,
+        stream: &'stream CudaStream,
+        lengths: [usize; ACTIVE_CHANNELS],
+    ) -> Result<Self, DeviceAlgorithmError> {
+        let (offsets, total) = channel_layout(lengths)?;
+        let counters = rccl_memory::DeviceBuffer::zeroed_in(allocator, stream, total)
+            .map_err(DeviceAlgorithmError::Memory)?;
+        Ok(Self {
+            counters,
+            lengths,
+            offsets,
+            _marker: core::marker::PhantomData,
+        })
+    }
+}
+
+impl<C, B, const ACTIVE_CHANNELS: usize> DeviceHistogram<C, ACTIVE_CHANNELS, B>
+where
+    C: DeviceCopy,
+    B: DeviceRange,
+{
     pub fn lengths(&self) -> &[usize; ACTIVE_CHANNELS] {
         &self.lengths
     }
@@ -448,11 +521,12 @@ impl<C: DeviceCopy, const ACTIVE_CHANNELS: usize> DeviceHistogram<C, ACTIVE_CHAN
     pub fn to_host_channels(
         &self,
         stream: &CudaStream,
-    ) -> Result<[Vec<C>; ACTIVE_CHANNELS], DeviceAlgorithmError> {
-        let flat = self
-            .counters
-            .to_host_vec(stream)
-            .map_err(DeviceAlgorithmError::Driver)?;
+    ) -> Result<[Vec<C>; ACTIVE_CHANNELS], DeviceAlgorithmError>
+    where
+        C: Clone,
+        B: HistogramHostCopy<C>,
+    {
+        let flat = self.counters.to_host_vec(stream)?;
         Ok(core::array::from_fn(|channel| {
             let begin = self.offsets[channel];
             let end = begin + self.lengths[channel];
@@ -461,13 +535,7 @@ impl<C: DeviceCopy, const ACTIVE_CHANNELS: usize> DeviceHistogram<C, ACTIVE_CHAN
     }
 
     #[doc(hidden)]
-    pub fn __parts_mut(
-        &mut self,
-    ) -> (
-        &mut DeviceBuffer<C>,
-        [usize; ACTIVE_CHANNELS],
-        [usize; ACTIVE_CHANNELS],
-    ) {
+    pub fn __parts_mut(&mut self) -> (&mut B, [usize; ACTIVE_CHANNELS], [usize; ACTIVE_CHANNELS]) {
         (&mut self.counters, self.lengths, self.offsets)
     }
 }
@@ -698,28 +766,41 @@ pub fn histogram_uses_i32_offsets<S>(num_rows: usize, row_stride_samples: usize)
 }
 
 /// Opaque CUB histogram privatization and queue storage.
-pub struct DeviceHistogramWorkspace<C: DeviceCopy, const ACTIVE_CHANNELS: usize> {
-    privatized: DeviceBuffer<C>,
-    queue: DeviceBuffer<i32>,
+pub struct DeviceHistogramWorkspace<
+    C: DeviceCopy,
+    const ACTIVE_CHANNELS: usize,
+    B = CudaDeviceBuffer<C>,
+    Q = CudaDeviceBuffer<i32>,
+> {
+    privatized: B,
+    queue: Q,
     privatized_lengths: [usize; ACTIVE_CHANNELS],
     privatized_offsets: [usize; ACTIVE_CHANNELS],
     blocks_per_row: usize,
     blocks_per_col: usize,
     region: (usize, usize, usize),
     narrow_offsets: bool,
+    _marker: core::marker::PhantomData<C>,
 }
 
 /// Affine decomposition used only by the generated histogram launch.
 #[doc(hidden)]
-pub struct DeviceHistogramWorkspaceParts<'a, C: DeviceCopy, const ACTIVE_CHANNELS: usize> {
-    pub privatized: &'a mut DeviceBuffer<C>,
-    pub queue: &'a mut DeviceBuffer<i32>,
+pub struct DeviceHistogramWorkspaceParts<
+    'a,
+    C: DeviceCopy,
+    const ACTIVE_CHANNELS: usize,
+    B = CudaDeviceBuffer<C>,
+    Q = CudaDeviceBuffer<i32>,
+> {
+    pub privatized: &'a mut B,
+    pub queue: &'a mut Q,
     pub privatized_lengths: [usize; ACTIVE_CHANNELS],
     pub privatized_offsets: [usize; ACTIVE_CHANNELS],
     pub blocks_per_row: usize,
     pub blocks_per_col: usize,
     pub region: (usize, usize, usize),
     pub narrow_offsets: bool,
+    pub __marker: core::marker::PhantomData<C>,
 }
 
 impl<C: DeviceCopy, const ACTIVE_CHANNELS: usize> DeviceHistogramWorkspace<C, ACTIVE_CHANNELS> {
@@ -732,19 +813,11 @@ impl<C: DeviceCopy, const ACTIVE_CHANNELS: usize> DeviceHistogramWorkspace<C, AC
         region: (usize, usize, usize),
         narrow_offsets: bool,
     ) -> Result<Self, DeviceAlgorithmError> {
-        let blocks = blocks_per_row
-            .checked_mul(blocks_per_col)
-            .ok_or(DeviceAlgorithmError::SizeOverflow)?;
-        let mut allocation_lengths = [0usize; ACTIVE_CHANNELS];
-        for channel in 0..ACTIVE_CHANNELS {
-            allocation_lengths[channel] = privatized_lengths[channel]
-                .checked_mul(blocks)
-                .ok_or(DeviceAlgorithmError::SizeOverflow)?;
-        }
-        let (privatized_offsets, total) = channel_layout(allocation_lengths)?;
+        let (privatized_offsets, total) =
+            workspace_channel_layout(privatized_lengths, blocks_per_row, blocks_per_col)?;
         let privatized =
-            DeviceBuffer::zeroed(stream, total).map_err(DeviceAlgorithmError::Driver)?;
-        let queue = DeviceBuffer::zeroed(stream, 1).map_err(DeviceAlgorithmError::Driver)?;
+            CudaDeviceBuffer::zeroed(stream, total).map_err(DeviceAlgorithmError::Driver)?;
+        let queue = CudaDeviceBuffer::zeroed(stream, 1).map_err(DeviceAlgorithmError::Driver)?;
         Ok(Self {
             privatized,
             queue,
@@ -754,12 +827,59 @@ impl<C: DeviceCopy, const ACTIVE_CHANNELS: usize> DeviceHistogramWorkspace<C, AC
             blocks_per_col,
             region,
             narrow_offsets,
+            _marker: core::marker::PhantomData,
         })
     }
+}
 
+impl<'stream, C, A, const ACTIVE_CHANNELS: usize>
+    DeviceHistogramWorkspace<
+        C,
+        ACTIVE_CHANNELS,
+        rccl_memory::DeviceBuffer<'stream, C, A>,
+        rccl_memory::DeviceBuffer<'stream, i32, A>,
+    >
+where
+    C: DeviceCopy,
+    A: DeviceAllocator + Clone,
+{
     #[doc(hidden)]
-    pub fn __parts_mut(&mut self) -> DeviceHistogramWorkspaceParts<'_, C, ACTIVE_CHANNELS> {
-        DeviceHistogramWorkspaceParts {
+    pub fn __new_in(
+        allocator: A,
+        stream: &'stream CudaStream,
+        privatized_lengths: [usize; ACTIVE_CHANNELS],
+        blocks_per_row: usize,
+        blocks_per_col: usize,
+        region: (usize, usize, usize),
+        narrow_offsets: bool,
+    ) -> Result<Self, DeviceAlgorithmError> {
+        let (privatized_offsets, total) =
+            workspace_channel_layout(privatized_lengths, blocks_per_row, blocks_per_col)?;
+        let privatized = rccl_memory::DeviceBuffer::zeroed_in(allocator.clone(), stream, total)
+            .map_err(DeviceAlgorithmError::Memory)?;
+        let queue = rccl_memory::DeviceBuffer::zeroed_in(allocator, stream, 1)
+            .map_err(DeviceAlgorithmError::Memory)?;
+        Ok(Self {
+            privatized,
+            queue,
+            privatized_lengths,
+            privatized_offsets,
+            blocks_per_row,
+            blocks_per_col,
+            region,
+            narrow_offsets,
+            _marker: core::marker::PhantomData,
+        })
+    }
+}
+
+impl<C, B, Q, const ACTIVE_CHANNELS: usize> DeviceHistogramWorkspace<C, ACTIVE_CHANNELS, B, Q>
+where
+    C: DeviceCopy,
+{
+    #[doc(hidden)]
+    pub fn __parts_mut(&mut self) -> DeviceHistogramWorkspaceParts<'_, C, ACTIVE_CHANNELS, B, Q> {
+        DeviceHistogramWorkspaceParts::<C, ACTIVE_CHANNELS, B, Q> {
             privatized: &mut self.privatized,
             queue: &mut self.queue,
             privatized_lengths: self.privatized_lengths,
@@ -768,7 +888,60 @@ impl<C: DeviceCopy, const ACTIVE_CHANNELS: usize> DeviceHistogramWorkspace<C, AC
             blocks_per_col: self.blocks_per_col,
             region: self.region,
             narrow_offsets: self.narrow_offsets,
+            __marker: core::marker::PhantomData,
         }
+    }
+}
+
+struct HistogramWorkspaceLayout<const ACTIVE: usize> {
+    privatized_lengths: [usize; ACTIVE],
+    blocks_per_row: usize,
+    blocks_per_col: usize,
+    region: (usize, usize, usize),
+    narrow_offsets: bool,
+}
+
+impl<const ACTIVE: usize> HistogramWorkspaceLayout<ACTIVE> {
+    fn allocate<C: DeviceCopy>(
+        self,
+        stream: &CudaStream,
+    ) -> Result<DeviceHistogramWorkspace<C, ACTIVE>, DeviceAlgorithmError> {
+        DeviceHistogramWorkspace::__new(
+            stream,
+            self.privatized_lengths,
+            self.blocks_per_row,
+            self.blocks_per_col,
+            self.region,
+            self.narrow_offsets,
+        )
+    }
+
+    fn allocate_in<'stream, C, A>(
+        self,
+        allocator: A,
+        stream: &'stream CudaStream,
+    ) -> Result<
+        DeviceHistogramWorkspace<
+            C,
+            ACTIVE,
+            rccl_memory::DeviceBuffer<'stream, C, A>,
+            rccl_memory::DeviceBuffer<'stream, i32, A>,
+        >,
+        DeviceAlgorithmError,
+    >
+    where
+        C: DeviceCopy,
+        A: DeviceAllocator + Clone,
+    {
+        DeviceHistogramWorkspace::__new_in(
+            allocator,
+            stream,
+            self.privatized_lengths,
+            self.blocks_per_row,
+            self.blocks_per_col,
+            self.region,
+            self.narrow_offsets,
+        )
     }
 }
 
@@ -794,7 +967,7 @@ fn histogram_workspace_variant<
     privatized_lengths: [usize; ACTIVE],
     region: (usize, usize, usize),
     narrow_offsets: bool,
-) -> Result<DeviceHistogramWorkspace<C, ACTIVE>, DeviceAlgorithmError>
+) -> Result<HistogramWorkspaceLayout<ACTIVE>, DeviceAlgorithmError>
 where
     S: HistogramScalar + HistogramSample<L> + HistogramFourSampleLoad,
     C: HistogramScalar + rccl_memory::device::HistogramCounter,
@@ -836,25 +1009,25 @@ where
         .checked_div(blocks_per_row)
         .unwrap_or(0)
         .min(region.1);
-    DeviceHistogramWorkspace::__new(
-        stream,
+    Ok(HistogramWorkspaceLayout {
         privatized_lengths,
         blocks_per_row,
         blocks_per_col,
         region,
         narrow_offsets,
-    )
+    })
 }
 
-/// Allocate the reusable histogram workspace using the cfg-selected policy.
+/// Compute reusable histogram workspace geometry using the cfg-selected policy.
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn device_histogram_workspace<
+fn device_histogram_workspace_layout<
     S,
     C,
     L,
     Samples,
     M,
+    B,
     const CHANNELS: usize,
     const ACTIVE: usize,
     const EVEN: bool,
@@ -869,13 +1042,14 @@ pub(crate) fn device_histogram_workspace<
     module: &M,
     samples: &Samples,
     region: HistogramRegion,
-    output: &DeviceHistogram<C, ACTIVE>,
-) -> Result<DeviceHistogramWorkspace<C, ACTIVE>, DeviceAlgorithmError>
+    output: &DeviceHistogram<C, ACTIVE, B>,
+) -> Result<HistogramWorkspaceLayout<ACTIVE>, DeviceAlgorithmError>
 where
     S: HistogramScalar + HistogramSample<L> + HistogramFourSampleLoad,
     C: HistogramScalar + rccl_memory::device::HistogramCounter,
     L: HistogramScalar + PartialOrd,
     Samples: DeviceRange + ?Sized,
+    B: DeviceRange,
     M: HistogramPolicyKernels<
             S,
             C,
@@ -912,7 +1086,7 @@ where
         output_lengths
     };
     let narrow_offsets = histogram_uses_i32_offsets::<S>(resolved.1, resolved.2);
-    if BYTE_SAMPLE || max_bins <= 256 {
+    let layout = if BYTE_SAMPLE || max_bins <= 256 {
         if narrow_offsets {
             histogram_workspace_variant::<
                 S,
@@ -982,7 +1156,147 @@ where
             false,
             GLOBAL_BYTES,
         >(stream, module, privatized_lengths, resolved, false)
-    }
+    }?;
+    Ok(layout)
+}
+
+/// Allocate the reusable histogram workspace using the cfg-selected policy.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn device_histogram_workspace<
+    S,
+    C,
+    L,
+    Samples,
+    M,
+    const CHANNELS: usize,
+    const ACTIVE: usize,
+    const EVEN: bool,
+    const THREADS: u32,
+    const PIXELS: usize,
+    const RLE: bool,
+    const BYTE_SAMPLE: bool,
+    const SHARED_BYTES: usize,
+    const GLOBAL_BYTES: usize,
+>(
+    stream: &CudaStream,
+    module: &M,
+    samples: &Samples,
+    region: HistogramRegion,
+    output: &DeviceHistogram<C, ACTIVE>,
+) -> Result<DeviceHistogramWorkspace<C, ACTIVE>, DeviceAlgorithmError>
+where
+    S: HistogramScalar + HistogramSample<L> + HistogramFourSampleLoad,
+    C: HistogramScalar + rccl_memory::device::HistogramCounter,
+    L: HistogramScalar + PartialOrd,
+    Samples: DeviceRange + ?Sized,
+    M: HistogramPolicyKernels<
+            S,
+            C,
+            L,
+            CHANNELS,
+            ACTIVE,
+            THREADS,
+            PIXELS,
+            RLE,
+            BYTE_SAMPLE,
+            SHARED_BYTES,
+            GLOBAL_BYTES,
+        >,
+{
+    let layout = device_histogram_workspace_layout::<
+        S,
+        C,
+        L,
+        Samples,
+        M,
+        CudaDeviceBuffer<C>,
+        CHANNELS,
+        ACTIVE,
+        EVEN,
+        THREADS,
+        PIXELS,
+        RLE,
+        BYTE_SAMPLE,
+        SHARED_BYTES,
+        GLOBAL_BYTES,
+    >(stream, module, samples, region, output)?;
+    layout.allocate(stream)
+}
+
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn device_histogram_workspace_in<
+    'stream,
+    S,
+    C,
+    L,
+    Samples,
+    M,
+    A,
+    const CHANNELS: usize,
+    const ACTIVE: usize,
+    const EVEN: bool,
+    const THREADS: u32,
+    const PIXELS: usize,
+    const RLE: bool,
+    const BYTE_SAMPLE: bool,
+    const SHARED_BYTES: usize,
+    const GLOBAL_BYTES: usize,
+>(
+    allocator: A,
+    stream: &'stream CudaStream,
+    module: &M,
+    samples: &Samples,
+    region: HistogramRegion,
+    output: &DeviceHistogram<C, ACTIVE, rccl_memory::DeviceBuffer<'stream, C, A>>,
+) -> Result<
+    DeviceHistogramWorkspace<
+        C,
+        ACTIVE,
+        rccl_memory::DeviceBuffer<'stream, C, A>,
+        rccl_memory::DeviceBuffer<'stream, i32, A>,
+    >,
+    DeviceAlgorithmError,
+>
+where
+    S: HistogramScalar + HistogramSample<L> + HistogramFourSampleLoad,
+    C: HistogramScalar + rccl_memory::device::HistogramCounter,
+    L: HistogramScalar + PartialOrd,
+    Samples: DeviceRange + ?Sized,
+    A: DeviceAllocator + Clone,
+    M: HistogramPolicyKernels<
+            S,
+            C,
+            L,
+            CHANNELS,
+            ACTIVE,
+            THREADS,
+            PIXELS,
+            RLE,
+            BYTE_SAMPLE,
+            SHARED_BYTES,
+            GLOBAL_BYTES,
+        >,
+{
+    let layout = device_histogram_workspace_layout::<
+        S,
+        C,
+        L,
+        Samples,
+        M,
+        rccl_memory::DeviceBuffer<'stream, C, A>,
+        CHANNELS,
+        ACTIVE,
+        EVEN,
+        THREADS,
+        PIXELS,
+        RLE,
+        BYTE_SAMPLE,
+        SHARED_BYTES,
+        GLOBAL_BYTES,
+    >(stream, module, samples, region, output)?;
+    layout.allocate_in(allocator, stream)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1007,7 +1321,7 @@ fn histogram_arithmetic_workspace_variant<
     privatized_lengths: [usize; ACTIVE],
     region: (usize, usize, usize),
     narrow_offsets: bool,
-) -> Result<DeviceHistogramWorkspace<C, ACTIVE>, DeviceAlgorithmError>
+) -> Result<HistogramWorkspaceLayout<ACTIVE>, DeviceAlgorithmError>
 where
     S: HistogramScalar
         + HistogramSample<L>
@@ -1054,14 +1368,158 @@ where
         .checked_div(blocks_per_row)
         .unwrap_or(0)
         .min(region.1);
-    DeviceHistogramWorkspace::__new(
-        stream,
+    Ok(HistogramWorkspaceLayout {
         privatized_lengths,
         blocks_per_row,
         blocks_per_col,
         region,
         narrow_offsets,
-    )
+    })
+}
+
+/// Arithmetic-range workspace layout variant with its honest sample capability bound.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+fn device_histogram_arithmetic_workspace_layout<
+    S,
+    C,
+    L,
+    M,
+    B,
+    const CHANNELS: usize,
+    const ACTIVE: usize,
+    const EVEN: bool,
+    const THREADS: u32,
+    const PIXELS: usize,
+    const RLE: bool,
+    const BYTE_SAMPLE: bool,
+    const SHARED_BYTES: usize,
+    const GLOBAL_BYTES: usize,
+>(
+    stream: &CudaStream,
+    module: &M,
+    samples: &ArithmeticRange<S>,
+    region: HistogramRegion,
+    output: &DeviceHistogram<C, ACTIVE, B>,
+) -> Result<HistogramWorkspaceLayout<ACTIVE>, DeviceAlgorithmError>
+where
+    S: HistogramScalar
+        + HistogramSample<L>
+        + HistogramFourSampleLoad
+        + TryFrom<usize>
+        + core::ops::Add<Output = S>
+        + core::ops::Mul<Output = S>,
+    C: HistogramScalar + rccl_memory::device::HistogramCounter,
+    L: HistogramScalar + PartialOrd,
+    B: DeviceRange,
+    M: HistogramPolicyKernels<
+            S,
+            C,
+            L,
+            CHANNELS,
+            ACTIVE,
+            THREADS,
+            PIXELS,
+            RLE,
+            BYTE_SAMPLE,
+            SHARED_BYTES,
+            GLOBAL_BYTES,
+        >,
+{
+    let resolved = region.__resolve::<CHANNELS>(samples.len())?;
+    let output_lengths = *output.lengths();
+    if output_lengths.contains(&0) {
+        return Err(DeviceAlgorithmError::InvalidHistogramShape(
+            "every histogram channel requires at least one bin",
+        ));
+    }
+    if output_lengths
+        .iter()
+        .any(|&length| length >= i32::MAX as usize)
+    {
+        return Err(DeviceAlgorithmError::InvalidHistogramShape(
+            "histogram channel exceeds CUB's signed level-count domain",
+        ));
+    }
+    let max_bins = output_lengths.iter().copied().max().unwrap_or(0);
+    let privatized_lengths = if BYTE_SAMPLE {
+        [256; ACTIVE]
+    } else {
+        output_lengths
+    };
+    let narrow_offsets = histogram_uses_i32_offsets::<S>(resolved.1, resolved.2);
+    let layout = if BYTE_SAMPLE || max_bins <= 256 {
+        if narrow_offsets {
+            histogram_arithmetic_workspace_variant::<
+                S,
+                C,
+                L,
+                M,
+                i32,
+                CHANNELS,
+                ACTIVE,
+                EVEN,
+                THREADS,
+                PIXELS,
+                RLE,
+                BYTE_SAMPLE,
+                true,
+                SHARED_BYTES,
+            >(stream, module, privatized_lengths, resolved, true)
+        } else {
+            histogram_arithmetic_workspace_variant::<
+                S,
+                C,
+                L,
+                M,
+                usize,
+                CHANNELS,
+                ACTIVE,
+                EVEN,
+                THREADS,
+                PIXELS,
+                RLE,
+                BYTE_SAMPLE,
+                true,
+                SHARED_BYTES,
+            >(stream, module, privatized_lengths, resolved, false)
+        }
+    } else if narrow_offsets {
+        histogram_arithmetic_workspace_variant::<
+            S,
+            C,
+            L,
+            M,
+            i32,
+            CHANNELS,
+            ACTIVE,
+            EVEN,
+            THREADS,
+            PIXELS,
+            RLE,
+            BYTE_SAMPLE,
+            false,
+            GLOBAL_BYTES,
+        >(stream, module, privatized_lengths, resolved, true)
+    } else {
+        histogram_arithmetic_workspace_variant::<
+            S,
+            C,
+            L,
+            M,
+            usize,
+            CHANNELS,
+            ACTIVE,
+            EVEN,
+            THREADS,
+            PIXELS,
+            RLE,
+            BYTE_SAMPLE,
+            false,
+            GLOBAL_BYTES,
+        >(stream, module, privatized_lengths, resolved, false)
+    }?;
+    Ok(layout)
 }
 
 /// Arithmetic-range workspace variant with its honest sample capability bound.
@@ -1111,116 +1569,119 @@ where
             GLOBAL_BYTES,
         >,
 {
-    let resolved = region.__resolve::<CHANNELS>(samples.len())?;
-    let output_lengths = *output.lengths();
-    if output_lengths.contains(&0) {
-        return Err(DeviceAlgorithmError::InvalidHistogramShape(
-            "every histogram channel requires at least one bin",
-        ));
-    }
-    if output_lengths
-        .iter()
-        .any(|&length| length >= i32::MAX as usize)
-    {
-        return Err(DeviceAlgorithmError::InvalidHistogramShape(
-            "histogram channel exceeds CUB's signed level-count domain",
-        ));
-    }
-    let max_bins = output_lengths.iter().copied().max().unwrap_or(0);
-    let privatized_lengths = if BYTE_SAMPLE {
-        [256; ACTIVE]
-    } else {
-        output_lengths
-    };
-    let narrow_offsets = histogram_uses_i32_offsets::<S>(resolved.1, resolved.2);
-    if BYTE_SAMPLE || max_bins <= 256 {
-        if narrow_offsets {
-            histogram_arithmetic_workspace_variant::<
-                S,
-                C,
-                L,
-                M,
-                i32,
-                CHANNELS,
-                ACTIVE,
-                EVEN,
-                THREADS,
-                PIXELS,
-                RLE,
-                BYTE_SAMPLE,
-                true,
-                SHARED_BYTES,
-            >(stream, module, privatized_lengths, resolved, true)
-        } else {
-            histogram_arithmetic_workspace_variant::<
-                S,
-                C,
-                L,
-                M,
-                usize,
-                CHANNELS,
-                ACTIVE,
-                EVEN,
-                THREADS,
-                PIXELS,
-                RLE,
-                BYTE_SAMPLE,
-                true,
-                SHARED_BYTES,
-            >(stream, module, privatized_lengths, resolved, false)
-        }
-    } else if narrow_offsets {
-        histogram_arithmetic_workspace_variant::<
-            S,
-            C,
-            L,
-            M,
-            i32,
-            CHANNELS,
-            ACTIVE,
-            EVEN,
-            THREADS,
-            PIXELS,
-            RLE,
-            BYTE_SAMPLE,
-            false,
-            GLOBAL_BYTES,
-        >(stream, module, privatized_lengths, resolved, true)
-    } else {
-        histogram_arithmetic_workspace_variant::<
-            S,
-            C,
-            L,
-            M,
-            usize,
-            CHANNELS,
-            ACTIVE,
-            EVEN,
-            THREADS,
-            PIXELS,
-            RLE,
-            BYTE_SAMPLE,
-            false,
-            GLOBAL_BYTES,
-        >(stream, module, privatized_lengths, resolved, false)
-    }
+    let layout = device_histogram_arithmetic_workspace_layout::<
+        S,
+        C,
+        L,
+        M,
+        CudaDeviceBuffer<C>,
+        CHANNELS,
+        ACTIVE,
+        EVEN,
+        THREADS,
+        PIXELS,
+        RLE,
+        BYTE_SAMPLE,
+        SHARED_BYTES,
+        GLOBAL_BYTES,
+    >(stream, module, samples, region, output)?;
+    layout.allocate(stream)
 }
 
-struct PreparedHistogramLaunch<'a, C: DeviceCopy, const ACTIVE: usize> {
-    storage: HistogramLaunchStorage<'a, C, ACTIVE>,
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn device_histogram_arithmetic_workspace_in<
+    'stream,
+    S,
+    C,
+    L,
+    M,
+    A,
+    const CHANNELS: usize,
+    const ACTIVE: usize,
+    const EVEN: bool,
+    const THREADS: u32,
+    const PIXELS: usize,
+    const RLE: bool,
+    const BYTE_SAMPLE: bool,
+    const SHARED_BYTES: usize,
+    const GLOBAL_BYTES: usize,
+>(
+    allocator: A,
+    stream: &'stream CudaStream,
+    module: &M,
+    samples: &ArithmeticRange<S>,
+    region: HistogramRegion,
+    output: &DeviceHistogram<C, ACTIVE, rccl_memory::DeviceBuffer<'stream, C, A>>,
+) -> Result<
+    DeviceHistogramWorkspace<
+        C,
+        ACTIVE,
+        rccl_memory::DeviceBuffer<'stream, C, A>,
+        rccl_memory::DeviceBuffer<'stream, i32, A>,
+    >,
+    DeviceAlgorithmError,
+>
+where
+    S: HistogramScalar
+        + HistogramSample<L>
+        + HistogramFourSampleLoad
+        + TryFrom<usize>
+        + core::ops::Add<Output = S>
+        + core::ops::Mul<Output = S>,
+    C: HistogramScalar + rccl_memory::device::HistogramCounter,
+    L: HistogramScalar + PartialOrd,
+    A: DeviceAllocator + Clone,
+    M: HistogramPolicyKernels<
+            S,
+            C,
+            L,
+            CHANNELS,
+            ACTIVE,
+            THREADS,
+            PIXELS,
+            RLE,
+            BYTE_SAMPLE,
+            SHARED_BYTES,
+            GLOBAL_BYTES,
+        >,
+{
+    let layout = device_histogram_arithmetic_workspace_layout::<
+        S,
+        C,
+        L,
+        M,
+        rccl_memory::DeviceBuffer<'stream, C, A>,
+        CHANNELS,
+        ACTIVE,
+        EVEN,
+        THREADS,
+        PIXELS,
+        RLE,
+        BYTE_SAMPLE,
+        SHARED_BYTES,
+        GLOBAL_BYTES,
+    >(stream, module, samples, region, output)?;
+    layout.allocate_in(allocator, stream)
+}
+
+struct PreparedHistogramLaunch<'a, C: DeviceCopy, const ACTIVE: usize, Output, Queue> {
+    storage: HistogramLaunchStorage<'a, C, ACTIVE, Output, Output, Queue>,
     blocks_per_row: usize,
     blocks_per_col: usize,
     narrow_offsets: bool,
 }
 
-fn prepare_histogram_launch<'a, C, const ACTIVE: usize>(
-    output: &'a mut DeviceHistogram<C, ACTIVE>,
-    workspace: &'a mut DeviceHistogramWorkspace<C, ACTIVE>,
+fn prepare_histogram_launch<'a, C, Output, Queue, const ACTIVE: usize>(
+    output: &'a mut DeviceHistogram<C, ACTIVE, Output>,
+    workspace: &'a mut DeviceHistogramWorkspace<C, ACTIVE, Output, Queue>,
     resolved: (usize, usize, usize),
     byte_sample: bool,
-) -> Result<PreparedHistogramLaunch<'a, C, ACTIVE>, DeviceAlgorithmError>
+) -> Result<PreparedHistogramLaunch<'a, C, ACTIVE, Output, Queue>, DeviceAlgorithmError>
 where
     C: DeviceCopy,
+    Output: DeviceRange + KernelSliceArgMut<Elem = C>,
+    Queue: KernelSliceArgMut<Elem = i32>,
 {
     let (output, output_lengths, output_offsets) = output.__parts_mut();
     let DeviceHistogramWorkspaceParts {
@@ -1232,6 +1693,7 @@ where
         blocks_per_col,
         region,
         narrow_offsets,
+        ..
     } = workspace.__parts_mut();
     if region != resolved {
         return Err(DeviceAlgorithmError::InvalidHistogramShape(
@@ -1257,6 +1719,7 @@ where
             output_offsets,
             privatized_lengths,
             privatized_offsets,
+            __marker: core::marker::PhantomData,
         },
         blocks_per_row,
         blocks_per_col,
@@ -1299,6 +1762,8 @@ fn launch_histogram_even_variant<
     Samples,
     M,
     O,
+    Output,
+    Queue,
     const CHANNELS: usize,
     const ACTIVE: usize,
     const THREADS: u32,
@@ -1312,7 +1777,7 @@ fn launch_histogram_even_variant<
     module: &M,
     samples: &Samples,
     transforms: [<S as HistogramSample<L>>::EvenTransform; ACTIVE],
-    prepared: PreparedHistogramLaunch<'_, C, ACTIVE>,
+    prepared: PreparedHistogramLaunch<'_, C, ACTIVE, Output, Queue>,
     resolved: (usize, usize, usize),
 ) -> Result<(), DeviceAlgorithmError>
 where
@@ -1335,6 +1800,8 @@ where
             SHARED_BYTES,
         >,
     O: HistogramOffset,
+    Output: KernelSliceArgMut<Elem = C>,
+    Queue: KernelSliceArgMut<Elem = i32>,
 {
     let geometry = histogram_geometry::<O, THREADS, PIXELS>(
         resolved,
@@ -1348,7 +1815,7 @@ where
     if blocks == 0 {
         HistogramInitKernel::launch_histogram_init(module, stream, prepared.storage)
     } else {
-        module.launch_histogram_even::<Samples>(
+        module.launch_histogram_even::<Samples, Output, Queue>(
             stream,
             samples,
             transforms,
@@ -1367,6 +1834,8 @@ pub(crate) fn device_histogram_even<
     L,
     Samples,
     M,
+    Output,
+    Queue,
     const CHANNELS: usize,
     const ACTIVE: usize,
     const THREADS: u32,
@@ -1380,10 +1849,10 @@ pub(crate) fn device_histogram_even<
     module: &M,
     samples: &Samples,
     region: HistogramRegion,
-    output: &mut DeviceHistogram<C, ACTIVE>,
+    output: &mut DeviceHistogram<C, ACTIVE, Output>,
     lower_levels: [L; ACTIVE],
     upper_levels: [L; ACTIVE],
-    workspace: &mut DeviceHistogramWorkspace<C, ACTIVE>,
+    workspace: &mut DeviceHistogramWorkspace<C, ACTIVE, Output, Queue>,
 ) -> Result<(), DeviceAlgorithmError>
 where
     S: HistogramScalar + HistogramSample<L> + HistogramFourSampleLoad,
@@ -1403,6 +1872,8 @@ where
             SHARED_BYTES,
             GLOBAL_BYTES,
         >,
+    Output: DeviceRange + KernelSliceArgMut<Elem = C>,
+    Queue: KernelSliceArgMut<Elem = i32>,
 {
     let resolved = region.__resolve::<CHANNELS>(DeviceRange::len(samples))?;
     let narrow_offsets = histogram_uses_i32_offsets::<S>(resolved.1, resolved.2);
@@ -1446,6 +1917,8 @@ where
                 Samples,
                 M,
                 i32,
+                Output,
+                Queue,
                 CHANNELS,
                 ACTIVE,
                 THREADS,
@@ -1463,6 +1936,8 @@ where
                 Samples,
                 M,
                 usize,
+                Output,
+                Queue,
                 CHANNELS,
                 ACTIVE,
                 THREADS,
@@ -1481,6 +1956,8 @@ where
             Samples,
             M,
             i32,
+            Output,
+            Queue,
             CHANNELS,
             ACTIVE,
             THREADS,
@@ -1498,6 +1975,8 @@ where
             Samples,
             M,
             usize,
+            Output,
+            Queue,
             CHANNELS,
             ACTIVE,
             THREADS,
@@ -1517,6 +1996,8 @@ fn launch_histogram_even_arithmetic_variant<
     L,
     M,
     O,
+    Output,
+    Queue,
     const CHANNELS: usize,
     const ACTIVE: usize,
     const THREADS: u32,
@@ -1530,7 +2011,7 @@ fn launch_histogram_even_arithmetic_variant<
     module: &M,
     samples: &ArithmeticRange<S>,
     transforms: [<S as HistogramSample<L>>::EvenTransform; ACTIVE],
-    prepared: PreparedHistogramLaunch<'_, C, ACTIVE>,
+    prepared: PreparedHistogramLaunch<'_, C, ACTIVE, Output, Queue>,
     resolved: (usize, usize, usize),
 ) -> Result<(), DeviceAlgorithmError>
 where
@@ -1557,6 +2038,8 @@ where
             SHARED_BYTES,
         >,
     O: HistogramOffset,
+    Output: KernelSliceArgMut<Elem = C>,
+    Queue: KernelSliceArgMut<Elem = i32>,
 {
     let geometry = histogram_geometry::<O, THREADS, PIXELS>(
         resolved,
@@ -1588,6 +2071,8 @@ pub(crate) fn device_histogram_even_arithmetic<
     C,
     L,
     M,
+    Output,
+    Queue,
     const CHANNELS: usize,
     const ACTIVE: usize,
     const THREADS: u32,
@@ -1601,10 +2086,10 @@ pub(crate) fn device_histogram_even_arithmetic<
     module: &M,
     samples: &ArithmeticRange<S>,
     region: HistogramRegion,
-    output: &mut DeviceHistogram<C, ACTIVE>,
+    output: &mut DeviceHistogram<C, ACTIVE, Output>,
     lower_levels: [L; ACTIVE],
     upper_levels: [L; ACTIVE],
-    workspace: &mut DeviceHistogramWorkspace<C, ACTIVE>,
+    workspace: &mut DeviceHistogramWorkspace<C, ACTIVE, Output, Queue>,
 ) -> Result<(), DeviceAlgorithmError>
 where
     S: HistogramScalar
@@ -1628,6 +2113,8 @@ where
             SHARED_BYTES,
             GLOBAL_BYTES,
         >,
+    Output: DeviceRange + KernelSliceArgMut<Elem = C>,
+    Queue: KernelSliceArgMut<Elem = i32>,
 {
     let resolved = region.__resolve::<CHANNELS>(samples.len())?;
     let narrow_offsets = histogram_uses_i32_offsets::<S>(resolved.1, resolved.2);
@@ -1670,6 +2157,8 @@ where
                 L,
                 M,
                 i32,
+                Output,
+                Queue,
                 CHANNELS,
                 ACTIVE,
                 THREADS,
@@ -1686,6 +2175,8 @@ where
                 L,
                 M,
                 usize,
+                Output,
+                Queue,
                 CHANNELS,
                 ACTIVE,
                 THREADS,
@@ -1703,6 +2194,8 @@ where
             L,
             M,
             i32,
+            Output,
+            Queue,
             CHANNELS,
             ACTIVE,
             THREADS,
@@ -1719,6 +2212,8 @@ where
             L,
             M,
             usize,
+            Output,
+            Queue,
             CHANNELS,
             ACTIVE,
             THREADS,
@@ -1775,6 +2270,8 @@ fn launch_histogram_range_variant<
     Samples,
     M,
     O,
+    Output,
+    Queue,
     const CHANNELS: usize,
     const ACTIVE: usize,
     const THREADS: u32,
@@ -1788,7 +2285,7 @@ fn launch_histogram_range_variant<
     module: &M,
     samples: &Samples,
     levels: HistogramLevelStorage<'_, L, ACTIVE>,
-    prepared: PreparedHistogramLaunch<'_, C, ACTIVE>,
+    prepared: PreparedHistogramLaunch<'_, C, ACTIVE, Output, Queue>,
     resolved: (usize, usize, usize),
 ) -> Result<(), DeviceAlgorithmError>
 where
@@ -1811,6 +2308,8 @@ where
             SHARED_BYTES,
         >,
     O: HistogramOffset,
+    Output: KernelSliceArgMut<Elem = C>,
+    Queue: KernelSliceArgMut<Elem = i32>,
 {
     let geometry = histogram_geometry::<O, THREADS, PIXELS>(
         resolved,
@@ -1824,7 +2323,7 @@ where
     if blocks == 0 {
         HistogramInitKernel::launch_histogram_init(module, stream, prepared.storage)
     } else {
-        module.launch_histogram_range::<Samples>(
+        module.launch_histogram_range::<Samples, Output, Queue>(
             stream,
             samples,
             levels,
@@ -1844,6 +2343,8 @@ pub(crate) fn device_histogram_range<
     Samples,
     Levels,
     M,
+    Output,
+    Queue,
     const CHANNELS: usize,
     const ACTIVE: usize,
     const THREADS: u32,
@@ -1857,9 +2358,9 @@ pub(crate) fn device_histogram_range<
     module: &M,
     samples: &Samples,
     region: HistogramRegion,
-    output: &mut DeviceHistogram<C, ACTIVE>,
+    output: &mut DeviceHistogram<C, ACTIVE, Output>,
     levels: &Levels,
-    workspace: &mut DeviceHistogramWorkspace<C, ACTIVE>,
+    workspace: &mut DeviceHistogramWorkspace<C, ACTIVE, Output, Queue>,
 ) -> Result<(), DeviceAlgorithmError>
 where
     S: HistogramScalar + HistogramSample<L> + HistogramFourSampleLoad,
@@ -1880,6 +2381,8 @@ where
             SHARED_BYTES,
             GLOBAL_BYTES,
         >,
+    Output: DeviceRange + KernelSliceArgMut<Elem = C>,
+    Queue: KernelSliceArgMut<Elem = i32>,
 {
     let resolved = region.__resolve::<CHANNELS>(DeviceRange::len(samples))?;
     let output_lengths = *output.lengths();
@@ -1907,6 +2410,8 @@ where
                 Samples,
                 M,
                 i32,
+                Output,
+                Queue,
                 CHANNELS,
                 ACTIVE,
                 THREADS,
@@ -1924,6 +2429,8 @@ where
                 Samples,
                 M,
                 usize,
+                Output,
+                Queue,
                 CHANNELS,
                 ACTIVE,
                 THREADS,
@@ -1942,6 +2449,8 @@ where
             Samples,
             M,
             i32,
+            Output,
+            Queue,
             CHANNELS,
             ACTIVE,
             THREADS,
@@ -1959,6 +2468,8 @@ where
             Samples,
             M,
             usize,
+            Output,
+            Queue,
             CHANNELS,
             ACTIVE,
             THREADS,
@@ -1978,6 +2489,8 @@ fn launch_histogram_range_arithmetic_variant<
     L,
     M,
     O,
+    Output,
+    Queue,
     const CHANNELS: usize,
     const ACTIVE: usize,
     const THREADS: u32,
@@ -1991,7 +2504,7 @@ fn launch_histogram_range_arithmetic_variant<
     module: &M,
     samples: &ArithmeticRange<S>,
     levels: HistogramLevelStorage<'_, L, ACTIVE>,
-    prepared: PreparedHistogramLaunch<'_, C, ACTIVE>,
+    prepared: PreparedHistogramLaunch<'_, C, ACTIVE, Output, Queue>,
     resolved: (usize, usize, usize),
 ) -> Result<(), DeviceAlgorithmError>
 where
@@ -2018,6 +2531,8 @@ where
             SHARED_BYTES,
         >,
     O: HistogramOffset,
+    Output: KernelSliceArgMut<Elem = C>,
+    Queue: KernelSliceArgMut<Elem = i32>,
 {
     let geometry = histogram_geometry::<O, THREADS, PIXELS>(
         resolved,
@@ -2050,6 +2565,8 @@ pub(crate) fn device_histogram_range_arithmetic<
     L,
     Levels,
     M,
+    Output,
+    Queue,
     const CHANNELS: usize,
     const ACTIVE: usize,
     const THREADS: u32,
@@ -2063,9 +2580,9 @@ pub(crate) fn device_histogram_range_arithmetic<
     module: &M,
     samples: &ArithmeticRange<S>,
     region: HistogramRegion,
-    output: &mut DeviceHistogram<C, ACTIVE>,
+    output: &mut DeviceHistogram<C, ACTIVE, Output>,
     levels: &Levels,
-    workspace: &mut DeviceHistogramWorkspace<C, ACTIVE>,
+    workspace: &mut DeviceHistogramWorkspace<C, ACTIVE, Output, Queue>,
 ) -> Result<(), DeviceAlgorithmError>
 where
     S: HistogramScalar
@@ -2090,6 +2607,8 @@ where
             SHARED_BYTES,
             GLOBAL_BYTES,
         >,
+    Output: DeviceRange + KernelSliceArgMut<Elem = C>,
+    Queue: KernelSliceArgMut<Elem = i32>,
 {
     let resolved = region.__resolve::<CHANNELS>(samples.len())?;
     let output_lengths = *output.lengths();
@@ -2116,6 +2635,8 @@ where
                 L,
                 M,
                 i32,
+                Output,
+                Queue,
                 CHANNELS,
                 ACTIVE,
                 THREADS,
@@ -2132,6 +2653,8 @@ where
                 L,
                 M,
                 usize,
+                Output,
+                Queue,
                 CHANNELS,
                 ACTIVE,
                 THREADS,
@@ -2149,6 +2672,8 @@ where
             L,
             M,
             i32,
+            Output,
+            Queue,
             CHANNELS,
             ACTIVE,
             THREADS,
@@ -2165,6 +2690,8 @@ where
             L,
             M,
             usize,
+            Output,
+            Queue,
             CHANNELS,
             ACTIVE,
             THREADS,
@@ -2189,6 +2716,23 @@ fn channel_layout<const CHANNELS: usize>(
             .ok_or(DeviceAlgorithmError::SizeOverflow)?;
     }
     Ok((offsets, total))
+}
+
+fn workspace_channel_layout<const CHANNELS: usize>(
+    lengths: [usize; CHANNELS],
+    blocks_per_row: usize,
+    blocks_per_col: usize,
+) -> Result<([usize; CHANNELS], usize), DeviceAlgorithmError> {
+    let blocks = blocks_per_row
+        .checked_mul(blocks_per_col)
+        .ok_or(DeviceAlgorithmError::SizeOverflow)?;
+    let mut allocation_lengths = [0usize; CHANNELS];
+    for channel in 0..CHANNELS {
+        allocation_lengths[channel] = lengths[channel]
+            .checked_mul(blocks)
+            .ok_or(DeviceAlgorithmError::SizeOverflow)?;
+    }
+    channel_layout(allocation_lengths)
 }
 
 #[cfg(test)]

@@ -116,10 +116,10 @@ index a3171afb..286379c9 100644
  pub mod tcgen05;
 diff --git a/crates/cuda-device/src/read_only.rs b/crates/cuda-device/src/read_only.rs
 new file mode 100644
-index 00000000..f4d4d3de
+index 00000000..c734eae5
 --- /dev/null
 +++ b/crates/cuda-device/src/read_only.rs
-@@ -0,0 +1,58 @@
+@@ -0,0 +1,157 @@
 +/*
 + * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 + * SPDX-License-Identifier: Apache-2.0
@@ -131,6 +131,77 @@ index 00000000..f4d4d3de
 +//! proves that the operation cannot write through the supplied reference.  The
 +//! cuda-oxide compiler preserves the load as one cache-qualified instruction,
 +//! including for the over-aligned vector values in [`crate::vector`].
++
++/// A bounds-proved contiguous register tile for one CUDA thread.
++///
++/// CUDA block algorithms commonly prove a complete global-memory tile once,
++/// then issue several statically unrolled register loads from that tile. A
++/// Rust slice access at every unrolled coordinate would repeat the same bounds
++/// failure edge and retain it in PTX. This capability keeps only the proved
++/// subslice: its data pointer is the tile base and its length is the live
++/// sample count. [`Self::load`] exposes only const-selected coordinates and
++/// lowers those two scalar fields directly to SSA.
++///
++/// `FULL` preserves the same specialization as CUB's complete and partial
++/// tile overloads. In the partial form, [`Self::load`] returns `None` exactly
++/// for pixels beyond the live sample count; the backing slice extent was still
++/// checked once by the constructor.
++#[derive(Clone, Copy)]
++pub struct ThreadTile<'a, T, const PIXELS: usize, const CHANNELS: usize, const FULL: bool> {
++    samples: &'a [T],
++}
++
++impl<'a, T: Copy, const PIXELS: usize, const CHANNELS: usize, const FULL: bool>
++    ThreadTile<'a, T, PIXELS, CHANNELS, FULL>
++{
++    /// Prove the complete active extent beginning at `start`.
++    ///
++    /// `valid_samples` is the number of active scalar samples owned by this
++    /// thread, not the remaining size of the block tile. A full tile requires
++    /// the complete `PIXELS * CHANNELS` extent; a partial tile accepts any
++    /// prefix of it, including an empty prefix for inactive threads.
++    #[inline(always)]
++    pub fn new(input: &'a [T], start: usize, valid_samples: i32) -> Option<Self> {
++        let capacity = PIXELS.checked_mul(CHANNELS)?;
++        if capacity == 0 || capacity > i32::MAX as usize || valid_samples < 0 {
++            return None;
++        }
++        let valid_samples = valid_samples as usize;
++        if valid_samples > capacity
++            || !valid_samples.is_multiple_of(CHANNELS)
++            || (FULL && valid_samples != capacity)
++        {
++            return None;
++        }
++        if valid_samples == 0 {
++            return Some(Self {
++                samples: &input[..0],
++            });
++        }
++        let end = start.checked_add(valid_samples)?;
++        let samples = input.get(start..end)?;
++        Some(Self { samples })
++    }
++
++    /// Load one statically selected channel from a statically selected pixel.
++    ///
++    /// `None` is the normal partial-tile inactive state. The `FULL`
++    /// specialization needs no dynamic access check because construction of
++    /// this private-field capability proved the complete tile. In both forms,
++    /// the private compiler intrinsic performs the access without rebuilding
++    /// the slice assertion.
++    #[inline(always)]
++    pub fn load<const PIXEL: usize, const CHANNEL: usize>(&self) -> Option<T> {
++        if PIXEL >= PIXELS || CHANNEL >= CHANNELS {
++            return None;
++        }
++        let local = PIXEL * CHANNELS;
++        if !FULL && local + CHANNELS > self.samples.len() {
++            return None;
++        }
++        Some(__load_at(self.samples, local + CHANNEL))
++    }
++}
 +
 +/// Copy a value through CUDA's read-only global-memory path.
 +///
@@ -173,10 +244,38 @@ index 00000000..f4d4d3de
 +/// Compiler boundary for the one indexed read in [`upper_bound`].
 +///
 +/// This function is private so arbitrary device code cannot present an
-+/// unproved index. The only call site is the interval-preserving search above.
++/// unproved index. Its call sites are the interval-preserving search above and
++/// [`ThreadTile::load`], whose private slice can only be produced after
++/// [`ThreadTile::new`] has validated the complete active extent.
 +#[inline(never)]
 +fn __load_at<T: Copy>(input: &[T], index: usize) -> T {
 +    input[index]
++}
++
++#[cfg(test)]
++mod tests {
++    use super::ThreadTile;
++
++    #[test]
++    fn thread_tile_proves_one_extent_and_keeps_partial_loads_explicit() {
++        let samples = [0i32; 12];
++        let full =
++            ThreadTile::<_, 2, 2, true>::new(&samples, 4, 4).expect("complete two-pixel extent");
++        assert_eq!(full.load::<0, 0>(), Some(0));
++        assert_eq!(full.load::<1, 1>(), Some(0));
++
++        let partial =
++            ThreadTile::<_, 2, 2, false>::new(&samples, 8, 2).expect("one complete active pixel");
++        assert_eq!(partial.load::<0, 0>(), Some(0));
++        assert_eq!(partial.load::<0, 1>(), Some(0));
++        assert_eq!(partial.load::<1, 0>(), None);
++        assert_eq!(partial.load::<0, 2>(), None);
++        assert!(ThreadTile::<_, 2, 2, true>::new(&samples, 9, 4).is_none());
++        assert!(ThreadTile::<_, 2, 2, false>::new(&samples, 0, 3).is_none());
++        let inactive = ThreadTile::<_, 2, 2, false>::new(&samples, usize::MAX, 0)
++            .expect("inactive CUDA threads never form their nominal address");
++        assert_eq!(inactive.load::<0, 0>(), None);
++    }
 +}
 diff --git a/crates/cuda-device/src/vector.rs b/crates/cuda-device/src/vector.rs
 index 50a7db4a..cfe7eae5 100644
@@ -822,6 +921,1000 @@ index 933b2498..9a184066 100644
  /// Convert `mir.alloca` to `llvm.alloca`.
  ///
  /// `mir.alloca` carries its element type on the result pointer's pointee, and
+diff --git a/crates/rustc-codegen-cuda/examples/ordering_vote/Cargo.lock b/crates/rustc-codegen-cuda/examples/ordering_vote/Cargo.lock
+new file mode 100644
+index 00000000..a97cd527
+--- /dev/null
++++ b/crates/rustc-codegen-cuda/examples/ordering_vote/Cargo.lock
+@@ -0,0 +1,558 @@
++# This file is automatically @generated by Cargo.
++# It is not intended for manual editing.
++version = 4
++
++[[package]]
++name = "aho-corasick"
++version = "1.1.5"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "c982642fa9e8606056828ee9a8505737230110bb1099153c79efe865c59d12ba"
++dependencies = [
++ "memchr",
++]
++
++[[package]]
++name = "anyhow"
++version = "1.0.104"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
++
++[[package]]
++name = "bindgen"
++version = "0.71.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "5f58bf3d7db68cfbac37cfc485a8d711e87e064c3d0fe0435b92f7a407f9d6b3"
++dependencies = [
++ "bitflags",
++ "cexpr",
++ "clang-sys",
++ "itertools",
++ "log",
++ "prettyplease",
++ "proc-macro2",
++ "quote",
++ "regex",
++ "rustc-hash",
++ "shlex",
++ "syn 2.0.119",
++]
++
++[[package]]
++name = "bitflags"
++version = "2.13.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
++
++[[package]]
++name = "block-buffer"
++version = "0.10.4"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71"
++dependencies = [
++ "generic-array",
++]
++
++[[package]]
++name = "cexpr"
++version = "0.6.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "6fac387a98bb7c37292057cffc56d62ecb629900026402633ae9160df93a8766"
++dependencies = [
++ "nom",
++]
++
++[[package]]
++name = "cfg-if"
++version = "1.0.4"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
++
++[[package]]
++name = "clang-sys"
++version = "1.9.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "157a8ba7b480713b56f4c09fd13fc3e0a22a5dfab8097ba61cbc5feef950788a"
++dependencies = [
++ "glob",
++ "libc",
++ "libloading",
++]
++
++[[package]]
++name = "cpufeatures"
++version = "0.2.17"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "59ed5838eebb26a2bb2e58f6d5b5316989ae9d08bab10e0e6d103e656d1b0280"
++dependencies = [
++ "libc",
++]
++
++[[package]]
++name = "crc32fast"
++version = "1.5.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "8498c871161e1742aaa9d52551b2d6ebdd4c3d45a3be423e3728f33b955be550"
++dependencies = [
++ "cfg-if",
++]
++
++[[package]]
++name = "crunchy"
++version = "0.2.4"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
++
++[[package]]
++name = "crypto-common"
++version = "0.1.7"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "78c8292055d1c1df0cce5d180393dc8cce0abec0a7102adb6c7b1eef6016d60a"
++dependencies = [
++ "generic-array",
++ "typenum",
++]
++
++[[package]]
++name = "cuda-artifact-finalizer"
++version = "0.2.1"
++dependencies = [
++ "libnvvm-sys",
++ "nvjitlink-sys",
++ "serde",
++ "sha2",
++ "thiserror",
++]
++
++[[package]]
++name = "cuda-bindings"
++version = "0.2.1"
++dependencies = [
++ "bindgen",
++]
++
++[[package]]
++name = "cuda-core"
++version = "0.2.1"
++dependencies = [
++ "anyhow",
++ "cuda-bindings",
++ "cuda-macros",
++ "half",
++ "oxide-artifacts",
++]
++
++[[package]]
++name = "cuda-device"
++version = "0.2.1"
++dependencies = [
++ "cuda-macros",
++]
++
++[[package]]
++name = "cuda-host"
++version = "0.2.1"
++dependencies = [
++ "cuda-artifact-finalizer",
++ "cuda-core",
++ "cuda-macros",
++ "half",
++ "ptx-parse",
++ "sha2",
++ "thiserror",
++]
++
++[[package]]
++name = "cuda-macros"
++version = "0.2.1"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "reserved-oxide-symbols",
++ "syn 2.0.119",
++]
++
++[[package]]
++name = "cuda-target-spec"
++version = "0.1.0"
++
++[[package]]
++name = "digest"
++version = "0.10.7"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
++dependencies = [
++ "block-buffer",
++ "crypto-common",
++]
++
++[[package]]
++name = "either"
++version = "1.18.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "252afb9ae5eaa683babdc6a068b3f5726eb19e05070c731f9b2a23a7c3e8ed34"
++
++[[package]]
++name = "equivalent"
++version = "1.0.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
++
++[[package]]
++name = "foldhash"
++version = "0.1.5"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
++
++[[package]]
++name = "generic-array"
++version = "0.14.7"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "85649ca51fd72272d7821adaf274ad91c288277713d9c18820d8499a7ff69e9a"
++dependencies = [
++ "typenum",
++ "version_check",
++]
++
++[[package]]
++name = "glob"
++version = "0.3.4"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
++
++[[package]]
++name = "half"
++version = "2.7.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "6ea2d84b969582b4b1864a92dc5d27cd2b77b622a8d79306834f1be5ba20d84b"
++dependencies = [
++ "cfg-if",
++ "crunchy",
++ "zerocopy",
++]
++
++[[package]]
++name = "hashbrown"
++version = "0.15.5"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
++dependencies = [
++ "foldhash",
++]
++
++[[package]]
++name = "hashbrown"
++version = "0.17.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
++
++[[package]]
++name = "indexmap"
++version = "2.14.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "07aa2048142242915a31d35844fb311e0e53fcca590c3a0a40dcf1b841fa09eb"
++dependencies = [
++ "equivalent",
++ "hashbrown 0.17.1",
++]
++
++[[package]]
++name = "itertools"
++version = "0.13.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "413ee7dfc52ee1a4949ceeb7dbc8a33f2d6c088194d9f922fb8318faf1f01186"
++dependencies = [
++ "either",
++]
++
++[[package]]
++name = "libc"
++version = "0.2.189"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
++
++[[package]]
++name = "libloading"
++version = "0.8.9"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
++dependencies = [
++ "cfg-if",
++ "windows-link",
++]
++
++[[package]]
++name = "libnvvm-sys"
++version = "0.2.1"
++dependencies = [
++ "cuda-target-spec",
++ "libloading",
++ "thiserror",
++]
++
++[[package]]
++name = "log"
++version = "0.4.34"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
++
++[[package]]
++name = "memchr"
++version = "2.8.3"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
++
++[[package]]
++name = "minimal-lexical"
++version = "0.2.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
++
++[[package]]
++name = "nom"
++version = "7.1.3"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "d273983c5a657a70a3e8f2a01329822f3b8c8172b73826411a55751e404a0a4a"
++dependencies = [
++ "memchr",
++ "minimal-lexical",
++]
++
++[[package]]
++name = "nvjitlink-sys"
++version = "0.2.1"
++dependencies = [
++ "libloading",
++ "thiserror",
++]
++
++[[package]]
++name = "object"
++version = "0.36.7"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "62948e14d923ea95ea2c7c86c71013138b66525b86bdc08d2dcc262bdb497b87"
++dependencies = [
++ "crc32fast",
++ "hashbrown 0.15.5",
++ "indexmap",
++ "memchr",
++]
++
++[[package]]
++name = "ordering_vote"
++version = "0.1.0"
++dependencies = [
++ "cuda-core",
++ "cuda-device",
++ "cuda-host",
++]
++
++[[package]]
++name = "oxide-artifacts"
++version = "0.2.1"
++dependencies = [
++ "object",
++]
++
++[[package]]
++name = "prettyplease"
++version = "0.2.37"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "479ca8adacdd7ce8f1fb39ce9ecccbfe93a3f1344b3d0d97f20bc0196208f62b"
++dependencies = [
++ "proc-macro2",
++ "syn 2.0.119",
++]
++
++[[package]]
++name = "proc-macro2"
++version = "1.0.107"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
++dependencies = [
++ "unicode-ident",
++]
++
++[[package]]
++name = "ptx-parse"
++version = "0.1.0"
++
++[[package]]
++name = "quote"
++version = "1.0.47"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001"
++dependencies = [
++ "proc-macro2",
++]
++
++[[package]]
++name = "regex"
++version = "1.13.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "f020237b6c8eed93db2e2cb53c00c60a8e1bc73da7d073199a1180401450218d"
++dependencies = [
++ "aho-corasick",
++ "memchr",
++ "regex-automata",
++ "regex-syntax",
++]
++
++[[package]]
++name = "regex-automata"
++version = "0.4.18"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "ad8553b9b26413251cbf30e620595c7a41b3887f03da04579c0e6b0d6a06b4b2"
++dependencies = [
++ "aho-corasick",
++ "memchr",
++ "regex-syntax",
++]
++
++[[package]]
++name = "regex-syntax"
++version = "0.8.11"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
++
++[[package]]
++name = "reserved-oxide-symbols"
++version = "0.2.1"
++
++[[package]]
++name = "rustc-hash"
++version = "2.1.3"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "6b1e7f9a428571be2dc5bc0505c13fb6bf936822b894ec87abf8a08a4e51742d"
++
++[[package]]
++name = "serde"
++version = "1.0.229"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba"
++dependencies = [
++ "serde_core",
++ "serde_derive",
++]
++
++[[package]]
++name = "serde_core"
++version = "1.0.229"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "67dca2c9c51e58a4791a4b1ed58308b39c64224d349a935ab5039aa360942a48"
++dependencies = [
++ "serde_derive",
++]
++
++[[package]]
++name = "serde_derive"
++version = "1.0.229"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "syn 3.0.4",
++]
++
++[[package]]
++name = "sha2"
++version = "0.10.9"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
++dependencies = [
++ "cfg-if",
++ "cpufeatures",
++ "digest",
++]
++
++[[package]]
++name = "shlex"
++version = "1.3.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
++
++[[package]]
++name = "syn"
++version = "2.0.119"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "872831b642d1a07999a962a351ed35b955ea2cfc8f3862091e2a240a84f17297"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "unicode-ident",
++]
++
++[[package]]
++name = "syn"
++version = "3.0.4"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "e6275cddf4610d1775e6d1fe9469b2e77d0f39fd98fb7450901b821e0c53649f"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "unicode-ident",
++]
++
++[[package]]
++name = "thiserror"
++version = "2.0.20"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "ec86235f5fcc2a73650310756d2ac5b138a5780bbbdfae3eeccec992c435ba4f"
++dependencies = [
++ "thiserror-impl",
++]
++
++[[package]]
++name = "thiserror-impl"
++version = "2.0.20"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "bc04cd3e1236dd4a98afca4569f2deb3f120e5422a4023be2cb683f8486292af"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "syn 3.0.4",
++]
++
++[[package]]
++name = "typenum"
++version = "1.20.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
++
++[[package]]
++name = "unicode-ident"
++version = "1.0.24"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
++
++[[package]]
++name = "version_check"
++version = "0.9.5"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
++
++[[package]]
++name = "windows-link"
++version = "0.2.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
++
++[[package]]
++name = "zerocopy"
++version = "0.8.56"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "556764e583adb45a9f8d413c2a147fa7e8d821e48e12b14fd560b607998b75eb"
++dependencies = [
++ "zerocopy-derive",
++]
++
++[[package]]
++name = "zerocopy-derive"
++version = "0.8.56"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "f2ab42fc20575779bd240faa45f94a74256f755c0fa9e89f0ede20d91d0cdfc1"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "syn 2.0.119",
++]
+diff --git a/crates/rustc-codegen-cuda/examples/ordering_vote/Cargo.toml b/crates/rustc-codegen-cuda/examples/ordering_vote/Cargo.toml
+new file mode 100644
+index 00000000..167d0657
+--- /dev/null
++++ b/crates/rustc-codegen-cuda/examples/ordering_vote/Cargo.toml
+@@ -0,0 +1,13 @@
++[package]
++name = "ordering_vote"
++version = "0.1.0"
++edition = "2024"
++authors = ["NVIDIA Corporation"]
++license = "Apache-2.0"
++
++[workspace]
++
++[dependencies]
++cuda-core = { path = "../../../cuda-core" }
++cuda-device = { path = "../../../cuda-device" }
++cuda-host = { path = "../../../cuda-host" }
+diff --git a/crates/rustc-codegen-cuda/examples/ordering_vote/src/main.rs b/crates/rustc-codegen-cuda/examples/ordering_vote/src/main.rs
+new file mode 100644
+index 00000000..850e10de
+--- /dev/null
++++ b/crates/rustc-codegen-cuda/examples/ordering_vote/src/main.rs
+@@ -0,0 +1,281 @@
++/*
++ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++//! Workload-driven ordering and warp-vote semantics.
++//!
++//! Rust floating comparisons use partial ordering: every `<`, `<=`, `>`, `>=`,
++//! and `==` comparison involving NaN is false, while `!=` is true. This fixture
++//! intentionally does not invent a total order for floats. RCCL's natural
++//! comparator has the same consequence as its Rust source: values unordered by
++//! `<` in either direction compare as `Ordering::Equal`; callers that need a
++//! total float order must supply one explicitly.
++
++use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig1D};
++use cuda_device::{DisjointSlice, cuda_module, kernel, launch_bounds, launch_contract, thread, warp};
++
++const ORDER_ITEMS: usize = 6;
++const VOTE_THREADS: u32 = 45;
++const SENTINEL: u32 = 0xdead_beef;
++
++const LT: u32 = 1 << 0;
++const LE: u32 = 1 << 1;
++const GT: u32 = 1 << 2;
++const GE: u32 = 1 << 3;
++const EQ: u32 = 1 << 4;
++const NE: u32 = 1 << 5;
++
++#[cuda_module]
++mod kernels {
++    use super::*;
++    use core::cmp::Ordering;
++
++    #[inline(always)]
++    fn ordering_code(value: Ordering) -> u32 {
++        match value {
++            Ordering::Less => 0,
++            Ordering::Equal => 1,
++            Ordering::Greater => 2,
++        }
++    }
++
++    #[inline(always)]
++    fn float_flags(left: f32, right: f32) -> u32 {
++        ((left < right) as u32) * LT
++            | ((left <= right) as u32) * LE
++            | ((left > right) as u32) * GT
++            | ((left >= right) as u32) * GE
++            | ((left == right) as u32) * EQ
++            | ((left != right) as u32) * NE
++    }
++
++    #[kernel(launch_context = launch_context)]
++    #[launch_bounds(32)]
++    #[launch_contract(domain = 1, coordinates = u32, block = (32, 1, 1))]
++    pub fn ordering_edges(
++        signed_left: &[i32],
++        signed_right: &[i32],
++        unsigned_left: &[u32],
++        unsigned_right: &[u32],
++        float_left: &[f32],
++        float_right: &[f32],
++        mut signed_out: DisjointSlice<u32>,
++        mut unsigned_out: DisjointSlice<u32>,
++        mut float_out: DisjointSlice<u32>,
++    ) {
++        let index = thread::index_1d(launch_context);
++        let raw = index.get() as usize;
++        if raw < signed_left.len()
++            && let Some(output) = signed_out.get_mut(thread::index_1d(launch_context))
++        {
++            *output = ordering_code(signed_left[raw].cmp(&signed_right[raw]));
++        }
++        if raw < unsigned_left.len()
++            && let Some(output) = unsigned_out.get_mut(thread::index_1d(launch_context))
++        {
++            *output = ordering_code(unsigned_left[raw].cmp(&unsigned_right[raw]));
++        }
++        if raw < float_left.len()
++            && let Some(output) = float_out.get_mut(thread::index_1d(launch_context))
++        {
++            *output = float_flags(float_left[raw], float_right[raw]);
++        }
++    }
++
++    #[kernel(launch_context = launch_context)]
++    #[launch_bounds(45)]
++    #[launch_contract(domain = 1, coordinates = u32, block = (45, 1, 1))]
++    pub fn vote_edges(
++        mut active_out: DisjointSlice<u32>,
++        mut ballot_out: DisjointSlice<u32>,
++        mut any_out: DisjointSlice<u32>,
++        mut all_out: DisjointSlice<u32>,
++        mut branch_members_out: DisjointSlice<u32>,
++        mut branch_active_out: DisjointSlice<u32>,
++        mut branch_ballot_out: DisjointSlice<u32>,
++    ) {
++        let lane = warp::lane_id();
++        let active = warp::active_mask();
++        let ballot = warp::ballot_sync(active, lane % 2 == 0);
++        let any = warp::any_sync(active, lane == 31);
++        let all = warp::all_sync(active, lane < 13);
++        let participates = lane % 3 != 0;
++        let branch_members = warp::ballot_sync(active, participates);
++
++        if let Some(output) = active_out.get_mut(thread::index_1d(launch_context)) {
++            *output = active;
++        }
++        if let Some(output) = ballot_out.get_mut(thread::index_1d(launch_context)) {
++            *output = ballot;
++        }
++        if let Some(output) = any_out.get_mut(thread::index_1d(launch_context)) {
++            *output = any as u32;
++        }
++        if let Some(output) = all_out.get_mut(thread::index_1d(launch_context)) {
++            *output = all as u32;
++        }
++        if let Some(output) = branch_members_out.get_mut(thread::index_1d(launch_context)) {
++            *output = branch_members;
++        }
++
++        if participates {
++            let branch_active = warp::active_mask();
++            let branch_ballot = warp::ballot_sync(branch_members, lane % 2 == 0);
++            if let Some(output) = branch_active_out.get_mut(thread::index_1d(launch_context)) {
++                *output = branch_active;
++            }
++            if let Some(output) = branch_ballot_out.get_mut(thread::index_1d(launch_context)) {
++                *output = branch_ballot;
++            }
++        }
++    }
++}
++
++fn require_equal(name: &str, got: &[u32], expected: &[u32]) -> Result<(), Box<dyn std::error::Error>> {
++    if got != expected {
++        let mismatch = got
++            .iter()
++            .zip(expected)
++            .position(|(actual, wanted)| actual != wanted)
++            .unwrap_or(got.len().min(expected.len()));
++        return Err(format!(
++            "{name} mismatch at {mismatch}: got {:?}, expected {:?}",
++            got.get(mismatch),
++            expected.get(mismatch)
++        )
++        .into());
++    }
++    Ok(())
++}
++
++fn main() -> Result<(), Box<dyn std::error::Error>> {
++    let ctx = CudaContext::new(0)?;
++    let stream = ctx.default_stream();
++    // SAFETY: this module was generated from `kernels`; every generated launch
++    // method therefore has the exact kernel ABI used below.
++    let module = unsafe { kernels::load(&ctx) }?;
++
++    let signed_left = [i32::MIN, -1, i32::MAX, i32::MIN, 0, -17];
++    let signed_right = [i32::MAX, -1, i32::MIN, -1, -1, 23];
++    let unsigned_left = [0, u32::MAX, 0x8000_0000, u32::MAX, 7, 9];
++    let unsigned_right = [u32::MAX, 0, 0x7fff_ffff, u32::MAX, 9, 7];
++    let nan = f32::from_bits(0x7fc0_0001);
++    let float_left = [f32::NEG_INFINITY, -0.0, f32::INFINITY, nan, 1.0, nan];
++    let float_right = [-1.0, 0.0, f32::MAX, 1.0, nan, nan];
++
++    let signed_left_device = DeviceBuffer::from_host(&stream, &signed_left)?;
++    let signed_right_device = DeviceBuffer::from_host(&stream, &signed_right)?;
++    let unsigned_left_device = DeviceBuffer::from_host(&stream, &unsigned_left)?;
++    let unsigned_right_device = DeviceBuffer::from_host(&stream, &unsigned_right)?;
++    let float_left_device = DeviceBuffer::from_host(&stream, &float_left)?;
++    let float_right_device = DeviceBuffer::from_host(&stream, &float_right)?;
++    let mut signed_out = DeviceBuffer::from_host(&stream, &[SENTINEL; ORDER_ITEMS])?;
++    let mut unsigned_out = DeviceBuffer::from_host(&stream, &[SENTINEL; ORDER_ITEMS])?;
++    let mut float_out = DeviceBuffer::from_host(&stream, &[SENTINEL; ORDER_ITEMS])?;
++
++    let ordering_launch = module.prepare_ordering_edges(LaunchConfig1D::new(1, 32, 0))?;
++    module.ordering_edges(
++        &stream,
++        &ordering_launch,
++        &signed_left_device,
++        &signed_right_device,
++        &unsigned_left_device,
++        &unsigned_right_device,
++        &float_left_device,
++        &float_right_device,
++        &mut signed_out,
++        &mut unsigned_out,
++        &mut float_out,
++    )?;
++    stream.synchronize()?;
++
++    let mut signed_expected = [0, 1, 2, 0, 2, 0];
++    if std::env::var_os("CUDA_OXIDE_ORDER_VOTE_INJECT_FAULT").is_some() {
++        signed_expected[0] ^= 1;
++    }
++    require_equal("signed Ord::cmp", &signed_out.to_host_vec(&stream)?, &signed_expected)?;
++    require_equal(
++        "unsigned Ord::cmp",
++        &unsigned_out.to_host_vec(&stream)?,
++        &[0, 2, 2, 1, 0, 2],
++    )?;
++    require_equal(
++        "f32 PartialOrd",
++        &float_out.to_host_vec(&stream)?,
++        &[LT | LE | NE, LE | GE | EQ, GT | GE | NE, NE, NE, NE],
++    )?;
++
++    let initial = vec![SENTINEL; VOTE_THREADS as usize];
++    let mut active_out = DeviceBuffer::from_host(&stream, &initial)?;
++    let mut ballot_out = DeviceBuffer::from_host(&stream, &initial)?;
++    let mut any_out = DeviceBuffer::from_host(&stream, &initial)?;
++    let mut all_out = DeviceBuffer::from_host(&stream, &initial)?;
++    let mut branch_members_out = DeviceBuffer::from_host(&stream, &initial)?;
++    let mut branch_active_out = DeviceBuffer::from_host(&stream, &initial)?;
++    let mut branch_ballot_out = DeviceBuffer::from_host(&stream, &initial)?;
++
++    let vote_launch = module.prepare_vote_edges(LaunchConfig1D::new(1, VOTE_THREADS, 0))?;
++    module.vote_edges(
++        &stream,
++        &vote_launch,
++        &mut active_out,
++        &mut ballot_out,
++        &mut any_out,
++        &mut all_out,
++        &mut branch_members_out,
++        &mut branch_active_out,
++        &mut branch_ballot_out,
++    )?;
++    stream.synchronize()?;
++
++    let mut active_expected = Vec::with_capacity(VOTE_THREADS as usize);
++    let mut ballot_expected = Vec::with_capacity(VOTE_THREADS as usize);
++    let mut any_expected = Vec::with_capacity(VOTE_THREADS as usize);
++    let mut all_expected = Vec::with_capacity(VOTE_THREADS as usize);
++    let mut branch_members_expected = Vec::with_capacity(VOTE_THREADS as usize);
++    let mut branch_active_expected = Vec::with_capacity(VOTE_THREADS as usize);
++    let mut branch_ballot_expected = Vec::with_capacity(VOTE_THREADS as usize);
++    for gid in 0..VOTE_THREADS {
++        let lane = gid % 32;
++        let active = if gid < 32 { u32::MAX } else { 0x1fff };
++        let even = active & 0x5555_5555;
++        let members = active & 0xb6db_6db6;
++        active_expected.push(active);
++        ballot_expected.push(even);
++        any_expected.push((gid < 32) as u32);
++        all_expected.push((gid >= 32) as u32);
++        branch_members_expected.push(members);
++        if lane % 3 != 0 {
++            branch_active_expected.push(members);
++            branch_ballot_expected.push(members & 0x5555_5555);
++        } else {
++            branch_active_expected.push(SENTINEL);
++            branch_ballot_expected.push(SENTINEL);
++        }
++    }
++
++    require_equal("active mask", &active_out.to_host_vec(&stream)?, &active_expected)?;
++    require_equal("partial-warp ballot", &ballot_out.to_host_vec(&stream)?, &ballot_expected)?;
++    require_equal("partial-warp any", &any_out.to_host_vec(&stream)?, &any_expected)?;
++    require_equal("partial-warp all", &all_out.to_host_vec(&stream)?, &all_expected)?;
++    require_equal(
++        "divergent members",
++        &branch_members_out.to_host_vec(&stream)?,
++        &branch_members_expected,
++    )?;
++    require_equal(
++        "divergent active mask",
++        &branch_active_out.to_host_vec(&stream)?,
++        &branch_active_expected,
++    )?;
++    require_equal(
++        "divergent ballot",
++        &branch_ballot_out.to_host_vec(&stream)?,
++        &branch_ballot_expected,
++    )?;
++
++    println!("ordering: signed/unsigned edges and explicit f32 NaN semantics PASS");
++    println!("vote: full, partial, and divergent active masks/ballots PASS");
++    Ok(())
++}
+diff --git a/crates/rustc-codegen-cuda/examples/ordering_vote/verify-semantics-and-code-shape.sh b/crates/rustc-codegen-cuda/examples/ordering_vote/verify-semantics-and-code-shape.sh
+new file mode 100755
+index 00000000..a27ed15d
+--- /dev/null
++++ b/crates/rustc-codegen-cuda/examples/ordering_vote/verify-semantics-and-code-shape.sh
+@@ -0,0 +1,118 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++example_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++ptx="$example_dir/ordering_vote.ptx"
++binary="$example_dir/target/release/ordering_vote"
++test -s "$ptx"
++test -x "$binary"
++
++"$binary"
++fault_log="$(mktemp)"
++cubin="$(mktemp)"
++ptxas_log="$(mktemp)"
++sass="$(mktemp)"
++trap 'rm -f "$fault_log" "$cubin" "$ptxas_log" "$sass"' EXIT
++if CUDA_OXIDE_ORDER_VOTE_INJECT_FAULT=1 "$binary" >"$fault_log" 2>&1; then
++    printf '%s\n' 'injected ordering fault was not detected' >&2
++    exit 1
++fi
++python3 - "$fault_log" <<'PY'
++import pathlib
++import sys
++
++text = pathlib.Path(sys.argv[1]).read_text()
++if "signed Ord::cmp mismatch at 0" not in text:
++    raise SystemExit("fault run failed for an unexpected reason")
++PY
++
++python3 - "$ptx" <<'PY'
++import pathlib
++import re
++import sys
++
++text = pathlib.Path(sys.argv[1]).read_text()
++
++def entry(name: str) -> str:
++    match = re.search(r"\.entry\s+" + re.escape(name) + r"\(", text)
++    if match is None:
++        raise SystemExit(f"missing PTX entry {name!r}")
++    begin = text.find("{", match.end())
++    end = text.find("\n}", begin)
++    if begin < 0 or end < 0:
++        raise SystemExit(f"incomplete PTX entry {name!r}")
++    return text[begin : end + 2]
++
++ordering = entry("ordering_edges")
++vote = entry("vote_edges")
++for instruction in (
++    "setp.lt.s32",
++    "setp.gt.s32",
++    "setp.lt.u32",
++    "setp.gt.u32",
++    "setp.lt.f32",
++    "setp.le.f32",
++    "setp.gt.f32",
++    "setp.ge.f32",
++    "setp.eq.f32",
++    "setp.neu.f32",
++):
++    if instruction not in ordering:
++        raise SystemExit(f"ordering PTX is missing {instruction}")
++if ordering.count("setp.neu.f32") != 1:
++    raise SystemExit("f32 != must use exactly one unordered comparison")
++if vote.count("activemask.b32") != 2:
++    raise SystemExit("vote PTX must preserve straight-line and divergent active-mask reads")
++if vote.count("vote.sync.ballot.b32") != 3:
++    raise SystemExit("vote PTX must preserve all three masked ballots")
++for instruction in ("vote.sync.any.pred", "vote.sync.all.pred"):
++    if vote.count(instruction) != 1:
++        raise SystemExit(f"vote PTX must preserve exactly one {instruction}")
++PY
++
++ptxas -arch=sm_89 -v -o "$cubin" "$ptx" 2>"$ptxas_log"
++cuobjdump --dump-sass "$cubin" >"$sass"
++python3 - "$ptxas_log" "$sass" <<'PY'
++import pathlib
++import re
++import sys
++
++log = pathlib.Path(sys.argv[1]).read_text()
++sass = pathlib.Path(sys.argv[2]).read_text()
++for name in ("ordering_edges", "vote_edges"):
++    marker = f"Function properties for {name}"
++    begin = log.find(marker)
++    if begin < 0:
++        raise SystemExit(f"ptxas did not report {name}")
++    section = log[begin : begin + 180]
++    for wanted in ("0 bytes stack frame", "0 bytes spill stores", "0 bytes spill loads"):
++        if wanted not in section:
++            raise SystemExit(f"{name}: missing ptxas guarantee {wanted!r}")
++
++if "EF_CUDA_SM89" not in sass:
++    raise SystemExit("SASS is not assembled for sm_89")
++
++def function(name: str) -> str:
++    marker = f"Function : {name}"
++    begin = sass.find(marker)
++    if begin < 0:
++        raise SystemExit(f"missing SASS function {name!r}")
++    end = sass.find("Function :", begin + len(marker))
++    return sass[begin : len(sass) if end < 0 else end]
++
++ordering = function("ordering_edges")
++vote = function("vote_edges")
++if "ISETP.GT.U32" not in ordering:
++    raise SystemExit("unsigned Ord::cmp lost its unsigned SASS predicate")
++if not re.search(r"\bISETP\.GT\.AND\b", ordering):
++    raise SystemExit("signed Ord::cmp lost its signed SASS predicate")
++if "FSETP.NEU" not in ordering:
++    raise SystemExit("f32 != lost unordered NaN-aware SASS semantics")
++if "VOTE.ALL" not in vote or vote.count("VOTE.ANY") < 5:
++    raise SystemExit("masked ballot/any/all did not lower to hardware vote instructions")
++for body, name in ((ordering, "ordering_edges"), (vote, "vote_edges")):
++    if re.search(r"\b(?:LDL|STL)\b", body):
++        raise SystemExit(f"{name} unexpectedly uses local-memory SASS")
++PY
++
++printf '%s\n' 'ordering/vote semantics, injected fault, and sm_89 PTX/SASS shape: PASS'
 diff --git a/crates/rustc-codegen-cuda/examples/read_only_load/Cargo.lock b/crates/rustc-codegen-cuda/examples/read_only_load/Cargo.lock
 new file mode 100644
 index 00000000..026990d0
@@ -1406,18 +2499,17 @@ index 00000000..6a15af06
 +cuda-core = { path = "../../../cuda-core" }
 diff --git a/crates/rustc-codegen-cuda/examples/read_only_load/src/main.rs b/crates/rustc-codegen-cuda/examples/read_only_load/src/main.rs
 new file mode 100644
-index 00000000..7e42531e
+index 00000000..dbfeb422
 --- /dev/null
 +++ b/crates/rustc-codegen-cuda/examples/read_only_load/src/main.rs
-@@ -0,0 +1,39 @@
+@@ -0,0 +1,123 @@
 +use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
 +use cuda_device::cuda_module;
 +
 +#[cuda_module]
 +mod kernels {
-+    use cuda_device::{DisjointSlice, kernel, read_only, thread};
 +    use cuda_device::vector::{I32x4, as_vectors};
-+
++    use cuda_device::{DisjointSlice, debug, kernel, read_only, thread};
 +    #[kernel]
 +    pub fn sum_quads(input: &[i32], mut output: DisjointSlice<i32>) {
 +        let index = thread::index_1d();
@@ -1430,42 +2522,207 @@ index 00000000..7e42531e
 +            *out = lanes[0] + lanes[1] + lanes[2] + lanes[3];
 +        }
 +    }
++
++    #[kernel]
++    pub fn sum_proven_tile(input: &[i32], mut output: DisjointSlice<i32>) {
++        let index = thread::index_1d();
++        if index.get() != 0 {
++            return;
++        }
++        let Some(out) = output.get_mut(index) else {
++            return;
++        };
++        let Some(tile) = read_only::ThreadTile::<i32, 16, 1, true>::new(input, 0, 16) else {
++            debug::trap();
++        };
++        macro_rules! value {
++            ($pixel:literal) => {
++                match tile.load::<$pixel, 0>() {
++                    Some(value) => value,
++                    None => debug::trap(),
++                }
++            };
++        }
++        *out = value!(0)
++            + value!(1)
++            + value!(2)
++            + value!(3)
++            + value!(4)
++            + value!(5)
++            + value!(6)
++            + value!(7)
++            + value!(8)
++            + value!(9)
++            + value!(10)
++            + value!(11)
++            + value!(12)
++            + value!(13)
++            + value!(14)
++            + value!(15);
++    }
++
++    #[kernel]
++    pub fn checked_index(input: &[i32], index: usize, mut output: DisjointSlice<i32>) {
++        let thread = thread::index_1d();
++        if let Some(out) = output.get_mut(thread) {
++            *out = input[index];
++        }
++    }
 +}
 +
 +fn main() {
++    let fault = std::env::args().any(|arg| arg == "--fault");
 +    let context = CudaContext::new(0).expect("context");
 +    let stream = context.default_stream();
-+    let input = DeviceBuffer::from_host(&stream, &[1i32, 2, 3, 4, 5, 6, 7, 8]).expect("input");
-+    let mut output = DeviceBuffer::<i32>::zeroed(&stream, 2).expect("output");
++    let host_input: Vec<i32> = (1..=16).collect();
++    let input = DeviceBuffer::from_host(&stream, &host_input).expect("input");
++    let mut quad_output = DeviceBuffer::<i32>::zeroed(&stream, 4).expect("quad output");
++    let mut tile_output = DeviceBuffer::<i32>::zeroed(&stream, 1).expect("tile output");
++    let mut checked_output = DeviceBuffer::<i32>::zeroed(&stream, 1).expect("checked output");
 +    let module = kernels::load(&context).expect("module");
 +    unsafe {
 +        module.sum_quads(
 +            &stream,
-+            LaunchConfig::for_num_elems(2),
++            LaunchConfig::for_num_elems(4),
 +            &input,
-+            &mut output,
++            &mut quad_output,
 +        )
 +    }
-+    .expect("launch");
-+    assert_eq!(output.to_host_vec(&stream).expect("copy"), [10, 26]);
++    .expect("quad launch");
++    unsafe {
++        module.sum_proven_tile(
++            &stream,
++            LaunchConfig::for_num_elems(1),
++            &input,
++            &mut tile_output,
++        )
++    }
++    .expect("tile launch");
++    assert_eq!(
++        quad_output.to_host_vec(&stream).expect("quad copy"),
++        [10, 26, 42, 58]
++    );
++    assert_eq!(tile_output.to_host_vec(&stream).expect("tile copy"), [136]);
++    let checked_index = if fault { host_input.len() } else { 15 };
++    unsafe {
++        module.checked_index(
++            &stream,
++            LaunchConfig::for_num_elems(1),
++            &input,
++            checked_index,
++            &mut checked_output,
++        )
++    }
++    .expect("checked launch");
++    let checked = checked_output.to_host_vec(&stream);
++    if fault {
++        match checked {
++            Err(error) => {
++                println!("expected checked-index trap: {error}");
++                return;
++            }
++            Ok(value) => panic!("out-of-bounds checked index completed with {value:?}"),
++        }
++    }
++    assert_eq!(checked.expect("checked copy"), [16]);
 +}
 diff --git a/crates/rustc-codegen-cuda/examples/read_only_load/verify-code-shape.sh b/crates/rustc-codegen-cuda/examples/read_only_load/verify-code-shape.sh
-new file mode 100644
-index 00000000..854bb31e
+new file mode 100755
+index 00000000..45544a2b
 --- /dev/null
 +++ b/crates/rustc-codegen-cuda/examples/read_only_load/verify-code-shape.sh
-@@ -0,0 +1,11 @@
+@@ -0,0 +1,91 @@
 +#!/usr/bin/env bash
 +set -euo pipefail
-+ptx="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/read_only_load.ptx"
++example_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++ptx="$example_dir/read_only_load.ptx"
 +test -s "$ptx"
-+count="$(rg -c 'ld\.global\.nc\.v2\.u64' "$ptx")"
-+test "$count" -eq 1
-+if rg 'ld\.global\.nc\.(u32|b32)' "$ptx"; then
-+    printf '%s\n' 'read-only quad was scalarized' >&2
-+    exit 1
++
++python3 - "$ptx" <<'PY'
++import pathlib
++import re
++import sys
++
++text = pathlib.Path(sys.argv[1]).read_text()
++
++def entry(needle: str) -> str:
++    match = re.search(r"\.entry\s+([^\s(]*" + re.escape(needle) + r"[^\s(]*)\(", text)
++    if match is None:
++        raise SystemExit(f"missing PTX entry containing {needle!r}")
++    begin = text.find("{", match.end())
++    end = text.find("\n}", begin)
++    if begin < 0 or end < 0:
++        raise SystemExit(f"incomplete PTX entry containing {needle!r}")
++    return text[begin : end + 2]
++
++quad = entry("sum_quads")
++tile = entry("sum_proven_tile")
++checked = entry("checked_index")
++
++if len(re.findall(r"ld\.global\.nc\.v2\.u64", quad)) != 1:
++    raise SystemExit("read-only quad did not remain one 16-byte cache-qualified load")
++if re.search(r"ld\.global\.nc\.(?:u32|b32)", quad):
++    raise SystemExit("read-only quad was scalarized")
++
++for forbidden in (".local", "ld.local", "st.local", "stacksave", "stackrestore"):
++    if forbidden in tile:
++        raise SystemExit(f"proved ThreadTile materialized local state through {forbidden!r}")
++loads = re.findall(r"ld\.global\.nc\.(?:u32|b32)", tile)
++if len(loads) != 16:
++    raise SystemExit(f"proved ThreadTile has {len(loads)} direct scalar loads; expected 16")
++if tile.count("trap;") > 1:
++    raise SystemExit("proved ThreadTile retained per-access trap edges")
++if "trap;" not in checked:
++    raise SystemExit("ordinary unproved slice indexing lost its out-of-bounds trap")
++if not re.search(r"ld\.global\.(?!nc\.)(?:u32|b32)", checked):
++    raise SystemExit("ordinary checked slice indexing lost its direct global load")
++PY
++
++if command -v ptxas >/dev/null 2>&1; then
++    cubin="$(mktemp)"
++    log="$(mktemp)"
++    sass="$(mktemp)"
++    trap 'rm -f "$cubin" "$log" "$sass"' EXIT
++    ptxas -arch=sm_86 -v -o "$cubin" "$ptx" 2>"$log"
++    if grep -Eq '[1-9][0-9]* bytes stack frame|[1-9][0-9]* bytes spill (stores|loads)' "$log"; then
++        cat "$log" >&2
++        printf '%s\n' 'read-only fixture has a local stack frame or register spills' >&2
++        exit 1
++    fi
++    if command -v cuobjdump >/dev/null 2>&1; then
++        cuobjdump --dump-sass "$cubin" >"$sass"
++        python3 - "$sass" <<'PY'
++import pathlib
++import re
++import sys
++
++text = pathlib.Path(sys.argv[1]).read_text()
++
++def function(name: str) -> str:
++    marker = f"Function : {name}"
++    begin = text.find(marker)
++    if begin < 0:
++        raise SystemExit(f"missing SASS function {name!r}")
++    end = text.find("Function :", begin + len(marker))
++    return text[begin : len(text) if end < 0 else end]
++
++tile = function("sum_proven_tile")
++checked = function("checked_index")
++if len(re.findall(r"\bLDG\.E\.CONSTANT\b", tile)) != 16:
++    raise SystemExit("proved ThreadTile did not lower to 16 direct read-only SASS loads")
++if re.search(r"\b(?:LDL|STL)\b", tile):
++    raise SystemExit("proved ThreadTile retained local-memory SASS")
++if tile.count("BPT.TRAP") > 1:
++    raise SystemExit("proved ThreadTile retained per-access SASS trap edges")
++if checked.count("BPT.TRAP") != 1:
++    raise SystemExit("ordinary checked slice indexing lost its SASS trap")
++if not re.search(r"\bLDG\.E\b(?!\.CONSTANT)", checked):
++    raise SystemExit("ordinary checked slice indexing lost its SASS global load")
++PY
++    fi
 +fi
-+printf '%s\n' 'read-only vector load code shape: PASS'
++
++printf '%s\n' 'read-only vector and proof-carrying tile code shape: PASS'
 diff --git a/crates/rustc-codegen-cuda/src/lib.rs b/crates/rustc-codegen-cuda/src/lib.rs
 index ddb24829..3e8292f7 100644
 --- a/crates/rustc-codegen-cuda/src/lib.rs

@@ -1,12 +1,12 @@
 use cuda_core::IntoResult;
 use rccl_memory::{
     AlignedMemoryResource, BinningMemoryResource, CallbackMemoryResource, ContiguousDeviceRange,
-    CudaAsyncMemoryResource, CudaMemoryResource, CudaPoolMemoryResource, DeviceAllocator,
-    DeviceBuffer, DeviceScalar, DeviceUninitBuffer, FailureCallbackMemoryResource,
+    CudaAsyncMemoryResource, CudaCompletion, CudaMemoryResource, CudaPoolMemoryResource,
+    DeviceAllocator, DeviceBuffer, DeviceScalar, DeviceUninitBuffer, FailureCallbackMemoryResource,
     FixedSizeMemoryResource, LimitingMemoryResource, LoggingMemoryResource, ManagedMemoryResource,
     MemoryError, PinnedHostMemoryResource, PoolConfig, PoolMemoryResource, PrefetchMemoryResource,
     SamHeadroomMemoryResource, StatisticsMemoryResource, SystemMemoryResource,
-    ThreadSafeMemoryResource, TrackingMemoryResource,
+    ThreadSafeMemoryResource, TrackingMemoryResource, cross_stream_dependency,
 };
 use std::{
     alloc::Layout,
@@ -19,6 +19,8 @@ use std::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicUsize, Ordering},
     },
+    thread,
+    time::Duration,
 };
 
 #[derive(Clone)]
@@ -61,6 +63,84 @@ fn assert_round_trip<A: DeviceAllocator>(
     assert_eq!(buffer.to_host_vec()?, values);
     drop(buffer);
     stream.synchronize()?;
+    Ok(())
+}
+
+#[test]
+fn completion_wait_error_and_drop_runtime_contract() -> Result<(), Box<dyn Error>> {
+    let _guard = gpu_test_lock();
+    let Some(context) = context_or_skip() else {
+        return Ok(());
+    };
+    let stream = context.new_stream()?;
+
+    let waited = Arc::new(AtomicUsize::new(0));
+    // SAFETY: the queued callback owns its Arc and is enqueued on `stream`;
+    // the retained Arc names the same state until the completion is released.
+    let completion = unsafe {
+        CudaCompletion::from_submission(&stream, waited.clone(), |retained| {
+            let callback_state = retained.clone();
+            stream
+                .launch_host_function(move || callback_state.store(1, Ordering::Release))
+                .map_err(MemoryError::Driver)?;
+            Ok::<_, MemoryError>(137)
+        })
+    };
+    assert_eq!(completion.wait()?, 137);
+    assert_eq!(waited.load(Ordering::Acquire), 1);
+
+    // SAFETY: this injected submission error enqueues no GPU work.
+    let failed = unsafe {
+        CudaCompletion::from_submission(&stream, (), |_| {
+            Err::<(), MemoryError>(MemoryError::SizeOverflow)
+        })
+    };
+    assert!(matches!(failed.wait(), Err(MemoryError::SizeOverflow)));
+
+    let dropped = Arc::new(AtomicUsize::new(0));
+    // SAFETY: as above, the callback owns its Arc and uses only `stream`.
+    let completion = unsafe {
+        CudaCompletion::from_submission(&stream, dropped.clone(), |retained| {
+            let callback_state = retained.clone();
+            stream
+                .launch_host_function(move || {
+                    thread::sleep(Duration::from_millis(10));
+                    callback_state.store(1, Ordering::Release);
+                })
+                .map_err(MemoryError::Driver)
+        })
+    };
+    drop(completion);
+    assert_eq!(dropped.load(Ordering::Acquire), 1);
+    assert!(stream.query()?);
+    Ok(())
+}
+
+#[test]
+fn cross_stream_dependency_orders_work_after_event_drop() -> Result<(), Box<dyn Error>> {
+    let _guard = gpu_test_lock();
+    let Some(context) = context_or_skip() else {
+        return Ok(());
+    };
+    let producer = context.new_stream()?;
+    let consumer = context.new_stream()?;
+    let ordering = Arc::new(AtomicUsize::new(0));
+
+    let producer_ordering = ordering.clone();
+    producer.launch_host_function(move || {
+        thread::sleep(Duration::from_millis(10));
+        producer_ordering.store(1, Ordering::Release);
+    })?;
+    let event = cross_stream_dependency(&producer, &consumer)?;
+    let consumer_ordering = ordering.clone();
+    consumer.launch_host_function(move || {
+        let observed = consumer_ordering.load(Ordering::Acquire);
+        consumer_ordering.store(if observed == 1 { 2 } else { 3 }, Ordering::Release);
+    })?;
+
+    drop(event);
+    consumer.synchronize()?;
+    assert_eq!(ordering.load(Ordering::Acquire), 2);
     Ok(())
 }
 

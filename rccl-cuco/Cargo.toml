@@ -1,0 +1,63 @@
+[package]
+name = "rccl-cuco"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0 OR MIT"
+description = "Rust-native GPU concurrent containers modeled on NVIDIA cuCollections"
+
+[features]
+cuda-oxide-example = []
+
+[dependencies]
+cuda-core = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "97f8b2b7882f0c15ad9ce9b53abed5553920caa8" }
+cuda-device = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "97f8b2b7882f0c15ad9ce9b53abed5553920caa8" }
+cuda-host = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "97f8b2b7882f0c15ad9ce9b53abed5553920caa8" }
+rccl-memory = { path = "../rccl-memory" }
+
+[[example]]
+name = "static_map"
+path = "examples/static_map.rs"
+test = false
+required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "bloom"
+path = "examples/bloom.rs"
+test = false
+required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "bloom_benchmark"
+path = "examples/bloom_benchmark.rs"
+test = false
+required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "dynamic_map"
+path = "examples/dynamic_map.rs"
+test = false
+required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "static_map_benchmark"
+path = "examples/static_map_benchmark.rs"
+test = false
+required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "xxhash64_probe"
+path = "examples/xxhash64_probe.rs"
+test = false
+required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "exact_row_set"
+path = "examples/exact_row_set.rs"
+test = false
+required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "exact_row_set_benchmark"
+path = "examples/exact_row_set_benchmark.rs"
+test = false
+required-features = ["cuda-oxide-example"]

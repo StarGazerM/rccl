@@ -2,6 +2,7 @@
 
 use cuda_device::cuda_module;
 
+
 #[cuda_module]
 #[doc(hidden)]
 #[expect(
@@ -672,6 +673,7 @@ mod device {
             }
         }
     }
+
 }
 
 #[inline(always)]

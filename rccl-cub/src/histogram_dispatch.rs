@@ -12,14 +12,24 @@ use crate::{
     histogram::{
         HistogramLevels, HistogramScalar,
         device_histogram_arithmetic_workspace as workspace_arithmetic,
+        device_histogram_arithmetic_workspace_in as workspace_arithmetic_in,
         device_histogram_even as launch_even,
         device_histogram_even_arithmetic as launch_even_arithmetic,
         device_histogram_range as launch_range,
         device_histogram_range_arithmetic as launch_range_arithmetic,
-        device_histogram_workspace as workspace_contiguous, histogram_policy,
+        device_histogram_workspace as workspace_contiguous,
+        device_histogram_workspace_in as workspace_contiguous_in, histogram_policy,
     },
     histogram_backend::{HistogramFourSampleLoad, HistogramSample},
 };
+type AllocHistogram<'stream, C, A, const ACTIVE: usize> =
+    DeviceHistogram<C, ACTIVE, rccl_memory::DeviceBuffer<'stream, C, A>>;
+type AllocHistogramWorkspace<'stream, C, A, const ACTIVE: usize> = DeviceHistogramWorkspace<
+    C,
+    ACTIVE,
+    rccl_memory::DeviceBuffer<'stream, C, A>,
+    rccl_memory::DeviceBuffer<'stream, i32, A>,
+>;
 
 macro_rules! histogram_active_1 {
     ($callback:ident, $even:literal, $execution:expr, $policy:expr, $shared:literal, $global:literal, ($($args:expr),* $(,)?)) => {
@@ -156,12 +166,71 @@ macro_rules! call_workspace_arithmetic {
     };
 }
 
+macro_rules! call_workspace_contiguous_in {
+    ($even:literal, $execution:expr, $threads:literal, $pixels:literal, $rle:literal, $byte:literal, $shared:literal, $global:literal, ($allocator:expr, $samples:expr, $region:expr, $output:expr)) => {
+        workspace_contiguous_in::<
+            S,
+            C,
+            L,
+            _,
+            _,
+            _,
+            CHANNELS,
+            ACTIVE,
+            $even,
+            $threads,
+            $pixels,
+            $rle,
+            $byte,
+            $shared,
+            $global,
+        >(
+            $allocator,
+            $execution.stream(),
+            $execution.histogram_module(),
+            $samples,
+            $region,
+            $output,
+        )
+    };
+}
+
+macro_rules! call_workspace_arithmetic_in {
+    ($even:literal, $execution:expr, $threads:literal, $pixels:literal, $rle:literal, $byte:literal, $shared:literal, $global:literal, ($allocator:expr, $samples:expr, $region:expr, $output:expr)) => {
+        workspace_arithmetic_in::<
+            S,
+            C,
+            L,
+            _,
+            _,
+            CHANNELS,
+            ACTIVE,
+            $even,
+            $threads,
+            $pixels,
+            $rle,
+            $byte,
+            $shared,
+            $global,
+        >(
+            $allocator,
+            $execution.stream(),
+            $execution.histogram_module(),
+            $samples,
+            $region,
+            $output,
+        )
+    };
+}
+
 macro_rules! call_even {
     ($even:literal, $execution:expr, $threads:literal, $pixels:literal, $rle:literal, $byte:literal, $shared:literal, $global:literal, ($samples:expr, $region:expr, $output:expr, $lower:expr, $upper:expr, $workspace:expr)) => {
         launch_even::<
             S,
             C,
             L,
+            _,
+            _,
             _,
             _,
             CHANNELS,
@@ -194,6 +263,8 @@ macro_rules! call_range {
             _,
             _,
             _,
+            _,
+            _,
             CHANNELS,
             ACTIVE,
             $threads,
@@ -220,6 +291,8 @@ macro_rules! call_even_arithmetic {
             S,
             C,
             L,
+            _,
+            _,
             _,
             CHANNELS,
             ACTIVE,
@@ -248,6 +321,8 @@ macro_rules! call_range_arithmetic {
             S,
             C,
             L,
+            _,
+            _,
             _,
             _,
             CHANNELS,
@@ -368,6 +443,164 @@ where
     )
 }
 
+pub fn device_histogram_even_workspace_in<
+    'stream,
+    S,
+    C,
+    L,
+    A,
+    const CHANNELS: usize,
+    const ACTIVE: usize,
+>(
+    allocator: A,
+    execution: &Launch<'stream, '_>,
+    samples: &impl DeviceRange,
+    region: HistogramRegion,
+    output: &DeviceHistogram<C, ACTIVE, rccl_memory::DeviceBuffer<'stream, C, A>>,
+) -> Result<
+    DeviceHistogramWorkspace<
+        C,
+        ACTIVE,
+        rccl_memory::DeviceBuffer<'stream, C, A>,
+        rccl_memory::DeviceBuffer<'stream, i32, A>,
+    >,
+    DeviceAlgorithmError,
+>
+where
+    S: HistogramScalar + HistogramSample<L> + HistogramFourSampleLoad,
+    C: HistogramScalar + rccl_memory::device::HistogramCounter,
+    L: HistogramScalar + PartialOrd,
+    A: rccl_memory::DeviceAllocator + Clone,
+{
+    histogram_dispatch!(
+        call_workspace_contiguous_in,
+        true,
+        execution,
+        (allocator, samples, region, output)
+    )
+}
+
+pub fn device_histogram_range_workspace_in<
+    'stream,
+    S,
+    C,
+    L,
+    A,
+    const CHANNELS: usize,
+    const ACTIVE: usize,
+>(
+    allocator: A,
+    execution: &Launch<'stream, '_>,
+    samples: &impl DeviceRange,
+    region: HistogramRegion,
+    output: &DeviceHistogram<C, ACTIVE, rccl_memory::DeviceBuffer<'stream, C, A>>,
+) -> Result<
+    DeviceHistogramWorkspace<
+        C,
+        ACTIVE,
+        rccl_memory::DeviceBuffer<'stream, C, A>,
+        rccl_memory::DeviceBuffer<'stream, i32, A>,
+    >,
+    DeviceAlgorithmError,
+>
+where
+    S: HistogramScalar + HistogramSample<L> + HistogramFourSampleLoad,
+    C: HistogramScalar + rccl_memory::device::HistogramCounter,
+    L: HistogramScalar + PartialOrd,
+    A: rccl_memory::DeviceAllocator + Clone,
+{
+    histogram_dispatch!(
+        call_workspace_contiguous_in,
+        false,
+        execution,
+        (allocator, samples, region, output)
+    )
+}
+
+pub fn device_histogram_even_arithmetic_workspace_in<
+    'stream,
+    S,
+    C,
+    L,
+    A,
+    const CHANNELS: usize,
+    const ACTIVE: usize,
+>(
+    allocator: A,
+    execution: &Launch<'stream, '_>,
+    samples: &ArithmeticRange<S>,
+    region: HistogramRegion,
+    output: &DeviceHistogram<C, ACTIVE, rccl_memory::DeviceBuffer<'stream, C, A>>,
+) -> Result<
+    DeviceHistogramWorkspace<
+        C,
+        ACTIVE,
+        rccl_memory::DeviceBuffer<'stream, C, A>,
+        rccl_memory::DeviceBuffer<'stream, i32, A>,
+    >,
+    DeviceAlgorithmError,
+>
+where
+    S: HistogramScalar
+        + HistogramSample<L>
+        + HistogramFourSampleLoad
+        + TryFrom<usize>
+        + core::ops::Add<Output = S>
+        + core::ops::Mul<Output = S>,
+    C: HistogramScalar + rccl_memory::device::HistogramCounter,
+    L: HistogramScalar + PartialOrd,
+    A: rccl_memory::DeviceAllocator + Clone,
+{
+    histogram_dispatch!(
+        call_workspace_arithmetic_in,
+        true,
+        execution,
+        (allocator, samples, region, output)
+    )
+}
+
+pub fn device_histogram_range_arithmetic_workspace_in<
+    'stream,
+    S,
+    C,
+    L,
+    A,
+    const CHANNELS: usize,
+    const ACTIVE: usize,
+>(
+    allocator: A,
+    execution: &Launch<'stream, '_>,
+    samples: &ArithmeticRange<S>,
+    region: HistogramRegion,
+    output: &DeviceHistogram<C, ACTIVE, rccl_memory::DeviceBuffer<'stream, C, A>>,
+) -> Result<
+    DeviceHistogramWorkspace<
+        C,
+        ACTIVE,
+        rccl_memory::DeviceBuffer<'stream, C, A>,
+        rccl_memory::DeviceBuffer<'stream, i32, A>,
+    >,
+    DeviceAlgorithmError,
+>
+where
+    S: HistogramScalar
+        + HistogramSample<L>
+        + HistogramFourSampleLoad
+        + TryFrom<usize>
+        + core::ops::Add<Output = S>
+        + core::ops::Mul<Output = S>,
+    C: HistogramScalar + rccl_memory::device::HistogramCounter,
+    L: HistogramScalar + PartialOrd,
+    A: rccl_memory::DeviceAllocator + Clone,
+{
+    histogram_dispatch!(
+        call_workspace_arithmetic_in,
+        false,
+        execution,
+        (allocator, samples, region, output)
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn device_histogram_even<S, C, L, const CHANNELS: usize, const ACTIVE: usize>(
     execution: &Launch<'_, '_>,
@@ -471,6 +704,138 @@ where
         + core::ops::Mul<Output = S>,
     C: HistogramScalar + rccl_memory::device::HistogramCounter,
     L: HistogramScalar + PartialOrd,
+{
+    histogram_dispatch!(
+        call_range_arithmetic,
+        false,
+        execution,
+        (samples, region, output, levels, workspace)
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn device_histogram_even_in<'stream, S, C, L, A, const CHANNELS: usize, const ACTIVE: usize>(
+    execution: &Launch<'stream, '_>,
+    samples: &(impl DeviceRange + cuda_host::KernelSliceArg<Elem = S>),
+    region: HistogramRegion,
+    output: &mut AllocHistogram<'stream, C, A, ACTIVE>,
+    lower_levels: [L; ACTIVE],
+    upper_levels: [L; ACTIVE],
+    workspace: &mut AllocHistogramWorkspace<'stream, C, A, ACTIVE>,
+) -> Result<(), DeviceAlgorithmError>
+where
+    S: HistogramScalar + HistogramSample<L> + HistogramFourSampleLoad,
+    C: HistogramScalar + rccl_memory::device::HistogramCounter,
+    L: HistogramScalar + PartialOrd,
+    A: rccl_memory::DeviceAllocator,
+{
+    histogram_dispatch!(
+        call_even,
+        true,
+        execution,
+        (
+            samples,
+            region,
+            output,
+            lower_levels,
+            upper_levels,
+            workspace
+        )
+    )
+}
+
+pub fn device_histogram_range_in<'stream, S, C, L, A, const CHANNELS: usize, const ACTIVE: usize>(
+    execution: &Launch<'stream, '_>,
+    samples: &(impl DeviceRange + cuda_host::KernelSliceArg<Elem = S>),
+    region: HistogramRegion,
+    output: &mut AllocHistogram<'stream, C, A, ACTIVE>,
+    levels: &impl HistogramLevels<L, ACTIVE>,
+    workspace: &mut AllocHistogramWorkspace<'stream, C, A, ACTIVE>,
+) -> Result<(), DeviceAlgorithmError>
+where
+    S: HistogramScalar + HistogramSample<L> + HistogramFourSampleLoad,
+    C: HistogramScalar + rccl_memory::device::HistogramCounter,
+    L: HistogramScalar + PartialOrd,
+    A: rccl_memory::DeviceAllocator,
+{
+    histogram_dispatch!(
+        call_range,
+        false,
+        execution,
+        (samples, region, output, levels, workspace)
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn device_histogram_even_arithmetic_in<
+    'stream,
+    S,
+    C,
+    L,
+    A,
+    const CHANNELS: usize,
+    const ACTIVE: usize,
+>(
+    execution: &Launch<'stream, '_>,
+    samples: &ArithmeticRange<S>,
+    region: HistogramRegion,
+    output: &mut AllocHistogram<'stream, C, A, ACTIVE>,
+    lower_levels: [L; ACTIVE],
+    upper_levels: [L; ACTIVE],
+    workspace: &mut AllocHistogramWorkspace<'stream, C, A, ACTIVE>,
+) -> Result<(), DeviceAlgorithmError>
+where
+    S: HistogramScalar
+        + HistogramSample<L>
+        + HistogramFourSampleLoad
+        + TryFrom<usize>
+        + core::ops::Add<Output = S>
+        + core::ops::Mul<Output = S>,
+    C: HistogramScalar + rccl_memory::device::HistogramCounter,
+    L: HistogramScalar + PartialOrd,
+    A: rccl_memory::DeviceAllocator,
+{
+    histogram_dispatch!(
+        call_even_arithmetic,
+        true,
+        execution,
+        (
+            samples,
+            region,
+            output,
+            lower_levels,
+            upper_levels,
+            workspace
+        )
+    )
+}
+
+pub fn device_histogram_range_arithmetic_in<
+    'stream,
+    S,
+    C,
+    L,
+    A,
+    const CHANNELS: usize,
+    const ACTIVE: usize,
+>(
+    execution: &Launch<'stream, '_>,
+    samples: &ArithmeticRange<S>,
+    region: HistogramRegion,
+    output: &mut AllocHistogram<'stream, C, A, ACTIVE>,
+    levels: &impl HistogramLevels<L, ACTIVE>,
+    workspace: &mut AllocHistogramWorkspace<'stream, C, A, ACTIVE>,
+) -> Result<(), DeviceAlgorithmError>
+where
+    S: HistogramScalar
+        + HistogramSample<L>
+        + HistogramFourSampleLoad
+        + TryFrom<usize>
+        + core::ops::Add<Output = S>
+        + core::ops::Mul<Output = S>,
+    C: HistogramScalar + rccl_memory::device::HistogramCounter,
+    L: HistogramScalar + PartialOrd,
+    A: rccl_memory::DeviceAllocator,
 {
     histogram_dispatch!(
         call_range_arithmetic,

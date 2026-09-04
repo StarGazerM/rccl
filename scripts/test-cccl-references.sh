@@ -48,8 +48,11 @@ mapfile -t reference_sources < <(
   find "$task_root/benchmarks" -maxdepth 1 -type f -name '*-reference.cu' | sort
 )
 expected_reference_sources=(
+  "$task_root/benchmarks/histogram-reference.cu"
   "$task_root/benchmarks/merge-reference.cu"
   "$task_root/benchmarks/ordering-reference.cu"
+  "$task_root/benchmarks/reduce-reference.cu"
+  "$task_root/benchmarks/set-operations-reference.cu"
   "$task_root/benchmarks/thrust-transform-constant-reference.cu"
   "$task_root/benchmarks/warp-merge-sort-reference.cu"
   "$task_root/benchmarks/warp-reduce-reference.cu"
@@ -72,6 +75,9 @@ done
 
 "$reference_build_dir/merge-reference" 65536 1
 "$reference_build_dir/ordering-reference" 65536 1
+"$reference_build_dir/histogram-reference" 1048576 128 1
+"$reference_build_dir/reduce-reference" 1048576
 "$reference_build_dir/thrust-transform-constant-reference"
 "$reference_build_dir/warp-reduce-reference"
+"$reference_build_dir/set-operations-reference" 1000003 1 keys i32 none 1.000 50
 "$reference_build_dir/warp-merge-sort-reference" 262144 1

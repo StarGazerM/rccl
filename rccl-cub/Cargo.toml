@@ -152,3 +152,21 @@ name = "device_histogram_benchmark"
 path = "examples/device_histogram_benchmark.rs"
 test = false
 required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "device_reduce_sum_benchmark"
+path = "examples/device_reduce_sum_benchmark.rs"
+test = false
+required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "block_scan_benchmark"
+path = "examples/block_scan_benchmark.rs"
+test = false
+required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "block_scan_probe"
+path = "examples/block_scan_probe.rs"
+test = false
+required-features = ["cuda-oxide-example"]

@@ -27,6 +27,25 @@ entries = ["libcudacxx.span", "thrust.contiguous-subrange"]
 evidence = ["reviews/device-span.md", "cuda-oxide kernel slice and DisjointSlice lowering"]
 review = "reviews/device-span.md"
 
+
+[[surface]]
+id = "cucollections-static-map"
+kind = "cucollections-public-header"
+owner = "rccl-cuco"
+status = "partial"
+entries = ["cuco/include/cuco/static_map.cuh"]
+evidence = ["rccl-cuco/src/map.rs", "rccl-cuco/src/device.rs", "rccl-cuco/src/probing.rs", "rccl-cuco/examples/static_map.rs", "benchmarks/cuco-static-map-reference.cu", "scripts/test-cuco-static-map.sh", "scripts/test-cuco-static-map-performance.sh", "CUCOLLECTIONS_HASHMAP_COVERAGE_PLAN.md"]
+review = "CUCOLLECTIONS_HASHMAP_COVERAGE_PLAN.md"
+
+[[surface]]
+id = "cucollections-dynamic-map"
+kind = "cucollections-public-header"
+owner = "rccl-cuco"
+status = "partial"
+entries = ["cuco/include/cuco/dynamic_map.cuh"]
+evidence = ["rccl-cuco/src/dynamic.rs", "rccl-cuco/examples/dynamic_map.rs", "CUCOLLECTIONS_HASHMAP_COVERAGE_PLAN.md"]
+review = "CUCOLLECTIONS_HASHMAP_COVERAGE_PLAN.md"
+
 [[surface]]
 id = "device-vector"
 kind = "semantic-support"
@@ -55,7 +74,6 @@ entries = [
   "thrust/thrust/count.h",
   "thrust/thrust/equal.h",
   "thrust/thrust/extrema.h",
-  "thrust/thrust/fill.h",
   "thrust/thrust/find.h",
   "thrust/thrust/for_each.h",
   "thrust/thrust/gather.h",
@@ -64,16 +82,13 @@ entries = [
   "thrust/thrust/logical.h",
   "thrust/thrust/mismatch.h",
   "thrust/thrust/partition.h",
-  "thrust/thrust/reduce.h",
   "thrust/thrust/remove.h",
   "thrust/thrust/replace.h",
   "thrust/thrust/reverse.h",
   "thrust/thrust/scan.h",
   "thrust/thrust/scatter.h",
-  "thrust/thrust/sequence.h",
   "thrust/thrust/shuffle.h",
   "thrust/thrust/swap.h",
-  "thrust/thrust/tabulate.h",
   "thrust/thrust/transform.h",
   "thrust/thrust/transform_reduce.h",
   "thrust/thrust/transform_scan.h",
@@ -82,6 +97,26 @@ entries = [
   "thrust/thrust/unique.h",
 ]
 evidence = ["CCCL_THRUST_CUB_COVERAGE_PLAN.md"]
+
+[[surface]]
+id = "thrust-generation"
+kind = "thrust-public-header"
+owner = "rccl-thrust/rccl-cub"
+status = "partial"
+entries = [
+  "thrust/thrust/fill.h",
+  "thrust/thrust/sequence.h",
+  "thrust/thrust/tabulate.h",
+]
+evidence = ["rccl-thrust/src/generation.rs", "rccl-cub/src/ordering_kernels.rs", "rccl-thrust/examples/constant_iterator.rs"]
+
+[[surface]]
+id = "thrust-reduce"
+kind = "thrust-public-header"
+owner = "rccl-thrust/rccl-cub"
+status = "partial"
+entries = ["thrust/thrust/reduce.h"]
+evidence = ["rccl-thrust/src/reduce.rs", "rccl-cub/src/reduce.rs", "rccl-cub/src/reduce_kernels.rs", "rccl-thrust/examples/constant_iterator.rs"]
 
 [[surface]]
 id = "thrust-set-operations"

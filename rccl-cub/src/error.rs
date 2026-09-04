@@ -76,3 +76,9 @@ impl std::error::Error for DeviceAlgorithmError {
         }
     }
 }
+
+impl From<cuda_core::DriverError> for DeviceAlgorithmError {
+    fn from(value: cuda_core::DriverError) -> Self {
+        Self::Driver(value)
+    }
+}

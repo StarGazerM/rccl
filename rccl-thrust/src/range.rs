@@ -22,6 +22,10 @@ pub enum RangeError {
         len: usize,
     },
     BoundOverflow,
+    IndexOverflow {
+        len: usize,
+        index_bits: u32,
+    },
 }
 
 impl fmt::Display for RangeError {
@@ -39,6 +43,10 @@ impl fmt::Display for RangeError {
                 "device subrange {start}..{end} is outside range length {len}"
             ),
             Self::BoundOverflow => formatter.write_str("device range bound overflowed"),
+            Self::IndexOverflow { len, index_bits } => write!(
+                formatter,
+                "device range length {len} cannot be indexed by a {index_bits}-bit value"
+            ),
         }
     }
 }
@@ -110,6 +118,9 @@ impl<T: DeviceCopy> ReadRange for DeviceView<'_, T> {
 impl<T: DeviceCopy> RandomAccessRange for DeviceView<'_, T> {}
 impl<T: DeviceCopy> ContiguousRange for DeviceView<'_, T> {}
 
+/// Rust-flavored name for a borrowed read-only device slice.
+pub type DeviceSlice<'a, T> = DeviceView<'a, T>;
+
 /// An exclusive borrow of one complete device buffer.
 ///
 /// Unlike a C++ output iterator this value is affine: moving it transfers the
@@ -169,11 +180,27 @@ impl<T: DeviceCopy> WriteRange for DeviceViewMut<'_, T> {
 impl<T: DeviceCopy> RandomAccessRange for DeviceViewMut<'_, T> {}
 impl<T: DeviceCopy> ContiguousRange for DeviceViewMut<'_, T> {}
 
+/// Rust-flavored name for a borrowed writable device slice.
+pub type DeviceSliceMut<'a, T> = DeviceViewMut<'a, T>;
+
 /// Borrowing entry points for device-sequence composition.
+///
+/// `view`/`view_mut` are kept for compatibility with the original Thrust-shaped
+/// facade. `as_device_slice`/`as_device_slice_mut` are the Rust-flavored names:
+/// they make the borrowing relationship explicit without pretending CUDA memory
+/// is host-addressable as `&[T]`.
 pub trait DeviceBufferExt<T: DeviceCopy> {
     fn view(&self) -> DeviceView<'_, T>;
 
     fn view_mut(&mut self) -> DeviceViewMut<'_, T>;
+
+    fn as_device_slice(&self) -> DeviceSlice<'_, T> {
+        self.view()
+    }
+
+    fn as_device_slice_mut(&mut self) -> DeviceSliceMut<'_, T> {
+        self.view_mut()
+    }
 }
 
 impl<T: DeviceCopy> DeviceBufferExt<T> for DeviceBuffer<T> {
@@ -642,7 +669,7 @@ where
 
 impl<A: RandomAccessRange, B: RandomAccessRange> RandomAccessRange for Zip<A, B> {}
 
-/// Indexed selection through a random-access `usize` range.
+/// Indexed selection through a random-access unsigned index range.
 #[derive(Clone, Copy, Debug)]
 pub struct Select<R, Indices> {
     inner: R,
@@ -668,7 +695,8 @@ impl<R, Indices: DeviceRange> DeviceRange for Select<R, Indices> {
 impl<R, Indices> ReadRange for Select<R, Indices>
 where
     R: ReadRange + RandomAccessRange,
-    Indices: ReadRange<Item = usize> + RandomAccessRange,
+    Indices: ReadRange + RandomAccessRange,
+    Indices::Item: rccl_cub::DeviceIndex,
 {
     type Item = R::Item;
 }
@@ -676,12 +704,13 @@ where
 impl<R, Indices> RandomAccessRange for Select<R, Indices>
 where
     R: RandomAccessRange,
-    Indices: RandomAccessRange,
+    Indices: ReadRange + RandomAccessRange,
+    Indices::Item: rccl_cub::DeviceIndex,
 {
 }
 
 /// An index-aware output expression compiled into device code.
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
 pub struct IndexedOutput<F, T> {
     write: F,
     len: usize,
@@ -786,6 +815,11 @@ pub trait DeviceRangeExt: DeviceRange + Sized {
         StepBy::new(self, step).ok_or(RangeError::ZeroStep)
     }
 
+    /// Drop a checked number of leading logical items.
+    fn offset(self, count: usize) -> Result<Subrange<Self>, RangeError> {
+        self.slice(count..)
+    }
+
     fn slice<R: RangeBounds<usize>>(self, bounds: R) -> Result<Subrange<Self>, RangeError> {
         let len = self.len();
         let (start, end) = checked_bounds(bounds, len)?;
@@ -812,6 +846,427 @@ pub trait DeviceRangeExt: DeviceRange + Sized {
 }
 
 impl<R: DeviceRange> DeviceRangeExt for R {}
+
+/// Host-side lowering of a concrete readable range expression into the
+/// allocation-free scalar descriptor passed to generated CUDA code.
+#[doc(hidden)]
+pub trait LowerReadRange: ReadRange + RandomAccessRange {
+    type Device: rccl_cub::DeviceReadAt<Item = Self::Item>;
+
+    fn validate_lowering(&self) -> Result<(), RangeError> {
+        Ok(())
+    }
+
+    fn lower_read(&self) -> Self::Device;
+}
+
+/// Host-side lowering of an affine writable range expression.
+#[doc(hidden)]
+pub trait LowerWriteRange: WriteRange + RandomAccessRange {
+    type Device: rccl_cub::DeviceWriteAt<Item = Self::Item>;
+    /// Return the base pointer only for a complete dense device allocation.
+    ///
+    /// Affine adaptors deliberately keep the default `None`, so generation
+    /// kernels retain their scalar correctness path for offsets, strides, and
+    /// potentially weaker alignment.
+    fn dense_write_pointer(&self) -> Option<*mut Self::Item> {
+        None
+    }
+
+    fn validate_lowering(&self) -> Result<(), RangeError> {
+        Ok(())
+    }
+
+    fn lower_write(&self) -> Self::Device;
+}
+
+#[inline]
+fn read_pointer<T>(buffer: &DeviceBuffer<T>) -> *const T {
+    buffer.cu_deviceptr() as usize as *const T
+}
+
+#[inline]
+fn write_pointer<T>(buffer: &DeviceBuffer<T>) -> *mut T {
+    buffer.cu_deviceptr() as usize as *mut T
+}
+
+impl<T: DeviceCopy> LowerReadRange for DeviceView<'_, T> {
+    type Device = rccl_cub::DeviceSliceRead<T>;
+
+    fn lower_read(&self) -> Self::Device {
+        rccl_cub::DeviceSliceRead::new(read_pointer(self.buffer))
+    }
+}
+
+impl<T: DeviceCopy> LowerReadRange for DeviceViewMut<'_, T> {
+    type Device = rccl_cub::DeviceSliceWrite<T>;
+
+    fn lower_read(&self) -> Self::Device {
+        rccl_cub::DeviceSliceWrite::new(write_pointer(self.buffer))
+    }
+}
+
+impl<T: DeviceCopy> LowerWriteRange for DeviceViewMut<'_, T> {
+    type Device = rccl_cub::DeviceSliceWrite<T>;
+
+    fn lower_write(&self) -> Self::Device {
+        rccl_cub::DeviceSliceWrite::new(write_pointer(self.buffer))
+    }
+
+    fn dense_write_pointer(&self) -> Option<*mut Self::Item> {
+        Some(write_pointer(self.buffer))
+    }
+}
+
+impl<T: DeviceCopy> LowerReadRange for &DeviceBuffer<T> {
+    type Device = rccl_cub::DeviceSliceRead<T>;
+
+    fn lower_read(&self) -> Self::Device {
+        rccl_cub::DeviceSliceRead::new(read_pointer(self))
+    }
+}
+
+impl<T: DeviceCopy> LowerReadRange for &mut DeviceBuffer<T> {
+    type Device = rccl_cub::DeviceSliceWrite<T>;
+
+    fn lower_read(&self) -> Self::Device {
+        rccl_cub::DeviceSliceWrite::new(write_pointer(self))
+    }
+}
+
+impl<T: DeviceCopy> LowerWriteRange for &mut DeviceBuffer<T> {
+    type Device = rccl_cub::DeviceSliceWrite<T>;
+
+    fn lower_write(&self) -> Self::Device {
+        rccl_cub::DeviceSliceWrite::new(write_pointer(self))
+    }
+
+    fn dense_write_pointer(&self) -> Option<*mut Self::Item> {
+        Some(write_pointer(self))
+    }
+}
+
+impl<T> LowerReadRange for ArithmeticRange<T>
+where
+    T: DeviceCopy
+        + rccl_cub::DeviceArithmetic
+        + TryFrom<usize>
+        + core::ops::Add<Output = T>
+        + core::ops::Mul<Output = T>,
+{
+    type Device = rccl_cub::DeviceArithmeticRange<T>;
+
+    fn validate_lowering(&self) -> Result<(), RangeError> {
+        if !self.is_empty() && !T::index_fits(self.len() - 1) {
+            return Err(RangeError::IndexOverflow {
+                len: self.len(),
+                index_bits: (core::mem::size_of::<T>() * 8) as u32,
+            });
+        }
+        Ok(())
+    }
+
+    fn lower_read(&self) -> Self::Device {
+        rccl_cub::DeviceArithmeticRange::new(*self.start(), *self.step())
+    }
+}
+
+impl<T: DeviceCopy> LowerReadRange for RepeatN<T> {
+    type Device = rccl_cub::DeviceConstant<T>;
+
+    fn lower_read(&self) -> Self::Device {
+        rccl_cub::DeviceConstant::new(self.value)
+    }
+}
+
+impl<K, V> LowerReadRange for KeyValueRange<'_, K, V>
+where
+    K: DeviceCopy,
+    V: DeviceCopy,
+    (K, V): DeviceCopy,
+{
+    type Device = rccl_cub::DeviceZip<rccl_cub::DeviceSliceRead<K>, rccl_cub::DeviceSliceRead<V>>;
+
+    fn lower_read(&self) -> Self::Device {
+        rccl_cub::DeviceZip::new(
+            rccl_cub::DeviceSliceRead::new(read_pointer(self.keys)),
+            rccl_cub::DeviceSliceRead::new(read_pointer(self.values)),
+        )
+    }
+}
+
+impl<K, V> LowerReadRange for KeyValueRangeMut<'_, K, V>
+where
+    K: DeviceCopy,
+    V: DeviceCopy,
+    (K, V): DeviceCopy,
+{
+    type Device = rccl_cub::DeviceZip<rccl_cub::DeviceSliceWrite<K>, rccl_cub::DeviceSliceWrite<V>>;
+
+    fn lower_read(&self) -> Self::Device {
+        rccl_cub::DeviceZip::new(
+            rccl_cub::DeviceSliceWrite::new(write_pointer(self.keys)),
+            rccl_cub::DeviceSliceWrite::new(write_pointer(self.values)),
+        )
+    }
+}
+
+impl<K, V> LowerWriteRange for KeyValueRangeMut<'_, K, V>
+where
+    K: DeviceCopy,
+    V: DeviceCopy,
+    (K, V): DeviceCopy,
+{
+    type Device = rccl_cub::DeviceZip<rccl_cub::DeviceSliceWrite<K>, rccl_cub::DeviceSliceWrite<V>>;
+
+    fn lower_write(&self) -> Self::Device {
+        rccl_cub::DeviceZip::new(
+            rccl_cub::DeviceSliceWrite::new(write_pointer(self.keys)),
+            rccl_cub::DeviceSliceWrite::new(write_pointer(self.values)),
+        )
+    }
+}
+
+impl<R> LowerReadRange for Subrange<R>
+where
+    R: LowerReadRange,
+{
+    type Device = rccl_cub::DeviceOffset<R::Device>;
+
+    fn validate_lowering(&self) -> Result<(), RangeError> {
+        self.inner.validate_lowering()
+    }
+
+    fn lower_read(&self) -> Self::Device {
+        rccl_cub::DeviceOffset::new(self.inner.lower_read(), self.start)
+    }
+}
+
+impl<R> LowerWriteRange for Subrange<R>
+where
+    R: LowerWriteRange,
+{
+    type Device = rccl_cub::DeviceOffset<R::Device>;
+
+    fn validate_lowering(&self) -> Result<(), RangeError> {
+        self.inner.validate_lowering()
+    }
+
+    fn lower_write(&self) -> Self::Device {
+        rccl_cub::DeviceOffset::new(self.inner.lower_write(), self.start)
+    }
+}
+
+impl<R> LowerReadRange for Rev<R>
+where
+    R: LowerReadRange,
+{
+    type Device = rccl_cub::DeviceReverse<R::Device>;
+
+    fn validate_lowering(&self) -> Result<(), RangeError> {
+        self.inner.validate_lowering()
+    }
+
+    fn lower_read(&self) -> Self::Device {
+        rccl_cub::DeviceReverse::new(self.inner.lower_read(), self.len)
+    }
+}
+
+impl<R> LowerWriteRange for Rev<R>
+where
+    R: LowerWriteRange,
+{
+    type Device = rccl_cub::DeviceReverse<R::Device>;
+
+    fn validate_lowering(&self) -> Result<(), RangeError> {
+        self.inner.validate_lowering()
+    }
+
+    fn lower_write(&self) -> Self::Device {
+        rccl_cub::DeviceReverse::new(self.inner.lower_write(), self.len)
+    }
+}
+
+impl<R> LowerReadRange for StepBy<R>
+where
+    R: LowerReadRange,
+{
+    type Device = rccl_cub::DeviceStride<R::Device>;
+
+    fn validate_lowering(&self) -> Result<(), RangeError> {
+        self.inner.validate_lowering()
+    }
+
+    fn lower_read(&self) -> Self::Device {
+        rccl_cub::DeviceStride::new(self.inner.lower_read(), self.step)
+    }
+}
+
+impl<R> LowerWriteRange for StepBy<R>
+where
+    R: LowerWriteRange,
+{
+    type Device = rccl_cub::DeviceStride<R::Device>;
+
+    fn validate_lowering(&self) -> Result<(), RangeError> {
+        self.inner.validate_lowering()
+    }
+
+    fn lower_write(&self) -> Self::Device {
+        rccl_cub::DeviceStride::new(self.inner.lower_write(), self.step)
+    }
+}
+
+impl<R, F, T> LowerReadRange for Map<R, F, T>
+where
+    R: LowerReadRange,
+    F: Fn(R::Item) -> T + Copy,
+    T: DeviceCopy,
+{
+    type Device = rccl_cub::DeviceMap<R::Device, F>;
+
+    fn validate_lowering(&self) -> Result<(), RangeError> {
+        self.inner.validate_lowering()
+    }
+
+    fn lower_read(&self) -> Self::Device {
+        rccl_cub::DeviceMap::new(self.inner.lower_read(), self.map)
+    }
+}
+
+impl<R, F, Input, Output> LowerWriteRange for MapOutput<R, F, Input, Output>
+where
+    R: LowerWriteRange<Item = Output>,
+    F: Fn(Input) -> Output + Copy,
+    Input: DeviceCopy,
+    Output: DeviceCopy,
+{
+    type Device = rccl_cub::DeviceMapWrite<R::Device, F, Input>;
+
+    fn validate_lowering(&self) -> Result<(), RangeError> {
+        self.inner.validate_lowering()
+    }
+
+    fn lower_write(&self) -> Self::Device {
+        rccl_cub::DeviceMapWrite::new(self.inner.lower_write(), self.map)
+    }
+}
+
+impl<R, Read, Write, Input, Output> LowerReadRange for MapInOut<R, Read, Write, Input, Output>
+where
+    R: LowerReadRange,
+    Read: Fn(R::Item) -> Output + Copy,
+    Write: Copy,
+    Input: DeviceCopy,
+    Output: DeviceCopy,
+{
+    type Device = rccl_cub::DeviceMapInOut<R::Device, Read, Write, Input, Output>;
+
+    fn validate_lowering(&self) -> Result<(), RangeError> {
+        self.inner.validate_lowering()
+    }
+
+    fn lower_read(&self) -> Self::Device {
+        rccl_cub::DeviceMapInOut::new(self.inner.lower_read(), self.read, self.write)
+    }
+}
+
+impl<R, Read, Write, Input, Output> LowerWriteRange for MapInOut<R, Read, Write, Input, Output>
+where
+    R: LowerWriteRange,
+    Read: Copy,
+    Write: Fn(Input) -> R::Item + Copy,
+    Input: DeviceCopy,
+    Output: DeviceCopy,
+{
+    type Device = rccl_cub::DeviceMapInOut<R::Device, Read, Write, Input, Output>;
+
+    fn validate_lowering(&self) -> Result<(), RangeError> {
+        self.inner.validate_lowering()
+    }
+
+    fn lower_write(&self) -> Self::Device {
+        rccl_cub::DeviceMapInOut::new(self.inner.lower_write(), self.read, self.write)
+    }
+}
+
+impl<A, B> LowerReadRange for Zip<A, B>
+where
+    A: LowerReadRange,
+    B: LowerReadRange,
+    (A::Item, B::Item): DeviceCopy,
+{
+    type Device = rccl_cub::DeviceZip<A::Device, B::Device>;
+
+    fn validate_lowering(&self) -> Result<(), RangeError> {
+        self.first.validate_lowering()?;
+        self.second.validate_lowering()
+    }
+
+    fn lower_read(&self) -> Self::Device {
+        rccl_cub::DeviceZip::new(self.first.lower_read(), self.second.lower_read())
+    }
+}
+
+impl<A, B> LowerWriteRange for Zip<A, B>
+where
+    A: LowerWriteRange,
+    B: LowerWriteRange,
+    (A::Item, B::Item): DeviceCopy,
+{
+    type Device = rccl_cub::DeviceZip<A::Device, B::Device>;
+
+    fn validate_lowering(&self) -> Result<(), RangeError> {
+        self.first.validate_lowering()?;
+        self.second.validate_lowering()
+    }
+
+    fn lower_write(&self) -> Self::Device {
+        rccl_cub::DeviceZip::new(self.first.lower_write(), self.second.lower_write())
+    }
+}
+
+impl<R, Indices> LowerReadRange for Select<R, Indices>
+where
+    R: LowerReadRange,
+    Indices: LowerReadRange,
+    Indices::Item: rccl_cub::DeviceIndex,
+{
+    type Device = rccl_cub::DevicePermutation<R::Device, Indices::Device>;
+
+    fn validate_lowering(&self) -> Result<(), RangeError> {
+        self.inner.validate_lowering()?;
+        self.indices.validate_lowering()
+    }
+
+    fn lower_read(&self) -> Self::Device {
+        rccl_cub::DevicePermutation::new(
+            self.inner.lower_read(),
+            self.indices.lower_read(),
+            self.inner.len(),
+        )
+    }
+}
+
+impl<T: DeviceCopy> LowerWriteRange for Discard<T> {
+    type Device = rccl_cub::DeviceDiscard<T>;
+
+    fn lower_write(&self) -> Self::Device {
+        rccl_cub::DeviceDiscard::new()
+    }
+}
+
+impl<F, T> LowerWriteRange for IndexedOutput<F, T>
+where
+    F: Fn(usize, T) + Copy,
+    T: DeviceCopy,
+{
+    type Device = rccl_cub::DeviceIndexedWrite<F, T>;
+
+    fn lower_write(&self) -> Self::Device {
+        rccl_cub::DeviceIndexedWrite::new(self.write)
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -988,5 +1443,33 @@ mod tests {
             values.slice(..=usize::MAX),
             Err(RangeError::BoundOverflow)
         ));
+        assert_eq!(values.offset(2).expect("valid offset").len(), 3);
+        assert!(matches!(
+            values.offset(6),
+            Err(RangeError::OutOfBounds { .. })
+        ));
+    }
+
+    #[test]
+    fn lowering_rejects_narrow_arithmetic_indices_without_truncation() {
+        let too_wide = arithmetic_range(0_u32, 1_u32, u32::MAX as usize + 2);
+        assert_eq!(
+            too_wide.validate_lowering(),
+            Err(RangeError::IndexOverflow {
+                len: u32::MAX as usize + 2,
+                index_bits: 32,
+            })
+        );
+
+        let full_u32_extent = arithmetic_range(0_u32, 1_u32, u32::MAX as usize + 1);
+        assert_eq!(full_u32_extent.validate_lowering(), Ok(()));
+        let native = arithmetic_range(0_usize, 1_usize, usize::MAX);
+        assert_eq!(native.validate_lowering(), Ok(()));
+    }
+
+    #[test]
+    fn direct_subrange_construction_checks_offset_addition() {
+        let values = TestInput::<i32>::new(usize::MAX);
+        assert!(Subrange::new(values, usize::MAX, 1).is_none());
     }
 }

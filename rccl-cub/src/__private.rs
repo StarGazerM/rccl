@@ -1,3 +1,11 @@
+pub use crate::block_scan::{
+    BlockScanResult, BlockScanValue, block_scan_sum_128, block_scan_sum_256,
+};
+pub use crate::compaction::{CompactionIndex, CompactionWorkspace};
+pub use crate::compaction_kernels::CompactionModule;
+pub use crate::grouped_reduction::{
+    BooleanOr, BooleanProvenance, GroupReduceOperator, IndependentProbabilityOr, NaturalBagAdd,
+};
 pub use crate::histogram::{
     DeviceHistogramWorkspaceParts, HistogramInitKernel, HistogramKernel, HistogramLaunchGeometry,
     HistogramLaunchStorage, HistogramLevelStorage, HistogramLevels, HistogramPolicy,
@@ -55,9 +63,11 @@ pub use crate::radix::{
     RadixKernel, RadixKey, RadixKeysKernel, RadixPairsKernel, RadixValue, radix_items,
     radix_shared_bytes, radix_single_items,
 };
+pub use crate::reduce_kernels::ReduceModule;
+pub use crate::scan_kernels::ScanModule;
 pub use crate::set_kernels::SetModule;
 pub use crate::set_operation::{ArithmeticSetKernel, SetKernel, set_items, set_shared_bytes};
-pub use crate::warp::{warp_reduce, warp_reduce_items};
+pub use crate::warp::{WarpValue, warp_reduce, warp_reduce_items};
 pub use crate::workspace::{
     device_merge_pairs_partition_count, device_merge_pairs_workspace, device_merge_partition_count,
     device_merge_sort_keys_workspace, device_merge_sort_pairs_workspace,
@@ -69,7 +79,10 @@ pub use crate::workspace::{
 };
 pub use cuda_core;
 pub use cuda_host;
-pub use rccl_memory::device::{BlockSharedMemory, HistogramCounter};
+pub use rccl_memory::device::{
+    BlockSharedMemory, DeviceRegion, HistogramCounter, set_lookback_initial_delay,
+    set_lookback_retry_delay,
+};
 pub use rccl_memory::{
     copy_device_range, static_block_shared_memory, static_block_shared_memory_from_size,
 };

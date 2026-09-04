@@ -699,10 +699,10 @@ const fn warp_striped_local<const THREADS: usize, const ITEMS: usize>(
 }
 
 #[inline(always)]
-const fn validated_warp_striped_local<const ITEMS: usize>(thread_index: u32, item: usize) -> usize {
+const fn validated_warp_striped_local<const ITEMS: usize>(thread_index: u32, item: usize) -> u32 {
     let lane = thread_index & 31;
     let warp = thread_index >> 5;
-    warp as usize * 32 * ITEMS + item * 32 + lane as usize
+    (warp as usize * 32 * ITEMS + item * 32 + lane as usize) as u32
 }
 
 #[inline(always)]
@@ -720,7 +720,7 @@ fn block_tile<const THREADS: usize, const ITEMS: usize>(
         cuda_device::debug::trap();
     }
     let tile_items = THREADS * ITEMS;
-    if valid_items == 0 || valid_items > tile_items {
+    if tile_items > u32::MAX as usize || valid_items == 0 || valid_items > tile_items {
         cuda_device::debug::trap();
     }
     let tile_base = thread::blockIdx_x() as usize * tile_items;
@@ -764,7 +764,7 @@ pub struct BlockedConcatenatedInput<
 pub struct WarpStripedBlockTile<const THREADS: usize, const ITEMS: usize> {
     tile_base: usize,
     thread_index: u32,
-    valid_items: usize,
+    valid_items: u32,
     output_len: usize,
 }
 
@@ -776,8 +776,31 @@ impl<const THREADS: usize, const ITEMS: usize> WarpStripedBlockTile<THREADS, ITE
         Self {
             tile_base,
             thread_index,
-            valid_items,
+            valid_items: valid_items as u32,
             output_len,
+        }
+    }
+    /// Read-only input sharing this tile's already-validated launch geometry.
+    ///
+    /// Pair collectives construct one tile proof, then require every key/value
+    /// range to describe the same logical tile set. This retains the safe
+    /// length check without repeating block-dimension and tile-bound checks
+    /// for each range.
+    #[inline(always)]
+    pub fn input<'input, U: Copy>(
+        &self,
+        input: &'input [U],
+    ) -> WarpStripedBlockInput<'input, U, THREADS, ITEMS> {
+        if input.len() != self.output_len {
+            cuda_device::debug::trap();
+        }
+        WarpStripedBlockInput {
+            // SAFETY: `new` proved this tile range against `output_len`, and
+            // the equality check gives `input` that same extent.
+            tile: unsafe {
+                input.get_unchecked(self.tile_base..self.tile_base + self.valid_items as usize)
+            },
+            thread_index: self.thread_index,
         }
     }
 
@@ -795,9 +818,26 @@ impl<const THREADS: usize, const ITEMS: usize> WarpStripedBlockTile<THREADS, ITE
             (first, first_begin, first_count),
             (second, second_begin, second_count),
             self.thread_index,
-            self.valid_items,
+            self.valid_items as usize,
         )
     }
+    /// In-place read phase sharing this tile's validated launch geometry.
+    #[inline(always)]
+    pub fn read<'output, T>(
+        &self,
+        output: DisjointSlice<'output, T, LinearTiles<ITEMS>>,
+    ) -> WarpStripedBlockRead<'output, T, THREADS, ITEMS> {
+        if output.len() != self.output_len {
+            cuda_device::debug::trap();
+        }
+        WarpStripedBlockRead {
+            output,
+            tile_base: self.tile_base,
+            thread_index: self.thread_index,
+            valid_items: self.valid_items,
+        }
+    }
+
 
     #[inline(always)]
     pub fn output<'output, T>(
@@ -1105,11 +1145,11 @@ impl<'a, T: Copy, const THREADS: usize, const ITEMS: usize>
             return default;
         }
         let local = validated_warp_striped_local::<ITEMS>(self.thread_index, item);
-        if local >= self.tile.len() {
+        if local as usize >= self.tile.len() {
             return default;
         }
         // SAFETY: the explicit prefix check proved this index in the tile.
-        unsafe { *self.tile.get_unchecked(local) }
+        unsafe { *self.tile.get_unchecked(local as usize) }
     }
 }
 
@@ -1125,7 +1165,7 @@ pub struct WarpStripedBlockWrite<'a, T, const THREADS: usize, const ITEMS: usize
     output: DisjointSlice<'a, T, LinearTiles<ITEMS>>,
     tile_base: usize,
     thread_index: u32,
-    valid_items: usize,
+    valid_items: u32,
 }
 
 /// Exclusive output for CUB's block-striped arrangement.
@@ -1241,7 +1281,7 @@ impl<'a, T, const THREADS: usize, const ITEMS: usize> WarpStripedBlockWrite<'a, 
         if local >= self.valid_items {
             return;
         }
-        let global = self.tile_base + local;
+        let global = self.tile_base + local as usize;
         // SAFETY: `local_index` is injective over (thread, item), the tile
         // bases of different blocks do not overlap, and both prefix and parent
         // bounds were checked by `new`. No reference escapes this call.
@@ -1258,7 +1298,7 @@ pub struct WarpStripedBlockRead<'a, T, const THREADS: usize, const ITEMS: usize>
     output: DisjointSlice<'a, T, LinearTiles<ITEMS>>,
     tile_base: usize,
     thread_index: u32,
-    valid_items: usize,
+    valid_items: u32,
 }
 
 impl<'a, T: Copy, const THREADS: usize, const ITEMS: usize>
@@ -1276,7 +1316,7 @@ impl<'a, T: Copy, const THREADS: usize, const ITEMS: usize>
             output,
             tile_base,
             thread_index,
-            valid_items,
+            valid_items: valid_items as u32,
         }
     }
 
@@ -1300,7 +1340,7 @@ impl<'a, T: Copy, const THREADS: usize, const ITEMS: usize>
     #[inline(always)]
     pub fn read(&mut self, item: usize) -> Option<T> {
         let local = self.local_index(item)?;
-        if local >= self.valid_items {
+        if local > u32::MAX as usize || local as u32 >= self.valid_items {
             return None;
         }
         let global = self.tile_base + local;
@@ -1324,7 +1364,7 @@ impl<'a, T: Copy, const THREADS: usize, const ITEMS: usize>
         let ptr = self.output.as_mut_ptr();
         // SAFETY: construction proved the parent prefix and this method keeps
         // the capability in its read-only phase.
-        unsafe { ptr.add(self.tile_base + local).read() }
+        unsafe { ptr.add(self.tile_base + local as usize).read() }
     }
 
     /// End all block reads and return the unique warp-striped writer.

@@ -148,3 +148,133 @@ where
     );
     execution.synchronize(result)
 }
+
+pub(crate) fn range_fill<Output, T, A>(
+    execution: &Execution<'_, '_, A>,
+    output: &Output,
+    value: T,
+) -> Result<(), DeviceAlgorithmError>
+where
+    Output: crate::range::LowerWriteRange<Item = T>,
+    T: cuda_core::DeviceCopy,
+    A: DeviceAllocator,
+{
+    let len = rccl_cub::DeviceRange::len(output);
+    output
+        .validate_lowering()
+        .map_err(|_| DeviceAlgorithmError::SizeOverflow)?;
+    if len == 0 {
+        return Ok(());
+    }
+    if core::mem::size_of::<T>() == 4
+        && let Ok(len_u32) = u32::try_from(len)
+        && let Some(pointer) = output.dense_write_pointer()
+        && pointer.addr().is_multiple_of(8)
+    {
+        return execution
+            .launch()
+            .range_fill_4b(rccl_cub::DeviceSliceWrite::new(pointer), value, len_u32)
+            .map_err(DeviceAlgorithmError::Launch);
+    }
+    let repeated = crate::range::RepeatN::new(value, len);
+    range_transform(execution, &repeated, output, &|item| item)
+}
+
+pub(crate) fn range_generate<Input, Output, F, A>(
+    execution: &Execution<'_, '_, A>,
+    input: &Input,
+    output: &Output,
+    op: &F,
+) -> Result<(), DeviceAlgorithmError>
+where
+    Input: crate::range::LowerReadRange,
+    Output: crate::range::LowerWriteRange,
+    F: Fn(Input::Item) -> Output::Item + Copy,
+    A: DeviceAllocator,
+{
+    let len = rccl_cub::DeviceRange::len(input);
+    if len != rccl_cub::DeviceRange::len(output) {
+        return Err(DeviceAlgorithmError::LengthMismatch {
+            role: "range generation output",
+            expected: len,
+            actual: rccl_cub::DeviceRange::len(output),
+        });
+    }
+    input
+        .validate_lowering()
+        .map_err(|_| DeviceAlgorithmError::SizeOverflow)?;
+    output
+        .validate_lowering()
+        .map_err(|_| DeviceAlgorithmError::SizeOverflow)?;
+    if len == 0 {
+        return Ok(());
+    }
+    if core::mem::size_of::<Output::Item>() == 4
+        && let Ok(len_u32) = u32::try_from(len)
+        && let Some(pointer) = output.dense_write_pointer()
+        && pointer.addr().is_multiple_of(16)
+    {
+        return execution
+            .launch()
+            .range_generate_4b(
+                input.lower_read(),
+                rccl_cub::DeviceSliceWrite::new(pointer),
+                *op,
+                len_u32,
+            )
+            .map_err(DeviceAlgorithmError::Launch);
+    }
+    range_transform(execution, input, output, op)
+}
+
+pub(crate) fn range_transform<Input, Output, F, A>(
+    execution: &Execution<'_, '_, A>,
+    input: &Input,
+    output: &Output,
+    op: &F,
+) -> Result<(), DeviceAlgorithmError>
+where
+    Input: crate::range::LowerReadRange,
+    Output: crate::range::LowerWriteRange,
+    F: Fn(Input::Item) -> Output::Item + Copy,
+    A: DeviceAllocator,
+{
+    let input_len = rccl_cub::DeviceRange::len(input);
+    let output_len = rccl_cub::DeviceRange::len(output);
+    if input_len != output_len {
+        return Err(DeviceAlgorithmError::LengthMismatch {
+            role: "range transform output",
+            expected: input_len,
+            actual: output_len,
+        });
+    }
+    input
+        .validate_lowering()
+        .map_err(|_| DeviceAlgorithmError::SizeOverflow)?;
+    output
+        .validate_lowering()
+        .map_err(|_| DeviceAlgorithmError::SizeOverflow)?;
+    execution
+        .launch()
+        .range_transform(input.lower_read(), output.lower_write(), *op, input_len)
+        .map_err(DeviceAlgorithmError::Launch)
+}
+
+pub(crate) fn range_for_each<Input, F, A>(
+    execution: &Execution<'_, '_, A>,
+    input: &Input,
+    op: &F,
+) -> Result<(), DeviceAlgorithmError>
+where
+    Input: crate::range::LowerReadRange,
+    F: Fn(Input::Item) + Copy,
+    A: DeviceAllocator,
+{
+    input
+        .validate_lowering()
+        .map_err(|_| DeviceAlgorithmError::SizeOverflow)?;
+    execution
+        .launch()
+        .range_for_each(input.lower_read(), *op, rccl_cub::DeviceRange::len(input))
+        .map_err(DeviceAlgorithmError::Launch)
+}

@@ -178,6 +178,7 @@ expected_rust_examples=(
   rccl-cub/examples/device_radix_sort_pairs_probe.rs
   rccl-cub/examples/device_radix_sort_single_tile_pairs_probe.rs
   rccl-cub/examples/device_radix_sort_single_tile_probe.rs
+  rccl-cub/examples/device_reduce_sum_benchmark.rs
   rccl-cub/examples/support/histogram_counter_probe.rs
   rccl-cub/examples/support/histogram_scalar_probe.rs
   rccl-cub/examples/warp_reduce.rs

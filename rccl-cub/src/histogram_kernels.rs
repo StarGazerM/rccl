@@ -483,11 +483,15 @@ impl<C, const ACTIVE: usize> crate::__private::HistogramInitKernel<C, ACTIVE> fo
 where
     C: crate::__private::HistogramScalar + crate::__private::HistogramCounter,
 {
-    fn launch_histogram_init(
+    fn launch_histogram_init<Output, Queue>(
         &self,
         stream: &crate::__private::cuda_core::CudaStream,
-        storage: crate::__private::HistogramLaunchStorage<'_, C, ACTIVE>,
-    ) -> ::core::result::Result<(), crate::DeviceAlgorithmError> {
+        storage: crate::__private::HistogramLaunchStorage<'_, C, ACTIVE, Output, Output, Queue>,
+    ) -> ::core::result::Result<(), crate::DeviceAlgorithmError>
+    where
+        Output: crate::__private::cuda_host::KernelSliceArgMut<Elem = C>,
+        Queue: crate::__private::cuda_host::KernelSliceArgMut<Elem = i32>,
+    {
         let max_bins = storage.output_lengths.iter().copied().max().unwrap_or(0);
         let grid = max_bins.div_ceil(256).max(1);
         let launch = crate::__private::cuda_core::LaunchConfig1D::new(
@@ -658,16 +662,18 @@ where
             .map_err(crate::DeviceAlgorithmError::Driver)
     }
 
-    fn launch_histogram_even<Samples>(
+    fn launch_histogram_even<Samples, Output, Queue>(
         &self,
         stream: &crate::__private::cuda_core::CudaStream,
         samples: &Samples,
         transforms: [<S as crate::__private::HistogramSample<L>>::EvenTransform; ACTIVE],
-        storage: crate::__private::HistogramLaunchStorage<'_, C, ACTIVE>,
+        storage: crate::__private::HistogramLaunchStorage<'_, C, ACTIVE, Output, Output, Queue>,
         geometry: crate::__private::HistogramLaunchGeometry<O>,
     ) -> ::core::result::Result<(), crate::DeviceAlgorithmError>
     where
         Samples: crate::__private::cuda_host::KernelSliceArg<Elem = S>,
+        Output: crate::__private::cuda_host::KernelSliceArgMut<Elem = C>,
+        Queue: crate::__private::cuda_host::KernelSliceArgMut<Elem = i32>,
     {
         let launch = crate::__private::cuda_core::LaunchConfig2D::new(
             (
@@ -704,6 +710,7 @@ where
                 output_offsets: storage.output_offsets,
                 privatized_lengths: storage.privatized_lengths,
                 privatized_offsets: storage.privatized_offsets,
+                __marker: core::marker::PhantomData,
             },
         )?;
         self.device_histogram_even_sweep::<
@@ -737,16 +744,18 @@ where
                                         .map_err(crate::DeviceAlgorithmError::Launch)
     }
 
-    fn launch_histogram_range<Samples>(
+    fn launch_histogram_range<Samples, Output, Queue>(
         &self,
         stream: &crate::__private::cuda_core::CudaStream,
         samples: &Samples,
         levels: crate::__private::HistogramLevelStorage<'_, L, ACTIVE>,
-        storage: crate::__private::HistogramLaunchStorage<'_, C, ACTIVE>,
+        storage: crate::__private::HistogramLaunchStorage<'_, C, ACTIVE, Output, Output, Queue>,
         geometry: crate::__private::HistogramLaunchGeometry<O>,
     ) -> ::core::result::Result<(), crate::DeviceAlgorithmError>
     where
         Samples: crate::__private::cuda_host::KernelSliceArg<Elem = S>,
+        Output: crate::__private::cuda_host::KernelSliceArgMut<Elem = C>,
+        Queue: crate::__private::cuda_host::KernelSliceArgMut<Elem = i32>,
         L: ::core::cmp::PartialOrd,
     {
         let launch = crate::__private::cuda_core::LaunchConfig2D::new(
@@ -784,6 +793,7 @@ where
                 output_offsets: storage.output_offsets,
                 privatized_lengths: storage.privatized_lengths,
                 privatized_offsets: storage.privatized_offsets,
+                __marker: core::marker::PhantomData,
             },
         )?;
         self.device_histogram_range_sweep::<
@@ -819,15 +829,17 @@ where
                                         .map_err(crate::DeviceAlgorithmError::Launch)
     }
 
-    fn launch_histogram_even_arithmetic(
+    fn launch_histogram_even_arithmetic<Output, Queue>(
         &self,
         stream: &crate::__private::cuda_core::CudaStream,
         samples: &crate::ArithmeticRange<S>,
         transforms: [<S as crate::__private::HistogramSample<L>>::EvenTransform; ACTIVE],
-        storage: crate::__private::HistogramLaunchStorage<'_, C, ACTIVE>,
+        storage: crate::__private::HistogramLaunchStorage<'_, C, ACTIVE, Output, Output, Queue>,
         geometry: crate::__private::HistogramLaunchGeometry<O>,
     ) -> ::core::result::Result<(), crate::DeviceAlgorithmError>
     where
+        Output: crate::__private::cuda_host::KernelSliceArgMut<Elem = C>,
+        Queue: crate::__private::cuda_host::KernelSliceArgMut<Elem = i32>,
         S: ::core::convert::TryFrom<usize>
             + ::core::ops::Add<Output = S>
             + ::core::ops::Mul<Output = S>,
@@ -867,6 +879,7 @@ where
                 output_offsets: storage.output_offsets,
                 privatized_lengths: storage.privatized_lengths,
                 privatized_offsets: storage.privatized_offsets,
+                __marker: core::marker::PhantomData,
             },
         )?;
         self.device_histogram_even_arithmetic_sweep::<
@@ -902,15 +915,17 @@ where
                                         .map_err(crate::DeviceAlgorithmError::Launch)
     }
 
-    fn launch_histogram_range_arithmetic(
+    fn launch_histogram_range_arithmetic<Output, Queue>(
         &self,
         stream: &crate::__private::cuda_core::CudaStream,
         samples: &crate::ArithmeticRange<S>,
         levels: crate::__private::HistogramLevelStorage<'_, L, ACTIVE>,
-        storage: crate::__private::HistogramLaunchStorage<'_, C, ACTIVE>,
+        storage: crate::__private::HistogramLaunchStorage<'_, C, ACTIVE, Output, Output, Queue>,
         geometry: crate::__private::HistogramLaunchGeometry<O>,
     ) -> ::core::result::Result<(), crate::DeviceAlgorithmError>
     where
+        Output: crate::__private::cuda_host::KernelSliceArgMut<Elem = C>,
+        Queue: crate::__private::cuda_host::KernelSliceArgMut<Elem = i32>,
         S: ::core::convert::TryFrom<usize>
             + ::core::ops::Add<Output = S>
             + ::core::ops::Mul<Output = S>,
@@ -951,6 +966,7 @@ where
                 output_offsets: storage.output_offsets,
                 privatized_lengths: storage.privatized_lengths,
                 privatized_offsets: storage.privatized_offsets,
+                __marker: core::marker::PhantomData,
             },
         )?;
         self.device_histogram_range_arithmetic_sweep::<
