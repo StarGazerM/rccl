@@ -166,13 +166,7 @@ where
     Operator: rccl_cub::thrust_integration::GroupReduceOperator<Values::Item>,
     A: DeviceAllocator,
 {
-    let len = validate_reduce_by_key(
-        &keys,
-        &values,
-        &output_keys,
-        &output_values,
-        group_count,
-    )?;
+    let len = validate_reduce_by_key(&keys, &values, &output_keys, &output_values, group_count)?;
     let workspace = rccl_cub::thrust_integration::grouped_reduction_workspace_in(
         execution.allocator(),
         execution.launch(),

@@ -74,7 +74,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let wrapping_input = [u32::MAX, 2, u32::MAX, 5];
     let mut wrapping = DeviceBuffer::from_host(&stream, &wrapping_input)?;
     inclusive_scan(&execution, &mut wrapping)?;
-    assert_eq!(wrapping.to_host_vec(&stream)?, inclusive_u32(&wrapping_input));
+    assert_eq!(
+        wrapping.to_host_vec(&stream)?,
+        inclusive_u32(&wrapping_input)
+    );
 
     println!("device inclusive/exclusive scan boundaries: PASS");
     Ok(())

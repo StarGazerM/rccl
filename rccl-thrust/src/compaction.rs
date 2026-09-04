@@ -44,29 +44,22 @@ pub type PendingFlaggedSelect<'borrow, 'stream, 'program, Input, Flags, Output, 
 pub type PendingUnique<'borrow, 'stream, 'program, Input, Output, Equivalent, A> =
     PendingSelect<'borrow, 'stream, 'program, Input, Output, Equivalent, A>;
 
-pub type PendingInPlaceCompaction<
-    'borrow,
-    'stream,
-    'program,
-    Values,
-    Scratch,
-    Operation,
-    A,
-> = CudaCompletion<
-    'borrow,
-    (),
-    DeviceAlgorithmError,
-    (
-        &'borrow Execution<'stream, 'program, A>,
+pub type PendingInPlaceCompaction<'borrow, 'stream, 'program, Values, Scratch, Operation, A> =
+    CudaCompletion<
+        'borrow,
+        (),
+        DeviceAlgorithmError,
         (
-            Values,
-            Scratch,
-            &'borrow mut DeviceBuffer<u64>,
-            Operation,
-            rccl_cub::thrust_integration::CompactionWorkspace<'stream, &'borrow A>,
+            &'borrow Execution<'stream, 'program, A>,
+            (
+                Values,
+                Scratch,
+                &'borrow mut DeviceBuffer<u64>,
+                Operation,
+                rccl_cub::thrust_integration::CompactionWorkspace<'stream, &'borrow A>,
+            ),
         ),
-    ),
->;
+    >;
 
 fn validate_count(count: &DeviceBuffer<u64>) -> Result<(), DeviceAlgorithmError> {
     if count.is_empty() {
@@ -121,7 +114,10 @@ pub fn select_if_async<'borrow, 'stream, 'program, Input, Output, Predicate, A>(
     output: Output,
     selected_count: &'borrow mut DeviceBuffer<u64>,
     predicate: Predicate,
-) -> Result<PendingSelect<'borrow, 'stream, 'program, Input, Output, Predicate, A>, DeviceAlgorithmError>
+) -> Result<
+    PendingSelect<'borrow, 'stream, 'program, Input, Output, Predicate, A>,
+    DeviceAlgorithmError,
+>
 where
     Input: LowerReadRange,
     Output: LowerWriteRange<Item = Input::Item>,
@@ -176,7 +172,10 @@ pub fn select_flagged_async<'borrow, 'stream, 'program, Input, Flags, Output, A>
     selected: Flags,
     output: Output,
     selected_count: &'borrow mut DeviceBuffer<u64>,
-) -> Result<PendingFlaggedSelect<'borrow, 'stream, 'program, Input, Flags, Output, A>, DeviceAlgorithmError>
+) -> Result<
+    PendingFlaggedSelect<'borrow, 'stream, 'program, Input, Flags, Output, A>,
+    DeviceAlgorithmError,
+>
 where
     Input: LowerReadRange,
     Flags: LowerReadRange<Item = u32>,
@@ -246,7 +245,10 @@ pub fn unique_copy_by_async<'borrow, 'stream, 'program, Input, Output, Equivalen
     output: Output,
     selected_count: &'borrow mut DeviceBuffer<u64>,
     equivalent: Equivalent,
-) -> Result<PendingUnique<'borrow, 'stream, 'program, Input, Output, Equivalent, A>, DeviceAlgorithmError>
+) -> Result<
+    PendingUnique<'borrow, 'stream, 'program, Input, Output, Equivalent, A>,
+    DeviceAlgorithmError,
+>
 where
     Input: LowerReadRange,
     Output: LowerWriteRange<Item = Input::Item>,
@@ -307,7 +309,10 @@ pub fn unique_by_async<'borrow, 'stream, 'program, Values, Scratch, Equivalent, 
     scratch: Scratch,
     selected_count: &'borrow mut DeviceBuffer<u64>,
     equivalent: Equivalent,
-) -> Result<PendingInPlaceCompaction<'borrow, 'stream, 'program, Values, Scratch, Equivalent, A>, DeviceAlgorithmError>
+) -> Result<
+    PendingInPlaceCompaction<'borrow, 'stream, 'program, Values, Scratch, Equivalent, A>,
+    DeviceAlgorithmError,
+>
 where
     Values: LowerReadRange<Item = T> + LowerWriteRange<Item = T>,
     Scratch: LowerReadRange<Item = T> + LowerWriteRange<Item = T>,
@@ -332,12 +337,9 @@ where
         execution.submit(
             (values, scratch, selected_count, equivalent, workspace),
             |execution, resources| {
-                crate::backend::range_transform(
-                    execution,
-                    &resources.0,
-                    &resources.1,
-                    &|value| value,
-                )?;
+                crate::backend::range_transform(execution, &resources.0, &resources.1, &|value| {
+                    value
+                })?;
                 rccl_cub::thrust_integration::device_unique_copy_by(
                     execution.launch(),
                     resources.0.lower_read(),
@@ -347,12 +349,9 @@ where
                     len,
                     &mut resources.4,
                 )?;
-                crate::backend::range_transform(
-                    execution,
-                    &resources.1,
-                    &resources.0,
-                    &|value| value,
-                )
+                crate::backend::range_transform(execution, &resources.1, &resources.0, &|value| {
+                    value
+                })
             },
         )
     })
@@ -384,7 +383,10 @@ pub fn stable_partition_by_async<'borrow, 'stream, 'program, Values, Scratch, Pr
     scratch: Scratch,
     selected_count: &'borrow mut DeviceBuffer<u64>,
     predicate: Predicate,
-) -> Result<PendingInPlaceCompaction<'borrow, 'stream, 'program, Values, Scratch, Predicate, A>, DeviceAlgorithmError>
+) -> Result<
+    PendingInPlaceCompaction<'borrow, 'stream, 'program, Values, Scratch, Predicate, A>,
+    DeviceAlgorithmError,
+>
 where
     Values: LowerReadRange<Item = T> + LowerWriteRange<Item = T>,
     Scratch: LowerReadRange<Item = T> + LowerWriteRange<Item = T>,
@@ -418,12 +420,9 @@ where
                     len,
                     &mut resources.4,
                 )?;
-                crate::backend::range_transform(
-                    execution,
-                    &resources.1,
-                    &resources.0,
-                    &|value| value,
-                )
+                crate::backend::range_transform(execution, &resources.1, &resources.0, &|value| {
+                    value
+                })
             },
         )
     })

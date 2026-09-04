@@ -7,7 +7,7 @@ use crate::{
     DeviceAlgorithmError,
     compaction::{CompactionIndex, CompactionWorkspace, compaction_workspace_in},
     cuda::Launch,
-    scan::device_exclusive_sum_region,
+    scan::device_exclusive_sum_region_into,
 };
 
 mod sealed {
@@ -64,11 +64,7 @@ pub struct BooleanOr;
 impl sealed::Sealed for BooleanOr {}
 impl GroupReduceOperator<BooleanProvenance> for BooleanOr {
     #[inline(always)]
-    fn combine(
-        self,
-        left: BooleanProvenance,
-        right: BooleanProvenance,
-    ) -> BooleanProvenance {
+    fn combine(self, left: BooleanProvenance, right: BooleanProvenance) -> BooleanProvenance {
         BooleanProvenance::new(left.get() || right.get())
     }
 }
@@ -129,9 +125,9 @@ where
 {
     let (heads, positions) = marks.parts_mut();
     launch
-        .compaction_mark_adjacent_unique(keys, heads, positions, equivalent, len)
+        .compaction_mark_adjacent_unique(keys, heads, equivalent, len)
         .map_err(DeviceAlgorithmError::Launch)?;
-    device_exclusive_sum_region(launch, positions, scan)?;
+    device_exclusive_sum_region_into(launch, heads, positions, scan)?;
     launch
         .compaction_reduce_adjacent_groups(
             keys,
@@ -178,44 +174,43 @@ where
         });
     }
     match workspace {
-        CompactionWorkspace::U32 { marks, scan } => reduce_by_key_inner::<
-            _, _, _, _, _, _, _, u32,
-        >(
-            launch,
-            keys,
-            values,
-            output_keys,
-            output_values,
-            group_count,
-            equivalent,
-            operator,
-            len,
-            marks,
-            scan,
-        ),
-        CompactionWorkspace::U64 { marks, scan } => reduce_by_key_inner::<
-            _, _, _, _, _, _, _, u64,
-        >(
-            launch,
-            keys,
-            values,
-            output_keys,
-            output_values,
-            group_count,
-            equivalent,
-            operator,
-            len,
-            marks,
-            scan,
-        ),
+        CompactionWorkspace::U32 { marks, scan } => {
+            reduce_by_key_inner::<_, _, _, _, _, _, _, u32>(
+                launch,
+                keys,
+                values,
+                output_keys,
+                output_values,
+                group_count,
+                equivalent,
+                operator,
+                len,
+                marks,
+                scan,
+            )
+        }
+        CompactionWorkspace::U64 { marks, scan } => {
+            reduce_by_key_inner::<_, _, _, _, _, _, _, u64>(
+                launch,
+                keys,
+                values,
+                output_keys,
+                output_values,
+                group_count,
+                equivalent,
+                operator,
+                len,
+                marks,
+                scan,
+            )
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        BooleanOr, BooleanProvenance, GroupReduceOperator, IndependentProbabilityOr,
-        NaturalBagAdd,
+        BooleanOr, BooleanProvenance, GroupReduceOperator, IndependentProbabilityOr, NaturalBagAdd,
     };
 
     #[test]
@@ -239,7 +234,10 @@ mod tests {
 
     #[test]
     fn grouped_positions_use_common_u32_then_u64() {
-        assert_eq!(crate::compaction::compaction_index_bits(u32::MAX as usize), 32);
+        assert_eq!(
+            crate::compaction::compaction_index_bits(u32::MAX as usize),
+            32
+        );
         assert_eq!(
             crate::compaction::compaction_index_bits(u32::MAX as usize + 1),
             64

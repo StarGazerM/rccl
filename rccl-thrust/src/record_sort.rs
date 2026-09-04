@@ -57,14 +57,7 @@ pub type PendingRowSortInto<'borrow, 'stream, 'program, const N: usize, A> = Cud
     ),
 >;
 
-pub type PendingRowPayloadSort<
-    'borrow,
-    'stream,
-    'program,
-    V,
-    const N: usize,
-    A,
-> = CudaCompletion<
+pub type PendingRowPayloadSort<'borrow, 'stream, 'program, V, const N: usize, A> = CudaCompletion<
     'borrow,
     (),
     DeviceAlgorithmError,
@@ -78,28 +71,22 @@ pub type PendingRowPayloadSort<
     ),
 >;
 
-pub type PendingRowPayloadSortInto<
-    'borrow,
-    'stream,
-    'program,
-    V,
-    const N: usize,
-    A,
-> = CudaCompletion<
-    'borrow,
-    (),
-    DeviceAlgorithmError,
-    (
-        &'borrow Execution<'stream, 'program, A>,
+pub type PendingRowPayloadSortInto<'borrow, 'stream, 'program, V, const N: usize, A> =
+    CudaCompletion<
+        'borrow,
+        (),
+        DeviceAlgorithmError,
         (
-            &'borrow DeviceBuffer<RelationRow<N>>,
-            &'borrow DeviceBuffer<V>,
-            &'borrow mut DeviceBuffer<RelationRow<N>>,
-            &'borrow mut DeviceBuffer<V>,
-            rccl_cub::DeviceMergeSortPairsWorkspace<RelationRow<N>, V>,
+            &'borrow Execution<'stream, 'program, A>,
+            (
+                &'borrow DeviceBuffer<RelationRow<N>>,
+                &'borrow DeviceBuffer<V>,
+                &'borrow mut DeviceBuffer<RelationRow<N>>,
+                &'borrow mut DeviceBuffer<V>,
+                rccl_cub::DeviceMergeSortPairsWorkspace<RelationRow<N>, V>,
+            ),
         ),
-    ),
->;
+    >;
 
 #[inline(always)]
 fn ascending<const N: usize>(left: &RelationRow<N>, right: &RelationRow<N>) -> Ordering {
@@ -257,8 +244,7 @@ where
 {
     validate_arity::<N>()?;
     validate_length("record-sort payload", rows.len(), payloads.len())?;
-    let workspace =
-        rccl_cub::device_merge_sort_pairs_workspace(execution.launch(), rows.len())?;
+    let workspace = rccl_cub::device_merge_sort_pairs_workspace(execution.launch(), rows.len())?;
     Ok(unsafe {
         execution.submit((rows, payloads, workspace), |execution, resources| {
             rccl_cub::device_merge_sort_pairs(

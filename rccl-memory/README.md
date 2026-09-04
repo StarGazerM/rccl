@@ -72,14 +72,11 @@ let cuda_pool = CudaPoolMemoryResource::new(
 )?;
 let tracked = TrackingMemoryResource::new(&cuda_pool);
 
-let exec = rccl::cuda::par_in(&stream, &tracked)?;
 let mut keys = DeviceBuffer::<u32, _>::zeroed_in(
     &tracked,
     &stream,
     1 << 20,
 )?;
-
-rccl::sort(&exec, &mut keys)?;
 ```
 
 The compilable end-to-end form is

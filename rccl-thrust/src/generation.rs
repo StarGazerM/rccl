@@ -152,12 +152,7 @@ where
     // callable captures, and execution until the selected kernel finishes.
     unsafe {
         execution.submit((input, output, op), |execution, resources| {
-            crate::backend::range_generate(
-                execution,
-                &resources.0,
-                &resources.1,
-                &resources.2,
-            )
+            crate::backend::range_generate(execution, &resources.0, &resources.1, &resources.2)
         })
     }
 }

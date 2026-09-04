@@ -6,8 +6,7 @@ pub const SCAN_THREADS: u32 = 256;
 
 pub const LOOKBACK_SCAN_THREADS: u32 = 128;
 pub const LOOKBACK_SCAN_ITEMS: usize = 15;
-pub const LOOKBACK_SCAN_TILE_ITEMS: usize =
-    LOOKBACK_SCAN_THREADS as usize * LOOKBACK_SCAN_ITEMS;
+pub const LOOKBACK_SCAN_TILE_ITEMS: usize = LOOKBACK_SCAN_THREADS as usize * LOOKBACK_SCAN_ITEMS;
 pub const LOOKBACK_SCAN_PADDING: usize = 32;
 const LOOKBACK_SCAN_SHARED_BYTES: usize = 8_192;
 
@@ -40,9 +39,7 @@ macro_rules! for_each_lookback_item {
 #[cuda_module]
 #[doc(hidden)]
 mod device {
-    use cuda_device::{
-        DisjointSlice, kernel, launch_bounds, launch_contract, thread, warp,
-    };
+    use cuda_device::{DisjointSlice, kernel, launch_bounds, launch_contract, thread, warp};
 
     const TILE_INVALID: u32 = 0;
     const TILE_PARTIAL: u32 = 1;
@@ -68,8 +65,7 @@ mod device {
         state: &mut crate::__private::DeviceRegion<'_, u64>,
         predecessor: u32,
     ) -> (u32, u32) {
-        let physical = predecessor
-            .wrapping_add(super::LOOKBACK_SCAN_PADDING as u32) as usize;
+        let physical = predecessor.wrapping_add(super::LOOKBACK_SCAN_PADDING as u32) as usize;
         let mut value = state.read_volatile(physical);
         while warp::any_sync(u32::MAX, descriptor_status(value) == TILE_INVALID) {
             crate::__private::set_lookback_retry_delay();
@@ -128,10 +124,7 @@ mod device {
         if lane == 0 {
             state.write_volatile(
                 super::LOOKBACK_SCAN_PADDING + tile_index as usize,
-                descriptor(
-                    TILE_INCLUSIVE,
-                    exclusive.wrapping_add(block_aggregate),
-                ),
+                descriptor(TILE_INCLUSIVE, exclusive.wrapping_add(block_aggregate)),
             );
         }
         exclusive
@@ -140,10 +133,7 @@ mod device {
     #[kernel(launch_context = launch_context)]
     #[launch_bounds(128)]
     #[launch_contract(domain = 1, block = (128, 1, 1))]
-    pub fn device_scan_lookback_init_u32(
-        tile_state: DisjointSlice<u64>,
-        tile_count: usize,
-    ) {
+    pub fn device_scan_lookback_init_u32(tile_state: DisjointSlice<u64>, tile_count: usize) {
         let _ = launch_context;
         let mut tile_state = crate::__private::DeviceRegion::new(tile_state);
         let index = thread::blockIdx_x() as usize * super::LOOKBACK_SCAN_THREADS as usize
@@ -163,7 +153,8 @@ mod device {
     #[launch_bounds(128)]
     #[launch_contract(domain = 1, block = (128, 1, 1))]
     pub fn device_scan_lookback_u32(
-        values: DisjointSlice<u32>,
+        input: &[u32],
+        output: DisjointSlice<u32>,
         tile_state: DisjointSlice<u64>,
         len: usize,
     ) {
@@ -176,20 +167,17 @@ mod device {
         let thread_index = thread::threadIdx_x() as usize;
         let tile_index = thread::blockIdx_x();
         let tile_base = tile_index as usize * super::LOOKBACK_SCAN_TILE_ITEMS;
-        let mut values = crate::__private::DeviceRegion::new(values);
+        let mut output = crate::__private::DeviceRegion::new(output);
         let mut tile_state = crate::__private::DeviceRegion::new(tile_state);
         let mut exchange = shared.region::<u32>(0, super::LOOKBACK_SCAN_TILE_ITEMS);
         let mut local = [0u32; super::LOOKBACK_SCAN_ITEMS];
 
         for_each_lookback_item!(item, {
-            let index = tile_base
-                + item * super::LOOKBACK_SCAN_THREADS as usize
-                + thread_index;
-            exchange.write(item * super::LOOKBACK_SCAN_THREADS as usize + thread_index, if index < len {
-                values.read(index)
-            } else {
-                0
-            });
+            let index = tile_base + item * super::LOOKBACK_SCAN_THREADS as usize + thread_index;
+            exchange.write(
+                item * super::LOOKBACK_SCAN_THREADS as usize + thread_index,
+                if index < len { input[index] } else { 0 },
+            );
         });
         thread::sync_threads();
         for_each_lookback_item!(item, {
@@ -201,11 +189,8 @@ mod device {
         for_each_lookback_item!(item, {
             aggregate = aggregate.wrapping_add(local[item]);
         });
-        let scanned = crate::__private::block_scan_sum_128(
-            aggregate,
-            super::LOOKBACK_SCAN_THREADS,
-            &shared,
-        );
+        let scanned =
+            crate::__private::block_scan_sum_128(aggregate, super::LOOKBACK_SCAN_THREADS, &shared);
 
         let mut tile_prefix = 0u32;
         if tile_index == 0 {
@@ -240,15 +225,16 @@ mod device {
         });
         let _ = running;
         for_each_lookback_item!(item, {
-            exchange.write(thread_index * super::LOOKBACK_SCAN_ITEMS + item, local[item]);
+            exchange.write(
+                thread_index * super::LOOKBACK_SCAN_ITEMS + item,
+                local[item],
+            );
         });
         thread::sync_threads();
         for_each_lookback_item!(item, {
-            let index = tile_base
-                + item * super::LOOKBACK_SCAN_THREADS as usize
-                + thread_index;
+            let index = tile_base + item * super::LOOKBACK_SCAN_THREADS as usize + thread_index;
             if index < len {
-                values.write(
+                output.write(
                     index,
                     exchange.read(item * super::LOOKBACK_SCAN_THREADS as usize + thread_index),
                 );

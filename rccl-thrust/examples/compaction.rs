@@ -5,7 +5,10 @@ use rccl_thrust::{
 };
 use std::error::Error;
 
-fn count(stream: &cuda_core::CudaStream, value: &DeviceBuffer<u64>) -> Result<usize, Box<dyn Error>> {
+fn count(
+    stream: &cuda_core::CudaStream,
+    value: &DeviceBuffer<u64>,
+) -> Result<usize, Box<dyn Error>> {
     Ok(value.to_host_vec(stream)?[0] as usize)
 }
 
@@ -92,13 +95,18 @@ fn adjacent_unique(
         in_place_keys
             .view_mut()
             .with_values(in_place_provenance.view_mut())?,
-        scratch_keys.view_mut().with_values(scratch_provenance.view_mut())?,
+        scratch_keys
+            .view_mut()
+            .with_values(scratch_provenance.view_mut())?,
         &mut selected_count,
         |left, right| left.0 == right.0,
     )?;
     let selected = count(stream, &selected_count)?;
     assert_eq!(selected, 4);
-    assert_eq!(&in_place_keys.to_host_vec(stream)?[..selected], [1, 2, 1, 3]);
+    assert_eq!(
+        &in_place_keys.to_host_vec(stream)?[..selected],
+        [1, 2, 1, 3]
+    );
     assert_eq!(
         &in_place_provenance.to_host_vec(stream)?[..selected],
         [10, 20, 12, 30]
@@ -149,7 +157,11 @@ fn partition_boundaries(
                 1 => true,
                 _ => value % 5 <= 1,
             };
-            let mut expected = input.iter().copied().filter(|&value| predicate(value)).collect::<Vec<_>>();
+            let mut expected = input
+                .iter()
+                .copied()
+                .filter(|&value| predicate(value))
+                .collect::<Vec<_>>();
             let selected = expected.len();
             expected.extend(input.iter().copied().filter(|&value| !predicate(value)));
             let mut values = DeviceBuffer::from_host(stream, &input)?;
@@ -181,7 +193,9 @@ fn stable_partition(
     stable_partition_by(
         execution,
         keys.view_mut().with_values(provenance.view_mut())?,
-        scratch_keys.view_mut().with_values(scratch_provenance.view_mut())?,
+        scratch_keys
+            .view_mut()
+            .with_values(scratch_provenance.view_mut())?,
         &mut selected_count,
         |item| item.0 % 2 == 1,
     )?;

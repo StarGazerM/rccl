@@ -7,9 +7,7 @@ use cuda_device::{
     thread,
 };
 
-use crate::{
-    ExactInsertOutcome, ExactRowSetReadRef, ExactRowSetRef, Row, XxHash64,
-};
+use crate::{ExactInsertOutcome, ExactRowSetReadRef, ExactRowSetRef, Row, XxHash64};
 
 #[inline(always)]
 pub fn clear(index: thread::ThreadIndex<'_>, mut states: DisjointSlice<u32>) {

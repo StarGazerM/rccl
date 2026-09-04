@@ -2,7 +2,6 @@
 
 use cuda_device::cuda_module;
 
-
 #[cuda_module]
 #[doc(hidden)]
 mod device {
@@ -14,7 +13,6 @@ mod device {
     pub fn mark_predicate<Input, I, Predicate>(
         input: Input,
         flags: DisjointSlice<I>,
-        positions: DisjointSlice<I>,
         predicate: Predicate,
         len: usize,
     ) where
@@ -24,14 +22,12 @@ mod device {
     {
         let _ = launch_context;
         let mut flags = crate::__private::DeviceRegion::new(flags);
-        let mut positions = crate::__private::DeviceRegion::new(positions);
         let mut index = thread::blockIdx_x() as usize * thread::blockDim_x() as usize
             + thread::threadIdx_x() as usize;
         while index < len {
             let selected = predicate(unsafe { input.read_at(index) });
             let flag = if selected { I::one() } else { I::zero() };
             flags.write(index, flag);
-            positions.write(index, flag);
             if !I::GRID_STRIDE {
                 break;
             }
@@ -42,18 +38,13 @@ mod device {
     #[kernel(launch_context = launch_context)]
     #[launch_bounds(256)]
     #[launch_contract(domain = 1, block = (256, 1, 1))]
-    pub fn mark_flagged<Flags, I>(
-        selected: Flags,
-        flags: DisjointSlice<I>,
-        positions: DisjointSlice<I>,
-        len: usize,
-    ) where
+    pub fn mark_flagged<Flags, I>(selected: Flags, flags: DisjointSlice<I>, len: usize)
+    where
         Flags: crate::DeviceReadAt<Item = u32>,
         I: crate::__private::CompactionIndex,
     {
         let _ = launch_context;
         let mut flags = crate::__private::DeviceRegion::new(flags);
-        let mut positions = crate::__private::DeviceRegion::new(positions);
         let mut index = thread::blockIdx_x() as usize * thread::blockDim_x() as usize
             + thread::threadIdx_x() as usize;
         while index < len {
@@ -63,7 +54,6 @@ mod device {
                 I::zero()
             };
             flags.write(index, flag);
-            positions.write(index, flag);
             if !I::GRID_STRIDE {
                 break;
             }
@@ -77,7 +67,6 @@ mod device {
     pub fn mark_adjacent_unique<Input, I, Equivalent>(
         input: Input,
         flags: DisjointSlice<I>,
-        positions: DisjointSlice<I>,
         equivalent: Equivalent,
         len: usize,
     ) where
@@ -87,18 +76,15 @@ mod device {
     {
         let _ = launch_context;
         let mut flags = crate::__private::DeviceRegion::new(flags);
-        let mut positions = crate::__private::DeviceRegion::new(positions);
         let mut index = thread::blockIdx_x() as usize * thread::blockDim_x() as usize
             + thread::threadIdx_x() as usize;
         while index < len {
             let keep = index == 0
-                || !equivalent(
-                    unsafe { input.read_at(index - 1) },
-                    unsafe { input.read_at(index) },
-                );
+                || !equivalent(unsafe { input.read_at(index - 1) }, unsafe {
+                    input.read_at(index)
+                });
             let flag = if keep { I::one() } else { I::zero() };
             flags.write(index, flag);
-            positions.write(index, flag);
             if !I::GRID_STRIDE {
                 break;
             }
@@ -194,14 +180,7 @@ mod device {
     #[kernel(launch_context = launch_context)]
     #[launch_bounds(256)]
     #[launch_contract(domain = 1, block = (256, 1, 1))]
-    pub fn reduce_adjacent_groups<
-        Keys,
-        Values,
-        OutputKeys,
-        OutputValues,
-        I,
-        Operator,
-    >(
+    pub fn reduce_adjacent_groups<Keys, Values, OutputKeys, OutputValues, I, Operator>(
         keys: Keys,
         values: Values,
         output_keys: OutputKeys,

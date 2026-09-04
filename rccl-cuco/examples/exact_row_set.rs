@@ -35,18 +35,14 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Row<1> exercises the minimum HISA arity through the general full-row
     // publication path (the packed Row<2> benchmark path is separate).
-    let unary_rows = DeviceBuffer::from_host(
-        &stream,
-        &[Row::new([1]), Row::new([2]), Row::new([1])],
-    )?;
+    let unary_rows =
+        DeviceBuffer::from_host(&stream, &[Row::new([1]), Row::new([2]), Row::new([1])])?;
     let mut unary = ExactRowSetConfig::with_capacity(8, Row::new([u32::MAX])).build(&launch)?;
     let unary_report = unary.insert(&unary_rows, &launch)?;
     assert_eq!(unary_report.inserted, 2);
     assert_eq!(unary_report.duplicates, 1);
-    let unary_queries = DeviceBuffer::from_host(
-        &stream,
-        &[Row::new([1]), Row::new([2]), Row::new([3])],
-    )?;
+    let unary_queries =
+        DeviceBuffer::from_host(&stream, &[Row::new([1]), Row::new([2]), Row::new([3])])?;
     let mut unary_output = DeviceBuffer::<u32>::zeroed(&stream, 3)?;
     unary.contains(&unary_queries, &mut unary_output, &launch)?;
     assert_eq!(unary_output.to_host_vec(&stream)?, [1, 1, 0]);
@@ -62,7 +58,12 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut present = DeviceBuffer::<u32>::zeroed(&stream, input.len())?;
     set.contains_async(&input, &mut present, &launch)?.wait()?;
-    assert!(present.to_host_vec(&stream)?.into_iter().all(|value| value == 1));
+    assert!(
+        present
+            .to_host_vec(&stream)?
+            .into_iter()
+            .all(|value| value == 1)
+    );
 
     let absent_host: Vec<Row<4>> = (20_000..30_000)
         .map(|value| Row::new([value, value ^ 0xdead_beef, 17, 29]))
@@ -71,7 +72,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     let absent = DeviceBuffer::from_host(&stream, &absent_host)?;
     let mut absent_output = DeviceBuffer::<u32>::zeroed(&stream, absent.len())?;
     set.contains(&absent, &mut absent_output, &launch)?;
-    assert!(absent_output.to_host_vec(&stream)?.into_iter().all(|value| value == 0));
+    assert!(
+        absent_output
+            .to_host_vec(&stream)?
+            .into_iter()
+            .all(|value| value == 0)
+    );
 
     // A deliberately identical hash for every row proves that the hash is only
     // a probe/filter value: full row equality remains authoritative.
@@ -82,19 +88,25 @@ fn main() -> Result<(), Box<dyn Error>> {
     ];
     let collision_rows = DeviceBuffer::from_host(&stream, &collision_host)?;
     let mut collision_set = ExactRowSetConfig::with_capacity(32, sentinel).build(&launch)?;
-    let collision_report = collision_set.insert_forced_hash(&collision_rows, 0xabad_1dea, &launch)?;
+    let collision_report =
+        collision_set.insert_forced_hash(&collision_rows, 0xabad_1dea, &launch)?;
     assert_eq!(collision_report.inserted, 3);
     assert_eq!(collision_report.duplicates, 0);
     let collision_queries = DeviceBuffer::from_host(
         &stream,
         &[
-            collision_host[0], collision_host[1], collision_host[2],
+            collision_host[0],
+            collision_host[1],
+            collision_host[2],
             Row::new([1, 2, 3, 5]),
         ],
     )?;
     let mut collision_output = DeviceBuffer::<u32>::zeroed(&stream, 4)?;
     collision_set.contains_forced_hash(
-        &collision_queries, &mut collision_output, 0xabad_1dea, &launch,
+        &collision_queries,
+        &mut collision_output,
+        0xabad_1dea,
+        &launch,
     )?;
     assert_eq!(collision_output.to_host_vec(&stream)?, [1, 1, 1, 0]);
 
@@ -112,8 +124,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut boundary_output = DeviceBuffer::<u32>::zeroed(&stream, 10)?;
     boundary.contains(&boundary_rows, &mut boundary_output, &launch)?;
     let boundary_presence = boundary_output.to_host_vec(&stream)?;
-    assert_eq!(boundary_presence.iter().filter(|value| **value == 1).count(), 8);
-    assert_eq!(boundary_presence.iter().filter(|value| **value == 0).count(), 2);
+    assert_eq!(
+        boundary_presence
+            .iter()
+            .filter(|value| **value == 1)
+            .count(),
+        8
+    );
+    assert_eq!(
+        boundary_presence
+            .iter()
+            .filter(|value| **value == 0)
+            .count(),
+        2
+    );
 
     let sentinel_rows = DeviceBuffer::from_host(&stream, &[sentinel])?;
     match boundary.insert(&sentinel_rows, &launch) {
@@ -123,7 +147,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     boundary.clear(&launch)?;
     let singleton = DeviceBuffer::from_host(&stream, &[Row::new([7, 8, 9, 10])])?;
-    boundary.insert_prevalidated_async(&singleton, &launch)?.wait()?;
+    boundary
+        .insert_prevalidated_async(&singleton, &launch)?
+        .wait()?;
     let mut singleton_output = DeviceBuffer::<u32>::zeroed(&stream, 1)?;
     boundary.contains(&singleton, &mut singleton_output, &launch)?;
     assert_eq!(singleton_output.to_host_vec(&stream)?, [1]);

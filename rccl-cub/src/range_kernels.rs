@@ -4,8 +4,7 @@ use cuda_device::cuda_module;
 
 pub(crate) const GENERATION_THREADS: u32 = 256;
 pub(crate) const GENERATION_ITEMS_PER_THREAD: u32 = 8;
-pub(crate) const GENERATION_TILE_ITEMS: u32 =
-    GENERATION_THREADS * GENERATION_ITEMS_PER_THREAD;
+pub(crate) const GENERATION_TILE_ITEMS: u32 = GENERATION_THREADS * GENERATION_ITEMS_PER_THREAD;
 
 pub(crate) const fn generation_blocks(len: u32) -> u32 {
     len.div_ceil(GENERATION_TILE_ITEMS)
@@ -14,9 +13,9 @@ pub(crate) const fn generation_blocks(len: u32) -> u32 {
 #[cuda_module]
 #[doc(hidden)]
 mod device {
+    use super::{GENERATION_ITEMS_PER_THREAD, GENERATION_THREADS, GENERATION_TILE_ITEMS};
     use crate::range::DenseDeviceWriteAt;
     use cuda_device::{kernel, launch_bounds, launch_contract, thread};
-    use super::{GENERATION_ITEMS_PER_THREAD, GENERATION_THREADS, GENERATION_TILE_ITEMS};
 
     #[derive(Clone, Copy)]
     #[repr(C, align(8))]
@@ -137,12 +136,8 @@ mod device {
     #[kernel(launch_context = launch_context)]
     #[launch_bounds(256)]
     #[launch_contract(domain = 1, block = (256, 1, 1))]
-    pub fn range_generate_4b<Input, Output, F>(
-        input: Input,
-        output: Output,
-        op: F,
-        len: u32,
-    ) where
+    pub fn range_generate_4b<Input, Output, F>(input: Input, output: Output, op: F, len: u32)
+    where
         Input: crate::DeviceReadAt,
         Output: DenseDeviceWriteAt,
         F: Fn(Input::Item) -> Output::Item + Copy,

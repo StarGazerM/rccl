@@ -838,7 +838,6 @@ impl<const THREADS: usize, const ITEMS: usize> WarpStripedBlockTile<THREADS, ITE
         }
     }
 
-
     #[inline(always)]
     pub fn output<'output, T>(
         &self,

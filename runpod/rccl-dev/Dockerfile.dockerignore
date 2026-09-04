@@ -1,0 +1,27 @@
+# The repository root is the build context only so the canonical patch can be
+# verified and copied. Nothing else from the mutable RCCL tree enters context.
+**
+!patches/
+!patches/cuda-oxide-read-only-i32x4.patch
+!runpod/
+!runpod/rccl-dev/
+!runpod/rccl-dev/Dockerfile
+!runpod/rccl-dev/self-check.sh
+
+# Defense in depth: credentials, keys, environment files, and common secrets
+# remain excluded even if future context exceptions are broadened.
+**/.cargo/credentials
+**/.cargo/credentials.toml
+**/.docker/config.json
+**/.env
+**/.env.*
+**/.git-credentials
+**/.netrc
+**/.npmrc
+**/.pypirc
+**/.ssh/**
+**/*credential*
+**/*secret*
+**/*token*
+**/id_rsa*
+**/id_ed25519*

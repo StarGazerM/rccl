@@ -69,10 +69,10 @@ impl<K: MapKey, V: MapValue> Sentinels<K, V> {
 
 /// Fixed-capacity GPU hash map with stream-affine storage.
 ///
-/// The production fast path is deliberately restricted to four-byte keys and
-/// values. One pair therefore fits in a single `u64` and is published with one
-/// device-scoped CAS, matching cuCollections' packed-slot path. Mutation
-/// requires an affine `&mut self`; lookup only borrows the map.
+/// Four-byte values use the original packed slot: one `u64` CAS word holding
+/// key and value. `u64` values use a two-word slot with a release-published
+/// key/control word and a full-width value word. Mutation requires an affine
+/// `&mut self`; lookup only borrows the map.
 pub struct StaticMap<'stream, K, V, A, P, const CG: u32 = 4>
 where
     K: MapKey,
@@ -311,11 +311,12 @@ where
         let capacity = valid_capacity::<K, P>(requested_capacity, CG as usize)
             .ok_or(MapError::CapacityOverflow)?;
         let _ = u32::try_from(capacity).map_err(|_| MapError::CapacityOverflow)?;
-        let storage_len = capacity
+        let slot_words = slot_storage_words::<V>(capacity)?;
+        let storage_len = slot_words
             .checked_add(METADATA_WORDS)
             .ok_or(MapError::CapacityOverflow)?;
         let mut storage = DeviceBuffer::zeroed_in(allocator, launch.stream(), storage_len)?;
-        let empty_slot = pack(sentinels.empty_key, sentinels.empty_value);
+        let empty_slot = empty_slot_word(sentinels.empty_key, sentinels.empty_value);
         let submitted = launch
             .module()
             .clear(launch.stream(), &mut storage, capacity, empty_slot);
@@ -378,7 +379,7 @@ where
             launch.stream(),
             &mut self.storage,
             self.capacity,
-            pack(self.sentinels.empty_key, self.sentinels.empty_value),
+            empty_slot_word(self.sentinels.empty_key, self.sentinels.empty_value),
         );
         finish_submission(submitted, launch.stream())
     }
@@ -783,7 +784,7 @@ where
                 capacity: destination_capacity,
             });
         }
-        let allocation_len = destination_capacity
+        let allocation_len = slot_storage_words::<V>(destination_capacity)?
             .checked_add(METADATA_WORDS)
             .ok_or(MapError::CapacityOverflow)?;
         let mut destination = DeviceBuffer::zeroed_in(
@@ -795,7 +796,7 @@ where
             launch.stream(),
             &mut destination,
             destination_capacity,
-            pack(self.sentinels.empty_key, self.sentinels.empty_value),
+            empty_slot_word(self.sentinels.empty_key, self.sentinels.empty_value),
         );
         if let Err(error) = cleared {
             let _ = launch.stream().synchronize();
@@ -868,9 +869,13 @@ where
         }
     }
 
+    fn metadata_offset(&self) -> Result<usize, MapError> {
+        slot_storage_words::<V>(self.capacity)
+    }
+
     fn reset_metadata(&mut self) -> Result<(), MapError> {
-        let byte_offset = self
-            .capacity
+        let metadata_offset = self.metadata_offset()?;
+        let byte_offset = metadata_offset
             .checked_mul(core::mem::size_of::<u64>())
             .ok_or(MapError::CapacityOverflow)?;
         let byte_len = METADATA_WORDS
@@ -890,8 +895,8 @@ where
     }
 
     fn read_metadata(&self) -> Result<[u64; METADATA_WORDS], MapError> {
-        let byte_offset = self
-            .capacity
+        let metadata_offset = self.metadata_offset()?;
+        let byte_offset = metadata_offset
             .checked_mul(core::mem::size_of::<u64>())
             .ok_or(MapError::CapacityOverflow)?;
         let byte_len = METADATA_WORDS
@@ -946,9 +951,38 @@ where
     Ok(())
 }
 
+fn slot_storage_words<V: MapValue>(capacity: usize) -> Result<usize, MapError> {
+    capacity
+        .checked_mul(V::SLOT_WORDS)
+        .ok_or(MapError::CapacityOverflow)
+}
+
 #[inline(always)]
 fn pack<K: MapKey, V: MapValue>(key: K, value: V) -> u64 {
-    key.to_bits() as u64 | ((value.to_bits() as u64) << 32)
+    key.to_bits() as u64 | ((value.to_bits() & 0xffff_ffff) << 32)
+}
+
+#[inline(always)]
+fn empty_slot_word<K: MapKey, V: MapValue>(key: K, value: V) -> u64 {
+    if V::SLOT_WORDS == 1 {
+        pack(key, value)
+    } else {
+        wide_control(key, WIDE_EMPTY)
+    }
+}
+
+const WIDE_EMPTY: u32 = 0;
+const WIDE_FULL: u32 = 1;
+const WIDE_BUSY: u32 = 2;
+
+#[inline(always)]
+fn wide_control<K: MapKey>(key: K, state: u32) -> u64 {
+    key.to_bits() as u64 | ((state as u64) << 32)
+}
+
+#[inline(always)]
+fn wide_state(control: u64) -> u32 {
+    (control >> 32) as u32
 }
 
 #[inline(always)]
@@ -958,7 +992,7 @@ fn packed_key<K: MapKey>(slot: u64) -> K {
 
 #[inline(always)]
 fn packed_value<V: MapValue>(slot: u64) -> V {
-    V::from_bits((slot >> 32) as u32)
+    V::from_bits((slot >> 32) & 0xffff_ffff)
 }
 
 #[inline(always)]
@@ -1001,11 +1035,11 @@ where
     ///
     /// # Safety
     ///
-    /// `CG` must be one of `1, 2, 4, 8, 16, 32`; `slots` must be non-empty
-    /// with a length divisible by `CG`; and every lane in each participating
-    /// `WarpTile<CG>` must invoke the map operation convergently with identical
-    /// arguments. The slot allocation must remain under the packed atomic
-    /// protocol for `'a`, with no concurrent non-atomic mutation.
+    /// `CG` must be one of `1, 2, 4, 8, 16, 32`; `slots` must describe a
+    /// non-empty slot-word allocation whose logical slot count is divisible by
+    /// `CG`; and every lane in each participating `WarpTile<CG>` must invoke
+    /// the map operation convergently with identical arguments. The allocation
+    /// must remain under the static-map atomic protocol for `'a`.
     #[inline(always)]
     pub const unsafe fn new(
         slots: &'a [DeviceAtomicU64],
@@ -1024,21 +1058,33 @@ where
     }
 
     #[inline(always)]
+    fn capacity(&self) -> usize {
+        self.slots.len() / V::SLOT_WORDS
+    }
+
+    #[inline(always)]
+    fn word_index(index: usize) -> usize {
+        index * V::SLOT_WORDS
+    }
+
+    #[inline(always)]
+    fn value_word_index(index: usize) -> usize {
+        Self::word_index(index) + 1
+    }
+
+    #[inline(always)]
     fn optimistic_slot_snapshot(&self, index: usize) -> u64 {
-        // SAFETY: this capability is constructed only for a packed atomic map.
-        // Probe observations select candidates but do not publish data: slot
-        // mutations are authoritative CAS operations, while early no-op
-        // results linearize at a compatible point in the monotonic probe-state
-        // transition. Keeping this load non-coherent is the measured fast path.
-        self.slots[index].cached_snapshot()
+        self.slots[Self::word_index(index)].cached_snapshot()
     }
 
     #[inline(always)]
     fn optimistic_key_snapshot(&self, index: usize) -> u32 {
-        // SAFETY: the no-tombstone path selects candidates solely from the key
-        // lane. Keys never revert to empty there, and every empty-slot claim is
-        // validated by CAS against the complete packed empty word.
-        self.slots[index].cached_low_u32()
+        self.slots[Self::word_index(index)].cached_low_u32()
+    }
+
+    #[inline(always)]
+    fn wide_control_acquire(&self, index: usize) -> u64 {
+        self.slots[Self::word_index(index)].load(cuda_device::atomic::AtomicOrdering::Acquire)
     }
 
     #[inline(always)]
@@ -1075,6 +1121,23 @@ where
         key: K,
         value: V,
     ) -> bool {
+        if V::SLOT_WORDS == 1 {
+            self.insert_packed::<SUPPORTS_ERASE, CHECK_SENTINELS, ASSIGN>(key, value)
+        } else {
+            self.insert_wide::<SUPPORTS_ERASE, CHECK_SENTINELS, ASSIGN>(key, value)
+        }
+    }
+
+    #[inline(always)]
+    fn insert_packed<
+        const SUPPORTS_ERASE: bool,
+        const CHECK_SENTINELS: bool,
+        const ASSIGN: bool,
+    >(
+        &self,
+        key: K,
+        value: V,
+    ) -> bool {
         if CHECK_SENTINELS
             && (key == self.empty_key
                 || (SUPPORTS_ERASE && key == self.erased_key)
@@ -1084,16 +1147,13 @@ where
         }
         let tile = this_thread_block().tiled_partition::<CG>();
         let rank = tile.thread_rank();
-        let groups = self.slots.len() / CG as usize;
+        let groups = self.capacity() / CG as usize;
         let start = self.probing.initial_group(key, groups);
         let step = self.probing.step_groups(key, groups);
         let desired = pack(key, value);
         let empty_slot = pack(self.empty_key, self.empty_value);
         let erased_slot = pack(self.erased_key, self.empty_value);
 
-        // CAS races restart the bounded search. A successful competing insert
-        // makes progress, so a restart cannot livelock after the finite table
-        // becomes stable.
         loop {
             let mut group = start;
             let mut first_erased = usize::MAX;
@@ -1115,7 +1175,9 @@ where
                     let previous = shuffle_u64(&tile, observed, owner);
                     let owner_index = group * CG as usize + owner as usize;
                     let status = if rank == 0 {
-                        match self.slots[owner_index].compare_exchange_relaxed(previous, desired) {
+                        match self.slots[Self::word_index(owner_index)]
+                            .compare_exchange_relaxed(previous, desired)
+                        {
                             Ok(_) => 1,
                             Err(actual) if packed_key::<K>(actual) == key => 2,
                             Err(_) => 0,
@@ -1140,13 +1202,10 @@ where
                 if empty != 0 {
                     let empty_owner = empty.trailing_zeros();
                     if !SUPPORTS_ERASE {
-                        // Match cuCollections' CG insertion schedule: the
-                        // elected lane already owns both the slot address and
-                        // its observed word, so it performs the CAS directly.
-                        // Routing every claim through tile lane zero costs two
-                        // extra 32-bit shuffles for the packed observation.
                         let status = if rank == empty_owner {
-                            match self.slots[index].compare_exchange_relaxed(empty_slot, desired) {
+                            match self.slots[Self::word_index(index)]
+                                .compare_exchange_relaxed(empty_slot, desired)
+                            {
                                 Ok(_) => 1,
                                 Err(actual) if packed_key::<K>(actual) == key => 2,
                                 Err(_) => 0,
@@ -1171,7 +1230,9 @@ where
                         shuffle_u64(&tile, observed, empty_owner)
                     };
                     let status = if rank == 0 {
-                        match self.slots[target].compare_exchange_relaxed(expected, desired) {
+                        match self.slots[Self::word_index(target)]
+                            .compare_exchange_relaxed(expected, desired)
+                        {
                             Ok(_) => 1,
                             Err(actual) if packed_key::<K>(actual) == key => 2,
                             Err(_) => 0,
@@ -1198,7 +1259,9 @@ where
                     return false;
                 }
                 let status = if rank == 0 {
-                    match self.slots[first_erased].compare_exchange_relaxed(erased_slot, desired) {
+                    match self.slots[Self::word_index(first_erased)]
+                        .compare_exchange_relaxed(erased_slot, desired)
+                    {
                         Ok(_) => 1,
                         Err(actual) if packed_key::<K>(actual) == key => 2,
                         Err(_) => 0,
@@ -1216,13 +1279,199 @@ where
     }
 
     #[inline(always)]
+    fn insert_wide<const SUPPORTS_ERASE: bool, const CHECK_SENTINELS: bool, const ASSIGN: bool>(
+        &self,
+        key: K,
+        value: V,
+    ) -> bool {
+        if CHECK_SENTINELS
+            && (key == self.empty_key
+                || (SUPPORTS_ERASE && key == self.erased_key)
+                || value.to_bits() == self.empty_value.to_bits())
+        {
+            return false;
+        }
+        let tile = this_thread_block().tiled_partition::<CG>();
+        let rank = tile.thread_rank();
+        let groups = self.capacity() / CG as usize;
+        let start = self.probing.initial_group(key, groups);
+        let step = self.probing.step_groups(key, groups);
+        let empty_slot = wide_control(self.empty_key, WIDE_EMPTY);
+        let erased_slot = wide_control(self.erased_key, WIDE_EMPTY);
+        let busy_slot = wide_control(key, WIDE_BUSY);
+        let full_slot = wide_control(key, WIDE_FULL);
+
+        loop {
+            let mut group = start;
+            let mut first_erased = usize::MAX;
+            let mut visited = 0_usize;
+            while visited < groups {
+                let index = group * CG as usize + rank as usize;
+                let observed = self.wide_control_acquire(index);
+                let observed_key = packed_key::<K>(observed);
+                let observed_full = wide_state(observed) == WIDE_FULL;
+                let busy = tile.ballot(wide_state(observed) == WIDE_BUSY);
+                if busy != 0 {
+                    break;
+                }
+                let matching = tile.ballot(observed_full && observed_key == key);
+                if matching != 0 {
+                    if !ASSIGN {
+                        return false;
+                    }
+                    let owner = matching.trailing_zeros();
+                    let owner_index = group * CG as usize + owner as usize;
+                    let status = if rank == 0 {
+                        match self.slots[Self::word_index(owner_index)].compare_exchange(
+                            wide_control(key, WIDE_FULL),
+                            wide_control(key, WIDE_BUSY),
+                            cuda_device::atomic::AtomicOrdering::AcqRel,
+                            cuda_device::atomic::AtomicOrdering::Acquire,
+                        ) {
+                            Ok(_) => {
+                                self.slots[Self::value_word_index(owner_index)].store(
+                                    value.to_bits(),
+                                    cuda_device::atomic::AtomicOrdering::Relaxed,
+                                );
+                                self.slots[Self::word_index(owner_index)]
+                                    .store(full_slot, cuda_device::atomic::AtomicOrdering::Release);
+                                1
+                            }
+                            Err(actual)
+                                if packed_key::<K>(actual) == key
+                                    && wide_state(actual) == WIDE_FULL =>
+                            {
+                                2
+                            }
+                            Err(_) => 0,
+                        }
+                    } else {
+                        0
+                    };
+                    match tile.shfl(status, 0) {
+                        1 | 2 => return false,
+                        _ => break,
+                    }
+                }
+
+                if SUPPORTS_ERASE && first_erased == usize::MAX {
+                    let erased = tile.ballot(observed_key == self.erased_key);
+                    if erased != 0 {
+                        first_erased = group * CG as usize + erased.trailing_zeros() as usize;
+                    }
+                }
+
+                let empty = tile.ballot(observed_key == self.empty_key);
+                if empty != 0 {
+                    let empty_owner = empty.trailing_zeros();
+                    let target = if SUPPORTS_ERASE && first_erased != usize::MAX {
+                        first_erased
+                    } else {
+                        group * CG as usize + empty_owner as usize
+                    };
+                    let expected = if SUPPORTS_ERASE && first_erased != usize::MAX {
+                        erased_slot
+                    } else {
+                        empty_slot
+                    };
+                    let status = if rank == 0 {
+                        match self.slots[Self::word_index(target)].compare_exchange(
+                            expected,
+                            busy_slot,
+                            cuda_device::atomic::AtomicOrdering::AcqRel,
+                            cuda_device::atomic::AtomicOrdering::Acquire,
+                        ) {
+                            Ok(_) => {
+                                self.slots[Self::value_word_index(target)].store(
+                                    value.to_bits(),
+                                    cuda_device::atomic::AtomicOrdering::Relaxed,
+                                );
+                                self.slots[Self::word_index(target)]
+                                    .store(full_slot, cuda_device::atomic::AtomicOrdering::Release);
+                                1
+                            }
+                            Err(actual)
+                                if packed_key::<K>(actual) == key
+                                    && wide_state(actual) == WIDE_FULL =>
+                            {
+                                2
+                            }
+                            Err(_) => 0,
+                        }
+                    } else {
+                        0
+                    };
+                    match tile.shfl(status, 0) {
+                        1 => return true,
+                        2 => return false,
+                        _ => break,
+                    }
+                }
+
+                visited += 1;
+                group += step;
+                if group >= groups {
+                    group -= groups;
+                }
+            }
+
+            if visited == groups {
+                if !SUPPORTS_ERASE || first_erased == usize::MAX {
+                    return false;
+                }
+                let status = if rank == 0 {
+                    match self.slots[Self::word_index(first_erased)].compare_exchange(
+                        erased_slot,
+                        busy_slot,
+                        cuda_device::atomic::AtomicOrdering::AcqRel,
+                        cuda_device::atomic::AtomicOrdering::Acquire,
+                    ) {
+                        Ok(_) => {
+                            self.slots[Self::value_word_index(first_erased)].store(
+                                value.to_bits(),
+                                cuda_device::atomic::AtomicOrdering::Relaxed,
+                            );
+                            self.slots[Self::word_index(first_erased)]
+                                .store(full_slot, cuda_device::atomic::AtomicOrdering::Release);
+                            1
+                        }
+                        Err(actual)
+                            if packed_key::<K>(actual) == key
+                                && wide_state(actual) == WIDE_FULL =>
+                        {
+                            2
+                        }
+                        Err(_) => 0,
+                    }
+                } else {
+                    0
+                };
+                match tile.shfl(status, 0) {
+                    1 => return true,
+                    2 => return false,
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    #[inline(always)]
     pub fn erase(&self, key: K) -> bool {
+        if V::SLOT_WORDS == 1 {
+            self.erase_packed(key)
+        } else {
+            self.erase_wide(key)
+        }
+    }
+
+    #[inline(always)]
+    fn erase_packed(&self, key: K) -> bool {
         if self.erased_key == self.empty_key || key == self.empty_key || key == self.erased_key {
             return false;
         }
         let tile = this_thread_block().tiled_partition::<CG>();
         let rank = tile.thread_rank();
-        let groups = self.slots.len() / CG as usize;
+        let groups = self.capacity() / CG as usize;
         let start = self.probing.initial_group(key, groups);
         let step = self.probing.step_groups(key, groups);
         let erased_slot = pack(self.erased_key, self.empty_value);
@@ -1239,8 +1488,63 @@ where
                     let previous = shuffle_u64(&tile, observed, owner);
                     let owner_index = group * CG as usize + owner as usize;
                     let status = if rank == 0 {
-                        self.slots[owner_index]
+                        self.slots[Self::word_index(owner_index)]
                             .compare_exchange_relaxed(previous, erased_slot)
+                            .is_ok() as u32
+                    } else {
+                        0
+                    };
+                    if tile.shfl(status, 0) != 0 {
+                        return true;
+                    }
+                    break;
+                }
+                if tile.ballot(observed_key == self.empty_key) != 0 {
+                    return false;
+                }
+                visited += 1;
+                group = (group + step) % groups;
+            }
+            if visited == groups {
+                return false;
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn erase_wide(&self, key: K) -> bool {
+        if self.erased_key == self.empty_key || key == self.empty_key || key == self.erased_key {
+            return false;
+        }
+        let tile = this_thread_block().tiled_partition::<CG>();
+        let rank = tile.thread_rank();
+        let groups = self.capacity() / CG as usize;
+        let start = self.probing.initial_group(key, groups);
+        let step = self.probing.step_groups(key, groups);
+        let erased_slot = wide_control(self.erased_key, WIDE_EMPTY);
+        loop {
+            let mut group = start;
+            let mut visited = 0_usize;
+            while visited < groups {
+                let index = group * CG as usize + rank as usize;
+                let observed = self.wide_control_acquire(index);
+                if wide_state(observed) == WIDE_BUSY {
+                    break;
+                }
+                let observed_key = packed_key::<K>(observed);
+                let matching =
+                    tile.ballot(wide_state(observed) == WIDE_FULL && observed_key == key);
+                if matching != 0 {
+                    let owner = matching.trailing_zeros();
+                    let owner_index = group * CG as usize + owner as usize;
+                    let status = if rank == 0 {
+                        self.slots[Self::word_index(owner_index)]
+                            .compare_exchange(
+                                wide_control(key, WIDE_FULL),
+                                erased_slot,
+                                cuda_device::atomic::AtomicOrdering::AcqRel,
+                                cuda_device::atomic::AtomicOrdering::Acquire,
+                            )
                             .is_ok() as u32
                     } else {
                         0
@@ -1302,18 +1606,41 @@ where
     }
 
     #[inline(always)]
+    fn capacity(&self) -> usize {
+        self.slots.len() / V::SLOT_WORDS
+    }
+
+    #[inline(always)]
+    fn word_index(index: usize) -> usize {
+        index * V::SLOT_WORDS
+    }
+
+    #[inline(always)]
+    fn value_word_index(index: usize) -> usize {
+        Self::word_index(index) + 1
+    }
+
+    #[inline(always)]
     pub fn find(&self, key: K) -> Option<V> {
         if key == self.empty_key || key == self.erased_key {
             return None;
         }
+        if V::SLOT_WORDS == 1 {
+            return self.find_packed(key);
+        }
+        self.find_wide(key)
+    }
+
+    #[inline(always)]
+    fn find_packed(&self, key: K) -> Option<V> {
         let tile = this_thread_block().tiled_partition::<CG>();
         let rank = tile.thread_rank();
-        let groups = self.slots.len() / CG as usize;
+        let groups = self.capacity() / CG as usize;
         let mut group = self.probing.initial_group(key, groups);
         let step = self.probing.step_groups(key, groups);
         let mut visited = 0_usize;
         while visited < groups {
-            let observed = self.slots[group * CG as usize + rank as usize];
+            let observed = self.slots[Self::word_index(group * CG as usize + rank as usize)];
             let observed_key = packed_key::<K>(observed);
             let matching = tile.ballot(observed_key == key);
             if matching != 0 {
@@ -1327,6 +1654,43 @@ where
             group = (group + step) % groups;
         }
         None
+    }
+
+    #[inline(always)]
+    fn find_wide(&self, key: K) -> Option<V> {
+        let tile = this_thread_block().tiled_partition::<CG>();
+        let rank = tile.thread_rank();
+        let groups = self.capacity() / CG as usize;
+        let start = self.probing.initial_group(key, groups);
+        let step = self.probing.step_groups(key, groups);
+        loop {
+            let mut group = start;
+            let mut visited = 0_usize;
+            while visited < groups {
+                let index = group * CG as usize + rank as usize;
+                let control = self.slots[Self::word_index(index)];
+                if wide_state(control) == WIDE_BUSY {
+                    break;
+                }
+                let observed_key = packed_key::<K>(control);
+                let matching = tile.ballot(wide_state(control) == WIDE_FULL && observed_key == key);
+                if matching != 0 {
+                    let owner = matching.trailing_zeros();
+                    let value =
+                        self.slots[Self::value_word_index(group * CG as usize + owner as usize)];
+                    let value = shuffle_u64(&tile, value, owner);
+                    return Some(V::from_bits(value));
+                }
+                if tile.ballot(observed_key == self.empty_key) != 0 {
+                    return None;
+                }
+                visited += 1;
+                group = (group + step) % groups;
+            }
+            if visited == groups {
+                return None;
+            }
+        }
     }
 
     #[inline(always)]
@@ -1352,5 +1716,13 @@ mod tests {
         let word = pack(-7_i32, f32::from_bits(0x7fc0_1234));
         assert_eq!(packed_key::<i32>(word), -7);
         assert_eq!(packed_value::<f32>(word).to_bits(), 0x7fc0_1234);
+    }
+
+    #[test]
+    fn slot_words_reserve_two_words_for_u64_values() {
+        assert_eq!(slot_storage_words::<u32>(7).unwrap(), 7);
+        assert_eq!(slot_storage_words::<u64>(7).unwrap(), 14);
+        assert_eq!(empty_slot_word(u32::MAX, u32::MAX as u64), u32::MAX as u64);
+        assert_eq!(pack(1_u32, u64::MAX), 0xffff_ffff_0000_0001);
     }
 }

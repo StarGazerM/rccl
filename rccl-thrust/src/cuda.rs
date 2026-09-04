@@ -59,7 +59,6 @@ impl<'stream, 'program, A: DeviceAllocator> Execution<'stream, 'program, A> {
         rccl_cub::thrust_integration::transform_repeat_in_place(&self.launch, output, repeated, op)
     }
 
-
     pub(crate) fn synchronize(
         &self,
         result: Result<(), crate::DeviceAlgorithmError>,

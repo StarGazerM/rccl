@@ -126,7 +126,6 @@ impl<'stream, 'program> Launch<'stream, 'program> {
         self.modules.scan()
     }
 
-
     /// Apply a binary device function between every output item and one
     /// repeated value.
     ///
@@ -158,7 +157,6 @@ impl<'stream, 'program> Launch<'stream, 'program> {
             output,
         )
     }
-
 
     pub(crate) fn reduce_sum_blocks<T, Input, Partials>(
         &self,
@@ -296,8 +294,7 @@ impl<'stream, 'program> Launch<'stream, 'program> {
             return Ok(());
         }
         let blocks = range_kernels::generation_blocks(len);
-        let launch =
-            cuda_core::LaunchConfig1D::new(blocks, range_kernels::GENERATION_THREADS, 0);
+        let launch = cuda_core::LaunchConfig1D::new(blocks, range_kernels::GENERATION_THREADS, 0);
         let prepared = self
             .range_module()
             .prepare_range_fill_4b_for(&output, launch)?;
@@ -324,8 +321,7 @@ impl<'stream, 'program> Launch<'stream, 'program> {
             return Ok(());
         }
         let blocks = range_kernels::generation_blocks(len);
-        let launch =
-            cuda_core::LaunchConfig1D::new(blocks, range_kernels::GENERATION_THREADS, 0);
+        let launch = cuda_core::LaunchConfig1D::new(blocks, range_kernels::GENERATION_THREADS, 0);
         let prepared = self
             .range_module()
             .prepare_range_generate_4b_for(&input, &output, &op, launch)?;
@@ -410,14 +406,16 @@ impl<'stream, 'program> Launch<'stream, 'program> {
         }
     }
 
-    pub(crate) fn scan_lookback_u32<Values, State>(
+    pub(crate) fn scan_lookback_u32<Input, Output, State>(
         &self,
-        values: &mut Values,
+        input: &Input,
+        output: &mut Output,
         tile_state: &mut State,
         len: usize,
     ) -> Result<(), cuda_core::LaunchContractError>
     where
-        Values: cuda_host::KernelSliceArgMut<Elem = u32>,
+        Input: cuda_host::KernelSliceArg<Elem = u32>,
+        Output: cuda_host::KernelSliceArgMut<Elem = u32>,
         State: cuda_host::KernelSliceArgMut<Elem = u64>,
     {
         if len == 0 {
@@ -428,11 +426,8 @@ impl<'stream, 'program> Launch<'stream, 'program> {
         let init_blocks = init_items
             .div_ceil(scan_kernels::LOOKBACK_SCAN_THREADS as usize)
             .min(u32::MAX as usize) as u32;
-        let init_launch = cuda_core::LaunchConfig1D::new(
-            init_blocks,
-            scan_kernels::LOOKBACK_SCAN_THREADS,
-            0,
-        );
+        let init_launch =
+            cuda_core::LaunchConfig1D::new(init_blocks, scan_kernels::LOOKBACK_SCAN_THREADS, 0);
         let prepared = self
             .scan_module()
             .prepare_device_scan_lookback_init_u32(init_launch)?;
@@ -452,7 +447,8 @@ impl<'stream, 'program> Launch<'stream, 'program> {
         self.scan_module().device_scan_lookback_u32(
             self.stream,
             &prepared,
-            values,
+            input,
+            output,
             tile_state,
             len,
         )
@@ -482,15 +478,14 @@ impl<'stream, 'program> Launch<'stream, 'program> {
         let prepared = self
             .scan_module()
             .prepare_device_scan_tiles_for::<T, EXCLUSIVE>(&witness, launch)?;
-        self.scan_module()
-            .device_scan_tiles::<T, EXCLUSIVE>(
-                self.stream,
-                &prepared,
-                input,
-                output,
-                block_sums,
-                len,
-            )
+        self.scan_module().device_scan_tiles::<T, EXCLUSIVE>(
+            self.stream,
+            &prepared,
+            input,
+            output,
+            block_sums,
+            len,
+        )
     }
 
     pub(crate) fn scan_add_block_offsets<T, Values, Offsets>(
@@ -524,11 +519,10 @@ impl<'stream, 'program> Launch<'stream, 'program> {
         )
     }
 
-    pub(crate) fn compaction_mark_predicate<Input, I, Predicate, Flags, Positions>(
+    pub(crate) fn compaction_mark_predicate<Input, I, Predicate, Flags>(
         &self,
         input: Input,
         flags: &mut Flags,
-        positions: &mut Positions,
         predicate: Predicate,
         len: usize,
     ) -> Result<(), cuda_core::LaunchContractError>
@@ -537,7 +531,6 @@ impl<'stream, 'program> Launch<'stream, 'program> {
         I: crate::compaction::CompactionIndex,
         Predicate: Fn(Input::Item) -> bool + Copy,
         Flags: cuda_host::KernelSliceArgMut<Elem = I>,
-        Positions: cuda_host::KernelSliceArgMut<Elem = I>,
     {
         if len == 0 {
             return Ok(());
@@ -545,26 +538,29 @@ impl<'stream, 'program> Launch<'stream, 'program> {
         let blocks = len.div_ceil(256).min(u32::MAX as usize) as u32;
         let config = cuda_core::LaunchConfig1D::new(blocks, 256, 0);
         let witness = I::zero();
-        let prepared = self.compaction_module().prepare_mark_predicate_for::<_, I, _>(
-            &input, &witness, &predicate, config,
-        )?;
+        let prepared = self
+            .compaction_module()
+            .prepare_mark_predicate_for::<_, I, _>(&input, &witness, &predicate, config)?;
         self.compaction_module().mark_predicate::<_, I, _>(
-            self.stream, &prepared, input, flags, positions, predicate, len,
+            self.stream,
+            &prepared,
+            input,
+            flags,
+            predicate,
+            len,
         )
     }
 
-    pub(crate) fn compaction_mark_flagged<Selected, I, Flags, Positions>(
+    pub(crate) fn compaction_mark_flagged<Selected, I, Flags>(
         &self,
         selected: Selected,
         flags: &mut Flags,
-        positions: &mut Positions,
         len: usize,
     ) -> Result<(), cuda_core::LaunchContractError>
     where
         Selected: crate::DeviceReadAt<Item = u32>,
         I: crate::compaction::CompactionIndex,
         Flags: cuda_host::KernelSliceArgMut<Elem = I>,
-        Positions: cuda_host::KernelSliceArgMut<Elem = I>,
     {
         if len == 0 {
             return Ok(());
@@ -575,16 +571,14 @@ impl<'stream, 'program> Launch<'stream, 'program> {
         let prepared = self
             .compaction_module()
             .prepare_mark_flagged_for::<_, I>(&selected, &witness, config)?;
-        self.compaction_module().mark_flagged::<_, I>(
-            self.stream, &prepared, selected, flags, positions, len,
-        )
+        self.compaction_module()
+            .mark_flagged::<_, I>(self.stream, &prepared, selected, flags, len)
     }
 
-    pub(crate) fn compaction_mark_adjacent_unique<Input, I, Equivalent, Flags, Positions>(
+    pub(crate) fn compaction_mark_adjacent_unique<Input, I, Equivalent, Flags>(
         &self,
         input: Input,
         flags: &mut Flags,
-        positions: &mut Positions,
         equivalent: Equivalent,
         len: usize,
     ) -> Result<(), cuda_core::LaunchContractError>
@@ -593,7 +587,6 @@ impl<'stream, 'program> Launch<'stream, 'program> {
         I: crate::compaction::CompactionIndex,
         Equivalent: Fn(Input::Item, Input::Item) -> bool + Copy,
         Flags: cuda_host::KernelSliceArgMut<Elem = I>,
-        Positions: cuda_host::KernelSliceArgMut<Elem = I>,
     {
         if len == 0 {
             return Ok(());
@@ -603,11 +596,14 @@ impl<'stream, 'program> Launch<'stream, 'program> {
         let witness = I::zero();
         let prepared = self
             .compaction_module()
-            .prepare_mark_adjacent_unique_for::<_, I, _>(
-                &input, &witness, &equivalent, config,
-            )?;
+            .prepare_mark_adjacent_unique_for::<_, I, _>(&input, &witness, &equivalent, config)?;
         self.compaction_module().mark_adjacent_unique::<_, I, _>(
-            self.stream, &prepared, input, flags, positions, equivalent, len,
+            self.stream,
+            &prepared,
+            input,
+            flags,
+            equivalent,
+            len,
         )
     }
 
@@ -634,7 +630,14 @@ impl<'stream, 'program> Launch<'stream, 'program> {
             .compaction_module()
             .prepare_scatter_selected_for::<_, _, I>(&input, &output, &witness, config)?;
         self.compaction_module().scatter_selected::<_, _, I>(
-            self.stream, &prepared, input, output, flags, positions, selected_count, len,
+            self.stream,
+            &prepared,
+            input,
+            output,
+            flags,
+            positions,
+            selected_count,
+            len,
         )
     }
 
@@ -661,10 +664,16 @@ impl<'stream, 'program> Launch<'stream, 'program> {
             .compaction_module()
             .prepare_scatter_partition_for::<_, _, I>(&input, &output, &witness, config)?;
         self.compaction_module().scatter_partition::<_, _, I>(
-            self.stream, &prepared, input, output, flags, positions, selected_count, len,
+            self.stream,
+            &prepared,
+            input,
+            output,
+            flags,
+            positions,
+            selected_count,
+            len,
         )
     }
-
 
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn compaction_reduce_adjacent_groups<

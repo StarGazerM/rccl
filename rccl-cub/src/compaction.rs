@@ -4,8 +4,9 @@ use cuda_core::DeviceBuffer;
 use rccl_memory::{DeviceAllocator, TemporaryWorkspace2};
 
 use crate::{
-    DeviceAlgorithmError, DeviceScanValue, DeviceScanWorkspace, cuda::Launch,
-    scan::{device_exclusive_sum_region, device_exclusive_sum_u32_region},
+    DeviceAlgorithmError, DeviceScanValue, DeviceScanWorkspace,
+    cuda::Launch,
+    scan::{device_exclusive_sum_region_into, device_exclusive_sum_u32_region_into},
 };
 
 #[doc(hidden)]
@@ -53,41 +54,47 @@ impl CompactionIndex for u64 {
 }
 
 trait CompactionScanIndex: CompactionIndex {
-    fn exclusive_sum<A, Values>(
+    fn exclusive_sum<A, Input, Output>(
         launch: &Launch<'_, '_>,
-        values: &mut Values,
+        input: &Input,
+        output: &mut Output,
         workspace: &mut DeviceScanWorkspace<'_, A, Self>,
     ) -> Result<(), DeviceAlgorithmError>
     where
         A: DeviceAllocator,
-        Values: cuda_host::KernelSliceArgMut<Elem = Self>;
+        Input: cuda_host::KernelSliceArg<Elem = Self>,
+        Output: cuda_host::KernelSliceArgMut<Elem = Self>;
 }
 
 impl CompactionScanIndex for u32 {
-    fn exclusive_sum<A, Values>(
+    fn exclusive_sum<A, Input, Output>(
         launch: &Launch<'_, '_>,
-        values: &mut Values,
+        input: &Input,
+        output: &mut Output,
         workspace: &mut DeviceScanWorkspace<'_, A, Self>,
     ) -> Result<(), DeviceAlgorithmError>
     where
         A: DeviceAllocator,
-        Values: cuda_host::KernelSliceArgMut<Elem = Self>,
+        Input: cuda_host::KernelSliceArg<Elem = Self>,
+        Output: cuda_host::KernelSliceArgMut<Elem = Self>,
     {
-        device_exclusive_sum_u32_region(launch, values, workspace)
+        device_exclusive_sum_u32_region_into(launch, input, output, workspace)
     }
 }
 
 impl CompactionScanIndex for u64 {
-    fn exclusive_sum<A, Values>(
+    fn exclusive_sum<A, Input, Output>(
         launch: &Launch<'_, '_>,
-        values: &mut Values,
+        input: &Input,
+        output: &mut Output,
         workspace: &mut DeviceScanWorkspace<'_, A, Self>,
     ) -> Result<(), DeviceAlgorithmError>
     where
         A: DeviceAllocator,
-        Values: cuda_host::KernelSliceArgMut<Elem = Self>,
+        Input: cuda_host::KernelSliceArg<Elem = Self>,
+        Output: cuda_host::KernelSliceArgMut<Elem = Self>,
     {
-        device_exclusive_sum_region(launch, values, workspace)
+        device_exclusive_sum_region_into(launch, input, output, workspace)
     }
 }
 
@@ -189,9 +196,9 @@ where
 {
     let (flags, positions) = marks.parts_mut();
     launch
-        .compaction_mark_predicate(input, flags, positions, predicate, len)
+        .compaction_mark_predicate(input, flags, predicate, len)
         .map_err(DeviceAlgorithmError::Launch)?;
-    I::exclusive_sum(launch, positions, scan)?;
+    I::exclusive_sum(launch, flags, positions, scan)?;
     launch
         .compaction_scatter_selected(input, output, flags, positions, selected_count, len)
         .map_err(DeviceAlgorithmError::Launch)?;
@@ -217,10 +224,24 @@ where
     validate_count(selected_count)?;
     match workspace {
         CompactionWorkspace::U32 { marks, scan } => select_if_inner::<_, _, _, _, u32>(
-            launch, input, output, selected_count, predicate, len, marks, scan,
+            launch,
+            input,
+            output,
+            selected_count,
+            predicate,
+            len,
+            marks,
+            scan,
         ),
         CompactionWorkspace::U64 { marks, scan } => select_if_inner::<_, _, _, _, u64>(
-            launch, input, output, selected_count, predicate, len, marks, scan,
+            launch,
+            input,
+            output,
+            selected_count,
+            predicate,
+            len,
+            marks,
+            scan,
         ),
     }
 }
@@ -244,9 +265,9 @@ where
 {
     let (flags, positions) = marks.parts_mut();
     launch
-        .compaction_mark_flagged(selected, flags, positions, len)
+        .compaction_mark_flagged(selected, flags, len)
         .map_err(DeviceAlgorithmError::Launch)?;
-    I::exclusive_sum(launch, positions, scan)?;
+    I::exclusive_sum(launch, flags, positions, scan)?;
     launch
         .compaction_scatter_selected(input, output, flags, positions, selected_count, len)
         .map_err(DeviceAlgorithmError::Launch)?;
@@ -272,10 +293,24 @@ where
     validate_count(selected_count)?;
     match workspace {
         CompactionWorkspace::U32 { marks, scan } => select_flagged_inner::<_, _, _, _, u32>(
-            launch, input, selected, output, selected_count, len, marks, scan,
+            launch,
+            input,
+            selected,
+            output,
+            selected_count,
+            len,
+            marks,
+            scan,
         ),
         CompactionWorkspace::U64 { marks, scan } => select_flagged_inner::<_, _, _, _, u64>(
-            launch, input, selected, output, selected_count, len, marks, scan,
+            launch,
+            input,
+            selected,
+            output,
+            selected_count,
+            len,
+            marks,
+            scan,
         ),
     }
 }
@@ -299,9 +334,9 @@ where
 {
     let (flags, positions) = marks.parts_mut();
     launch
-        .compaction_mark_adjacent_unique(input, flags, positions, equivalent, len)
+        .compaction_mark_adjacent_unique(input, flags, equivalent, len)
         .map_err(DeviceAlgorithmError::Launch)?;
-    I::exclusive_sum(launch, positions, scan)?;
+    I::exclusive_sum(launch, flags, positions, scan)?;
     launch
         .compaction_scatter_selected(input, output, flags, positions, selected_count, len)
         .map_err(DeviceAlgorithmError::Launch)?;
@@ -327,10 +362,24 @@ where
     validate_count(selected_count)?;
     match workspace {
         CompactionWorkspace::U32 { marks, scan } => unique_inner::<_, _, _, _, u32>(
-            launch, input, output, selected_count, equivalent, len, marks, scan,
+            launch,
+            input,
+            output,
+            selected_count,
+            equivalent,
+            len,
+            marks,
+            scan,
         ),
         CompactionWorkspace::U64 { marks, scan } => unique_inner::<_, _, _, _, u64>(
-            launch, input, output, selected_count, equivalent, len, marks, scan,
+            launch,
+            input,
+            output,
+            selected_count,
+            equivalent,
+            len,
+            marks,
+            scan,
         ),
     }
 }
@@ -354,9 +403,9 @@ where
 {
     let (flags, positions) = marks.parts_mut();
     launch
-        .compaction_mark_predicate(input, flags, positions, predicate, len)
+        .compaction_mark_predicate(input, flags, predicate, len)
         .map_err(DeviceAlgorithmError::Launch)?;
-    I::exclusive_sum(launch, positions, scan)?;
+    I::exclusive_sum(launch, flags, positions, scan)?;
     launch
         .compaction_scatter_partition(input, output, flags, positions, selected_count, len)
         .map_err(DeviceAlgorithmError::Launch)?;
@@ -382,10 +431,24 @@ where
     validate_count(selected_count)?;
     match workspace {
         CompactionWorkspace::U32 { marks, scan } => partition_inner::<_, _, _, _, u32>(
-            launch, input, output, selected_count, predicate, len, marks, scan,
+            launch,
+            input,
+            output,
+            selected_count,
+            predicate,
+            len,
+            marks,
+            scan,
         ),
         CompactionWorkspace::U64 { marks, scan } => partition_inner::<_, _, _, _, u64>(
-            launch, input, output, selected_count, predicate, len, marks, scan,
+            launch,
+            input,
+            output,
+            selected_count,
+            predicate,
+            len,
+            marks,
+            scan,
         ),
     }
 }

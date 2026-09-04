@@ -102,7 +102,7 @@ pub fn find<K, V, P, const CG: u32>(
     global_thread: usize,
     slots: &[u64],
     keys: &[K],
-    output: &[DeviceAtomicU32],
+    output: &[V::Atomic],
     empty_key: K,
     empty_value: V,
     erased_key: K,
@@ -120,7 +120,7 @@ pub fn find<K, V, P, const CG: u32>(
         StaticMapReadRef::<K, V, P, CG>::new(slots, empty_key, empty_value, erased_key, probing);
     let value = map.find(keys[input_index]).unwrap_or(empty_value);
     if global_thread.is_multiple_of(CG as usize) {
-        output[input_index].store(value.to_bits(), AtomicOrdering::Relaxed);
+        V::store_atomic(output, input_index, value);
     }
 }
 
@@ -191,7 +191,7 @@ pub fn retrieve_all<K, V>(
     index: usize,
     slots: &[u64],
     keys: &[DeviceAtomicU32],
-    values: &[DeviceAtomicU32],
+    values: &[V::Atomic],
     count: &[DeviceAtomicU64],
     empty_key: K,
     erased_key: K,
@@ -199,30 +199,52 @@ pub fn retrieve_all<K, V>(
     K: MapKey,
     V: MapValue,
 {
-    if index >= slots.len() {
+    if index >= slots.len() / V::SLOT_WORDS {
         return;
     }
-    let packed = slots[index];
-    let key = K::from_bits(packed as u32);
-    if key != empty_key && key != erased_key {
+    let word_index = index * V::SLOT_WORDS;
+    let control = slots[word_index];
+    let key = K::from_bits(control as u32);
+    let occupied = if V::SLOT_WORDS == 1 {
+        key != empty_key && key != erased_key
+    } else {
+        key != empty_key && key != erased_key && ((control >> 32) as u32) == 1
+    };
+    if occupied {
         let position = count[0].fetch_add(1, AtomicOrdering::Relaxed) as usize;
         keys[position].store(key.to_bits(), AtomicOrdering::Relaxed);
-        values[position].store((packed >> 32) as u32, AtomicOrdering::Relaxed);
+        let value_bits = if V::SLOT_WORDS == 1 {
+            (control >> 32) & 0xffff_ffff
+        } else {
+            slots[word_index + 1]
+        };
+        V::store_atomic(values, position, V::from_bits(value_bits));
     }
 }
 
 #[inline(always)]
-pub fn count<K>(index: usize, slots: &[u64], count: &[DeviceAtomicU64], empty_key: K, erased_key: K)
-where
+pub fn count<K, V>(
+    index: usize,
+    slots: &[u64],
+    count: &[DeviceAtomicU64],
+    empty_key: K,
+    erased_key: K,
+) where
     K: MapKey,
+    V: MapValue,
 {
-    let occupied = if index < slots.len() {
-        let key = K::from_bits(slots[index] as u32);
-        (key != empty_key && key != erased_key) as u64
+    let occupied = if index < slots.len() / V::SLOT_WORDS {
+        let control = slots[index * V::SLOT_WORDS];
+        let key = K::from_bits(control as u32);
+        if V::SLOT_WORDS == 1 {
+            key != empty_key && key != erased_key
+        } else {
+            key != empty_key && key != erased_key && ((control >> 32) as u32) == 1
+        }
     } else {
-        0
+        false
     };
-    let occupied_in_warp = warp::ballot(occupied != 0).count_ones() as u64;
+    let occupied_in_warp = warp::ballot(occupied).count_ones() as u64;
     if warp::lane_id() == 0 && occupied_in_warp != 0 {
         count[0].fetch_add(occupied_in_warp, AtomicOrdering::Relaxed);
     }
@@ -244,18 +266,29 @@ pub fn rehash<K, V, P, const CG: u32>(
     P: ProbingScheme<K>,
 {
     let source_index = global_thread / CG as usize;
-    if source_index >= source.len() {
+    if source_index >= source.len() / V::SLOT_WORDS {
         return;
     }
-    let packed = source[source_index];
-    let key = K::from_bits(packed as u32);
-    if key == empty_key || key == erased_key {
+    let word_index = source_index * V::SLOT_WORDS;
+    let control = source[word_index];
+    let key = K::from_bits(control as u32);
+    let occupied = if V::SLOT_WORDS == 1 {
+        key != empty_key && key != erased_key
+    } else {
+        key != empty_key && key != erased_key && ((control >> 32) as u32) == 1
+    };
+    if !occupied {
         return;
     }
+    let value_bits = if V::SLOT_WORDS == 1 {
+        (control >> 32) & 0xffff_ffff
+    } else {
+        source[word_index + 1]
+    };
     // SAFETY: both capacities come from validated host maps and this kernel
     // assigns one convergent cooperative tile to each source slot.
     let map = unsafe {
         StaticMapRef::<K, V, P, CG>::new(destination, empty_key, empty_value, erased_key, probing)
     };
-    let _ = map.insert(key, V::from_bits((packed >> 32) as u32));
+    let _ = map.insert(key, V::from_bits(value_bits));
 }

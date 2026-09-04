@@ -6,11 +6,7 @@ use rccl_thrust::{
 };
 use std::error::Error;
 
-type Exec<'a> = rccl_thrust::cuda::Execution<
-    'a,
-    'a,
-    rccl_memory::BorrowedCudaMemoryResource<'a>,
->;
+type Exec<'a> = rccl_thrust::cuda::Execution<'a, 'a, rccl_memory::BorrowedCudaMemoryResource<'a>>;
 
 fn rows<const N: usize>(len: usize) -> Vec<RelationRow<N>> {
     (0..len)
@@ -33,7 +29,11 @@ fn stable_payload_boundaries(
     for len in [0_usize, 1, 31, 32, 33, 255, 256, 257, 513, 65_537] {
         let input = rows::<3>(len);
         let payload = (0..len as u64).collect::<Vec<_>>();
-        let mut expected = input.iter().copied().zip(payload.iter().copied()).collect::<Vec<_>>();
+        let mut expected = input
+            .iter()
+            .copied()
+            .zip(payload.iter().copied())
+            .collect::<Vec<_>>();
         expected.sort_by_key(|pair| pair.0);
 
         let mut device_rows = DeviceBuffer::from_host(stream, &input)?;
@@ -80,8 +80,14 @@ fn out_of_place(
     stream: &cuda_core::CudaStream,
 ) -> Result<(), Box<dyn Error>> {
     let input = rows::<5>(513);
-    let payload = (0..input.len()).map(|index| index as f64 / 513.0).collect::<Vec<_>>();
-    let mut expected = input.iter().copied().zip(payload.iter().copied()).collect::<Vec<_>>();
+    let payload = (0..input.len())
+        .map(|index| index as f64 / 513.0)
+        .collect::<Vec<_>>();
+    let mut expected = input
+        .iter()
+        .copied()
+        .zip(payload.iter().copied())
+        .collect::<Vec<_>>();
     expected.sort_by_key(|pair| pair.0);
 
     let input_rows = DeviceBuffer::from_host(stream, &input)?;
@@ -128,7 +134,10 @@ fn duplicate_payloads(
         device_rows.to_host_vec(stream)?,
         [[1, 6], [1, 7], [1, 7], [2, 1], [2, 1], [2, 1]]
     );
-    assert_eq!(device_payload.to_host_vec(stream)?, [12, 10, 11, 90, 91, 92]);
+    assert_eq!(
+        device_payload.to_host_vec(stream)?,
+        [12, 10, 11, 90, 91, 92]
+    );
 
     let boolean_payload = [
         BooleanProvenance::FALSE,
@@ -158,8 +167,8 @@ fn contract_errors(
 ) -> Result<(), Box<dyn Error>> {
     let mut rows = DeviceBuffer::from_host(stream, &[[2_u32, 1], [1, 0], [3, 4]])?;
     let mut short_payload = DeviceBuffer::from_host(stream, &[1_u64, 2])?;
-    let error = sort_rows_with_payload_lexicographic(execution, &mut rows, &mut short_payload)
-        .unwrap_err();
+    let error =
+        sort_rows_with_payload_lexicographic(execution, &mut rows, &mut short_payload).unwrap_err();
     assert!(error.to_string().contains("record-sort payload"));
 
     let input = DeviceBuffer::from_host(stream, &[[2_u32, 1], [1, 0], [3, 4]])?;
@@ -191,10 +200,7 @@ fn contract_errors(
 }
 
 #[inline(always)]
-fn faulting_compare(
-    left: &RelationRow<3>,
-    right: &RelationRow<3>,
-) -> std::cmp::Ordering {
+fn faulting_compare(left: &RelationRow<3>, right: &RelationRow<3>) -> std::cmp::Ordering {
     if left[0] == 3 || right[0] == 3 {
         cuda_device::debug::trap();
     }
@@ -212,12 +218,7 @@ fn injected_fault(
     let mut device_rows = DeviceBuffer::from_host(stream, &data)?;
     let mut workspace =
         rccl_cub::device_merge_sort_keys_workspace::<RelationRow<3>>(&launch, data.len())?;
-    rccl_cub::device_merge_sort_keys(
-        &launch,
-        &mut device_rows,
-        &mut workspace,
-        faulting_compare,
-    )?;
+    rccl_cub::device_merge_sort_keys(&launch, &mut device_rows, &mut workspace, faulting_compare)?;
     match stream.synchronize() {
         Err(error) => {
             eprintln!("record sort comparator fault surfaced: {error}");

@@ -604,3 +604,9 @@ A row becomes `implemented` only when all of the following hold:
 Passing the current gate proves only the existing RCCL surface. Full subset
 coverage is reached only when the Phase 0 ledger has no `missing`, `partial`,
 or unexplained `backend-blocked` public rows.
+## Semantic capability checklist
+
+For workload-facing status and the audited external fancy-adaptor callsites,
+use [`CCCL_RUST_CAPABILITY_CHECKLIST.md`](CCCL_RUST_CAPABILITY_CHECKLIST.md) as
+the semantic source of truth. This supplements, but does not rewrite, the
+evidence log and checkbox ledger above.

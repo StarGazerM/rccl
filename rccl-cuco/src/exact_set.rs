@@ -50,7 +50,6 @@ impl<const N: usize> Row<N> {
 // has no padding or invalid bit patterns.
 unsafe impl<const N: usize> DeviceCopy for Row<N> {}
 
-
 impl<const N: usize> From<[u32; N]> for Row<N> {
     fn from(data: [u32; N]) -> Self {
         Self::new(data)
@@ -78,9 +77,15 @@ impl fmt::Display for ExactSetError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Memory(error) => error.fmt(formatter),
-            Self::Launch(error) => write!(formatter, "CUDA exact-set kernel launch failed: {error}"),
-            Self::Contract(error) => write!(formatter, "CUDA exact-set launch contract failed: {error}"),
-            Self::EmptyRow => formatter.write_str("HISA row keys must contain at least one u32 column"),
+            Self::Launch(error) => {
+                write!(formatter, "CUDA exact-set kernel launch failed: {error}")
+            }
+            Self::Contract(error) => {
+                write!(formatter, "CUDA exact-set launch contract failed: {error}")
+            }
+            Self::EmptyRow => {
+                formatter.write_str("HISA row keys must contain at least one u32 column")
+            }
             Self::InvalidLoadFactor(value) => write!(
                 formatter,
                 "exact-set load factor must be finite and in (0, 1], received {value}"
@@ -156,12 +161,19 @@ pub struct ExactRowSetConfig<const N: usize> {
 
 impl<const N: usize> ExactRowSetConfig<N> {
     pub const fn with_capacity(capacity: usize, empty_row: Row<N>) -> Self {
-        Self { capacity: CapacitySpec::Slots(capacity), empty_row, seed: 0 }
+        Self {
+            capacity: CapacitySpec::Slots(capacity),
+            empty_row,
+            seed: 0,
+        }
     }
 
     pub const fn for_insert_count(elements: usize, load_factor: f64, empty_row: Row<N>) -> Self {
         Self {
-            capacity: CapacitySpec::InsertCount { elements, load_factor },
+            capacity: CapacitySpec::InsertCount {
+                elements,
+                load_factor,
+            },
             empty_row,
             seed: 0,
         }
@@ -179,7 +191,10 @@ impl<const N: usize> ExactRowSetConfig<N> {
     where
         M: ExactSetBackend<N>,
     {
-        self.build_in(BorrowedCudaAsyncMemoryResource::new(launch.stream().context()), launch)
+        self.build_in(
+            BorrowedCudaAsyncMemoryResource::new(launch.stream().context()),
+            launch,
+        )
     }
 
     pub fn build_in<'stream, A, M>(
@@ -196,7 +211,10 @@ impl<const N: usize> ExactRowSetConfig<N> {
         }
         let requested = match self.capacity {
             CapacitySpec::Slots(capacity) => capacity,
-            CapacitySpec::InsertCount { elements, load_factor } => {
+            CapacitySpec::InsertCount {
+                elements,
+                load_factor,
+            } => {
                 if !load_factor.is_finite() || load_factor <= 0.0 || load_factor > 1.0 {
                     return Err(ExactSetError::InvalidLoadFactor(load_factor));
                 }
@@ -223,9 +241,7 @@ pub struct ExactRowSet<'stream, const N: usize, A: DeviceAllocator> {
     seed: u64,
 }
 
-impl<'stream, const N: usize>
-    ExactRowSet<'stream, N, BorrowedCudaAsyncMemoryResource<'stream>>
-{
+impl<'stream, const N: usize> ExactRowSet<'stream, N, BorrowedCudaAsyncMemoryResource<'stream>> {
     pub fn with_capacity<M>(
         requested_capacity: usize,
         empty_row: Row<N>,
@@ -260,23 +276,43 @@ where
         }
         let capacity = valid_capacity(requested_capacity).ok_or(ExactSetError::CapacityOverflow)?;
         let _ = u32::try_from(capacity).map_err(|_| ExactSetError::CapacityOverflow)?;
-        let word_count = capacity.checked_mul(N).ok_or(ExactSetError::CapacityOverflow)?;
+        let word_count = capacity
+            .checked_mul(N)
+            .ok_or(ExactSetError::CapacityOverflow)?;
         let mut slots = DeviceBuffer::zeroed_in(allocator.clone(), launch.stream(), capacity)?;
         let mut states = DeviceBuffer::zeroed_in(allocator.clone(), launch.stream(), capacity)?;
         let hashes = DeviceBuffer::zeroed_in(allocator.clone(), launch.stream(), capacity)?;
         let words = DeviceBuffer::zeroed_in(allocator.clone(), launch.stream(), word_count)?;
         let metadata = DeviceBuffer::zeroed_in(allocator, launch.stream(), METADATA_WORDS)?;
-        let submitted = launch.module().exact_set_clear(
-            launch.stream(), &mut slots, &mut states, empty_row,
-        );
+        let submitted =
+            launch
+                .module()
+                .exact_set_clear(launch.stream(), &mut slots, &mut states, empty_row);
         finish_submission(submitted, launch.stream())?;
-        Ok(Self { slots, states, hashes, words, metadata, capacity, empty_row, seed })
+        Ok(Self {
+            slots,
+            states,
+            hashes,
+            words,
+            metadata,
+            capacity,
+            empty_row,
+            seed,
+        })
     }
 
-    pub const fn capacity(&self) -> usize { self.capacity }
-    pub const fn empty_row(&self) -> Row<N> { self.empty_row }
-    pub const fn seed(&self) -> u64 { self.seed }
-    pub fn stream(&self) -> &'stream CudaStream { self.states.stream() }
+    pub const fn capacity(&self) -> usize {
+        self.capacity
+    }
+    pub const fn empty_row(&self) -> Row<N> {
+        self.empty_row
+    }
+    pub const fn seed(&self) -> u64 {
+        self.seed
+    }
+    pub fn stream(&self) -> &'stream CudaStream {
+        self.states.stream()
+    }
 
     pub fn clear<M>(&mut self, launch: &Launch<'stream, '_, M>) -> Result<(), ExactSetError>
     where
@@ -284,7 +320,10 @@ where
     {
         self.ensure_launch(launch)?;
         let submitted = launch.module().exact_set_clear(
-            launch.stream(), &mut self.slots, &mut self.states, self.empty_row,
+            launch.stream(),
+            &mut self.slots,
+            &mut self.states,
+            self.empty_row,
         );
         finish_submission(submitted, launch.stream())
     }
@@ -330,12 +369,22 @@ where
     {
         self.ensure_launch(launch)?;
         rows.ensure_usable_on(launch.stream())?;
-        if rows.is_empty() { return Ok(ExactSetInsertReport::default()); }
+        if rows.is_empty() {
+            return Ok(ExactSetInsertReport::default());
+        }
         self.reset_metadata()?;
         let submitted = launch.module().exact_set_insert(
-            launch.stream(), &mut self.slots, &mut self.states, &mut self.hashes,
-            &mut self.words, &mut self.metadata, rows, self.capacity, self.empty_row,
-            self.seed, forced_hash,
+            launch.stream(),
+            &mut self.slots,
+            &mut self.states,
+            &mut self.hashes,
+            &mut self.words,
+            &mut self.metadata,
+            rows,
+            self.capacity,
+            self.empty_row,
+            self.seed,
+            forced_hash,
         );
         if let Err(error) = submitted {
             let _ = launch.stream().synchronize();
@@ -343,12 +392,15 @@ where
         }
         let [inserted, duplicates, exhausted, reserved] = self.read_metadata()?;
         if reserved != 0 {
-            return Err(ExactSetError::ReservedRows { count: reserved as usize });
+            return Err(ExactSetError::ReservedRows {
+                count: reserved as usize,
+            });
         }
         Ok(ExactSetInsertReport {
             inserted: usize::try_from(inserted).map_err(|_| ExactSetError::CapacityOverflow)?,
             duplicates: usize::try_from(duplicates).map_err(|_| ExactSetError::CapacityOverflow)?,
-            capacity_exhausted: usize::try_from(exhausted).map_err(|_| ExactSetError::CapacityOverflow)?,
+            capacity_exhausted: usize::try_from(exhausted)
+                .map_err(|_| ExactSetError::CapacityOverflow)?,
         })
     }
 
@@ -382,8 +434,15 @@ where
             }));
         }
         launch.module().exact_set_insert_prevalidated(
-            launch.stream(), &mut self.slots, &mut self.states, &mut self.hashes,
-            &mut self.words, rows, self.capacity, self.empty_row, self.seed,
+            launch.stream(),
+            &mut self.slots,
+            &mut self.states,
+            &mut self.hashes,
+            &mut self.words,
+            rows,
+            self.capacity,
+            self.empty_row,
+            self.seed,
         )?;
         Ok(PendingExactSetOperation(unsafe {
             CudaCompletion::from_submission(launch.stream(), resources, |_| Ok(()))
@@ -416,7 +475,8 @@ where
         R: ContiguousDeviceRange<Row<N>> + ?Sized,
         O: ContiguousDeviceRangeMut<u32> + ?Sized,
     {
-        self.contains_async_impl(rows, output, launch, Some(forced_hash))?.wait()
+        self.contains_async_impl(rows, output, launch, Some(forced_hash))?
+            .wait()
     }
 
     pub fn contains_async<'borrow, M, R, O>(
@@ -449,7 +509,10 @@ where
         rows.ensure_usable_on(launch.stream())?;
         output.ensure_usable_on(launch.stream())?;
         if output.len() < rows.len() {
-            return Err(ExactSetError::OutputTooSmall { needed: rows.len(), available: output.len() });
+            return Err(ExactSetError::OutputTooSmall {
+                needed: rows.len(),
+                available: output.len(),
+            });
         }
         let resources = PendingExactSetResources(PhantomData);
         if rows.is_empty() {
@@ -458,8 +521,17 @@ where
             }));
         }
         launch.module().exact_set_contains(
-            launch.stream(), &self.slots, &self.states, &self.hashes, &self.words,
-            rows, output, self.capacity, self.empty_row, self.seed, forced_hash,
+            launch.stream(),
+            &self.slots,
+            &self.states,
+            &self.hashes,
+            &self.words,
+            rows,
+            output,
+            self.capacity,
+            self.empty_row,
+            self.seed,
+            forced_hash,
         )?;
         Ok(PendingExactSetOperation(unsafe {
             CudaCompletion::from_submission(launch.stream(), resources, |_| Ok(()))
@@ -474,18 +546,32 @@ where
     }
 
     fn reset_metadata(&mut self) -> Result<(), ExactSetError> {
-        let bytes = METADATA_WORDS.checked_mul(core::mem::size_of::<u64>())
+        let bytes = METADATA_WORDS
+            .checked_mul(core::mem::size_of::<u64>())
             .ok_or(ExactSetError::CapacityOverflow)?;
-        unsafe { memset_d8_async(self.metadata.cu_deviceptr(), 0, bytes, self.stream().cu_stream())?; }
+        unsafe {
+            memset_d8_async(
+                self.metadata.cu_deviceptr(),
+                0,
+                bytes,
+                self.stream().cu_stream(),
+            )?;
+        }
         Ok(())
     }
 
     fn read_metadata(&self) -> Result<[u64; METADATA_WORDS], ExactSetError> {
         let mut values = [0u64; METADATA_WORDS];
-        let bytes = METADATA_WORDS.checked_mul(core::mem::size_of::<u64>())
+        let bytes = METADATA_WORDS
+            .checked_mul(core::mem::size_of::<u64>())
             .ok_or(ExactSetError::CapacityOverflow)?;
         unsafe {
-            memcpy_dtoh_async(values.as_mut_ptr(), self.metadata.cu_deviceptr(), bytes, self.stream().cu_stream())?;
+            memcpy_dtoh_async(
+                values.as_mut_ptr(),
+                self.metadata.cu_deviceptr(),
+                bytes,
+                self.stream().cu_stream(),
+            )?;
         }
         self.stream().synchronize()?;
         Ok(values)
@@ -523,19 +609,27 @@ fn valid_capacity(requested: usize) -> Option<usize> {
 }
 
 fn next_prime(mut value: usize) -> Option<usize> {
-    if value <= 2 { return Some(2); }
+    if value <= 2 {
+        return Some(2);
+    }
     value |= 1;
     loop {
-        if is_prime(value) { return Some(value); }
+        if is_prime(value) {
+            return Some(value);
+        }
         value = value.checked_add(2)?;
     }
 }
 
 fn is_prime(value: usize) -> bool {
-    if value < 2 { return false; }
+    if value < 2 {
+        return false;
+    }
     let mut divisor = 2usize;
     while divisor <= value / divisor {
-        if value.is_multiple_of(divisor) { return false; }
+        if value.is_multiple_of(divisor) {
+            return false;
+        }
         divisor += 1;
     }
     true
@@ -559,7 +653,14 @@ impl<'a, const N: usize> ExactRowSetReadRef<'a, N> {
         hashes: &'a [DeviceAtomicU64],
         words: &'a [DeviceAtomicU32],
         seed: u64,
-    ) -> Self { Self { states, hashes, words, seed } }
+    ) -> Self {
+        Self {
+            states,
+            hashes,
+            words,
+            seed,
+        }
+    }
 
     #[inline(always)]
     pub fn contains(&self, row: Row<N>) -> bool {
@@ -588,11 +689,17 @@ impl<'a, const N: usize> ExactRowSetReadRef<'a, N> {
             let matching = state == OCCUPIED
                 && self.hashes[index].load(AtomicOrdering::Relaxed) == hash
                 && row_equal(self.words, index, row);
-            if tile.ballot(matching) != 0 { return true; }
-            if tile.ballot(state == EMPTY) != 0 { return false; }
+            if tile.ballot(matching) != 0 {
+                return true;
+            }
+            if tile.ballot(state == EMPTY) != 0 {
+                return false;
+            }
             visited += 1;
             group += step;
-            if group >= groups { group -= groups; }
+            if group >= groups {
+                group -= groups;
+            }
         }
         false
     }
@@ -609,10 +716,14 @@ impl<'a, const N: usize> ExactRowSetRef<'a, N> {
     /// Same storage invariants as `ExactRowSetReadRef::new`; calls must be
     /// convergent across four-lane tiles and no non-atomic access may race.
     pub const unsafe fn new(
-        states: &'a [DeviceAtomicU32], hashes: &'a [DeviceAtomicU64],
-        words: &'a [DeviceAtomicU32], seed: u64,
+        states: &'a [DeviceAtomicU32],
+        hashes: &'a [DeviceAtomicU64],
+        words: &'a [DeviceAtomicU32],
+        seed: u64,
     ) -> Self {
-        Self { read: unsafe { ExactRowSetReadRef::new(states, hashes, words, seed) } }
+        Self {
+            read: unsafe { ExactRowSetReadRef::new(states, hashes, words, seed) },
+        }
     }
 
     #[inline(always)]
@@ -643,13 +754,18 @@ impl<'a, const N: usize> ExactRowSetRef<'a, N> {
                 let matching = state == OCCUPIED
                     && self.read.hashes[index].load(AtomicOrdering::Relaxed) == hash
                     && row_equal(self.read.words, index, row);
-                if tile.ballot(matching) != 0 { return ExactInsertOutcome::Duplicate; }
+                if tile.ballot(matching) != 0 {
+                    return ExactInsertOutcome::Duplicate;
+                }
                 let empty = tile.ballot(state == EMPTY);
                 if empty != 0 {
                     let owner = empty.trailing_zeros();
                     let status = if rank == owner as usize {
                         match self.read.states[index].compare_exchange(
-                            EMPTY, LOCKED, AtomicOrdering::AcqRel, AtomicOrdering::Acquire,
+                            EMPTY,
+                            LOCKED,
+                            AtomicOrdering::AcqRel,
+                            AtomicOrdering::Acquire,
                         ) {
                             Ok(_) => {
                                 self.read.hashes[index].store(hash, AtomicOrdering::Relaxed);
@@ -659,29 +775,43 @@ impl<'a, const N: usize> ExactRowSetRef<'a, N> {
                             }
                             Err(_) => 0u32,
                         }
-                    } else { 0u32 };
-                    if tile.shfl(status, owner) != 0 { return ExactInsertOutcome::Inserted; }
+                    } else {
+                        0u32
+                    };
+                    if tile.shfl(status, owner) != 0 {
+                        return ExactInsertOutcome::Inserted;
+                    }
                     break;
                 }
                 visited += 1;
                 group += step;
-                if group >= groups { group -= groups; }
+                if group >= groups {
+                    group -= groups;
+                }
             }
-            if visited == groups { return ExactInsertOutcome::CapacityExhausted; }
+            if visited == groups {
+                return ExactInsertOutcome::CapacityExhausted;
+            }
         }
     }
 }
 
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ExactInsertOutcome { Inserted, Duplicate, CapacityExhausted }
+pub enum ExactInsertOutcome {
+    Inserted,
+    Duplicate,
+    CapacityExhausted,
+}
 
 #[inline(always)]
 fn row_equal<const N: usize>(words: &[DeviceAtomicU32], slot: usize, row: Row<N>) -> bool {
     let base = slot * N;
     let mut column = 0usize;
     while column < N {
-        if words[base + column].load(AtomicOrdering::Relaxed) != row.data[column] { return false; }
+        if words[base + column].load(AtomicOrdering::Relaxed) != row.data[column] {
+            return false;
+        }
         column += 1;
     }
     true
@@ -707,7 +837,10 @@ mod tests {
         assert_eq!(core::mem::size_of::<Row<7>>(), 28);
         assert_eq!(core::mem::align_of::<Row<7>>(), 4);
         let row = Row::new([0u32, 1, 0x1234_5678, u32::MAX]);
-        assert_eq!(XxHash64::new(0x9e37_79b9_7f4a_7c15).hash_value(&row), 0xbd1c_e3d4_a883_afb8);
+        assert_eq!(
+            XxHash64::new(0x9e37_79b9_7f4a_7c15).hash_value(&row),
+            0xbd1c_e3d4_a883_afb8
+        );
     }
 
     #[test]

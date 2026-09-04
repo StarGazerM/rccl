@@ -47,7 +47,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let launch = program.on(&stream)?;
     let allocator = rccl_memory::BorrowedCudaMemoryResource::new(&context)?;
 
-    let keys_host = (0..ITEMS).map(|index| (index / 3) as u32).collect::<Vec<_>>();
+    let keys_host = (0..ITEMS)
+        .map(|index| (index / 3) as u32)
+        .collect::<Vec<_>>();
     let values_host = (0..ITEMS)
         .map(|index| (index % 17 + 1) as u64)
         .collect::<Vec<_>>();
@@ -56,11 +58,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut output_keys = DeviceBuffer::from_host(&stream, &vec![0_u32; ITEMS])?;
     let mut output_values = DeviceBuffer::from_host(&stream, &vec![0_u64; ITEMS])?;
     let mut count = DeviceBuffer::from_host(&stream, &[0_u64])?;
-    let mut workspace = rccl_cub::thrust_integration::grouped_reduction_workspace_in(
-        &allocator,
-        &launch,
-        ITEMS,
-    )?;
+    let mut workspace =
+        rccl_cub::thrust_integration::grouped_reduction_workspace_in(&allocator, &launch, ITEMS)?;
     let bytes = workspace.allocation_bytes();
 
     let timing = measure(&stream, || {

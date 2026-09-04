@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0 OR MIT"
 description = "Thrust-shaped host algorithm facade for RCCL"
+homepage = "https://github.com/StarGazerM/rccl"
+repository = "https://github.com/StarGazerM/rccl"
+documentation = "https://docs.rs/rccl-thrust"
+readme = "README.md"
+include = ["src/**", "examples/**", "README.md", "LICENSE-*", "Cargo.toml"]
 
 [dependencies]
 cuda-core = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "97f8b2b7882f0c15ad9ce9b53abed5553920caa8" }

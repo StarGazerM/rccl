@@ -34,8 +34,7 @@ mod kernels {
         } else {
             T::zero()
         };
-        let shared =
-            rccl_cub::__private::BlockSharedMemory::new(8 * core::mem::size_of::<T>());
+        let shared = rccl_cub::__private::BlockSharedMemory::new(8 * core::mem::size_of::<T>());
         let scanned = rccl_cub::__private::block_scan_sum_256(value, valid, &shared);
         if thread_index < valid as usize {
             values.write(index, scanned.exclusive);
@@ -68,19 +67,18 @@ fn run<T>(
     expected: impl Fn(usize) -> T,
 ) -> Result<(), Box<dyn Error>>
 where
-    T: rccl_cub::__private::BlockScanValue
-        + DeviceCopy
-        + PartialEq
-        + core::fmt::Debug
-        + 'static,
+    T: rccl_cub::__private::BlockScanValue + DeviceCopy + PartialEq + core::fmt::Debug + 'static,
 {
     let host = vec![one; items];
     let baseline = DeviceBuffer::from_host(stream, &host)?;
     let mut values = DeviceBuffer::from_host(stream, &host)?;
     let grid = items.div_ceil(BLOCK_THREADS) as u32;
     let shared = (8 * core::mem::size_of::<T>()) as u32;
-    let prepared =
-        program.prepare_scan_blocks::<T>(LaunchConfig1D::new(grid, BLOCK_THREADS as u32, shared))?;
+    let prepared = program.prepare_scan_blocks::<T>(LaunchConfig1D::new(
+        grid,
+        BLOCK_THREADS as u32,
+        shared,
+    ))?;
 
     for _ in 0..WARMUPS {
         reset(stream, &baseline, &mut values)?;
@@ -124,9 +122,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     let stream = context.default_stream();
     let program = unsafe { kernels::load(&context)? };
 
-    run(&program, &stream, FULL_ITEMS, "u32", 1_u32, |index| index as u32)?;
-    run(&program, &stream, PARTIAL_ITEMS, "u32", 1_u32, |index| index as u32)?;
-    run(&program, &stream, FULL_ITEMS, "u64", 1_u64, |index| index as u64)?;
-    run(&program, &stream, PARTIAL_ITEMS, "u64", 1_u64, |index| index as u64)?;
+    run(&program, &stream, FULL_ITEMS, "u32", 1_u32, |index| {
+        index as u32
+    })?;
+    run(&program, &stream, PARTIAL_ITEMS, "u32", 1_u32, |index| {
+        index as u32
+    })?;
+    run(&program, &stream, FULL_ITEMS, "u64", 1_u64, |index| {
+        index as u64
+    })?;
+    run(&program, &stream, PARTIAL_ITEMS, "u64", 1_u64, |index| {
+        index as u64
+    })?;
     Ok(())
 }

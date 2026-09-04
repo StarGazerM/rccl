@@ -10,11 +10,11 @@ mod bloom;
 mod bloom_backend;
 mod bloom_device;
 mod device;
+mod dynamic;
+mod error;
 mod exact_set;
 mod exact_set_backend;
 mod exact_set_device;
-mod dynamic;
-mod error;
 mod hash;
 mod kernel_args;
 mod macros;
@@ -32,12 +32,12 @@ pub use bloom::{
     BloomFilterReadRef, BloomFilterRef, HISA_BLOOM_BLOCKS, PendingBloomOperation,
 };
 pub use dynamic::{DynamicHashMap, DynamicMapConfig};
+pub use error::MapError;
 pub use exact_set::{
     EXACT_SET_COOPERATIVE_GROUP, ExactInsertOutcome, ExactRowSet, ExactRowSetConfig,
     ExactRowSetReadRef, ExactRowSetRef, ExactSetError, ExactSetInsertReport,
     PendingExactSetOperation, Row,
 };
-pub use error::MapError;
 pub use hash::{StableHashBytes, XxHash64};
 pub use map::{
     PendingInsert, Sentinels, StaticHashMap, StaticMap, StaticMapConfig, StaticMapReadRef,

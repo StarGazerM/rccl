@@ -75,9 +75,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let source_payloads = DeviceBuffer::from_host(&stream, &payloads_host)?;
     let mut rows = DeviceBuffer::from_host(&stream, &rows_host)?;
     let mut payloads = DeviceBuffer::from_host(&stream, &payloads_host)?;
-    let mut workspace =
-        rccl_cub::device_merge_sort_pairs_workspace::<Row4, u64>(&launch, ITEMS)?;
-    let partitions = rccl_cub::thrust_integration::device_merge_sort_partition_count::<Row4>(ITEMS)?;
+    let mut workspace = rccl_cub::device_merge_sort_pairs_workspace::<Row4, u64>(&launch, ITEMS)?;
+    let partitions =
+        rccl_cub::thrust_integration::device_merge_sort_partition_count::<Row4>(ITEMS)?;
     let actual_temp_bytes = ITEMS * (core::mem::size_of::<Row4>() + core::mem::size_of::<u64>())
         + partitions * core::mem::size_of::<usize>();
     assert_eq!(actual_temp_bytes, TEMP_BYTES);

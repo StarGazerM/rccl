@@ -296,7 +296,7 @@ pub trait StaticMapKernelModule {
         P: ProbingScheme<K>,
         S: KernelSliceArg<Elem = u64>,
         KR: KernelSliceArg<Elem = K>,
-        OR: KernelSliceArg<Elem = DeviceAtomicU32>;
+        OR: KernelSliceArg<Elem = V::Atomic>;
 
     #[allow(clippy::too_many_arguments)]
     fn launch_contains<K, V, P, const CG: u32, S, KR, OR>(
@@ -357,10 +357,10 @@ pub trait StaticMapKernelModule {
         V: MapValue,
         S: KernelSliceArg<Elem = u64>,
         KO: KernelSliceArg<Elem = DeviceAtomicU32>,
-        VO: KernelSliceArg<Elem = DeviceAtomicU32>,
+        VO: KernelSliceArg<Elem = V::Atomic>,
         C: KernelSliceArg<Elem = DeviceAtomicU64>;
 
-    fn launch_count<K, S, C>(
+    fn launch_count<K, V, S, C>(
         &self,
         stream: &CudaStream,
         config: LaunchConfig1D,
@@ -371,6 +371,7 @@ pub trait StaticMapKernelModule {
     ) -> Result<(), LaunchContractError>
     where
         K: MapKey,
+        V: MapValue,
         S: KernelSliceArg<Elem = u64>,
         C: KernelSliceArg<Elem = DeviceAtomicU64>;
 
@@ -409,9 +410,10 @@ where
         empty_slot: u64,
     ) -> Result<(), MapError> {
         storage.ensure_usable_on(stream)?;
-        let mut slots = crate::kernel_args::RangeMutArg::subrange(storage, 0, capacity);
+        let slot_words = slot_storage_words::<V>(capacity)?;
+        let mut slots = crate::kernel_args::RangeMutArg::subrange(storage, 0, slot_words);
         let config =
-            launch_config(u32::try_from(capacity).map_err(|_| MapError::CapacityOverflow)?);
+            launch_config(u32::try_from(slot_words).map_err(|_| MapError::CapacityOverflow)?);
         self.launch_clear(stream, config, &mut slots, empty_slot)
             .map_err(MapError::Contract)
     }
@@ -482,10 +484,10 @@ where
         OR: ContiguousDeviceRangeMut<V> + ?Sized,
     {
         let config = bulk_launch_config::<CG>(keys.len())?;
-        let prefix = crate::kernel_args::Prefix::new(storage, capacity);
+        let prefix = crate::kernel_args::Prefix::new(storage, slot_storage_words::<V>(capacity)?);
         let slots = crate::kernel_args::RangeArg::new(&prefix);
         let keys = crate::kernel_args::RangeArg::new(keys);
-        let output = crate::kernel_args::AtomicU32RangeMutArg::new(output);
+        let output = crate::kernel_args::ValueAtomicRangeMutArg::<V, _>::new(output);
         self.launch_find::<K, V, P, CG, _, _, _>(
             stream,
             config,
@@ -518,7 +520,7 @@ where
         OR: ContiguousDeviceRangeMut<u32> + ?Sized,
     {
         let config = bulk_launch_config::<CG>(keys.len())?;
-        let prefix = crate::kernel_args::Prefix::new(storage, capacity);
+        let prefix = crate::kernel_args::Prefix::new(storage, slot_storage_words::<V>(capacity)?);
         let slots = crate::kernel_args::RangeArg::new(&prefix);
         let keys = crate::kernel_args::RangeArg::new(keys);
         let output = crate::kernel_args::AtomicU32RangeMutArg::new(output);
@@ -553,8 +555,9 @@ where
     {
         let config = bulk_launch_config::<CG>(keys.len())?;
         let storage = crate::kernel_args::AtomicU64StorageArg::new(storage);
-        let slots = storage.subrange(0, capacity);
-        let erased = storage.subrange(capacity, 1);
+        let slot_words = slot_storage_words::<V>(capacity)?;
+        let slots = storage.subrange(0, slot_words);
+        let erased = storage.subrange(slot_words, 1);
         let keys = crate::kernel_args::RangeArg::new(keys);
         self.launch_erase::<K, V, P, CG, _, _, _>(
             stream,
@@ -588,10 +591,10 @@ where
         let config =
             launch_config(u32::try_from(capacity).map_err(|_| MapError::CapacityOverflow)?);
         let storage = crate::kernel_args::AtomicU64StorageArg::new(storage);
-        let slots = storage.plain_subrange(0, capacity);
+        let slots = storage.plain_subrange(0, slot_storage_words::<V>(capacity)?);
         let keys = crate::kernel_args::AtomicU32RangeMutArg::new(keys);
-        let values = crate::kernel_args::AtomicU32RangeMutArg::new(values);
-        let count = storage.subrange(capacity, 1);
+        let values = crate::kernel_args::ValueAtomicRangeMutArg::<V, _>::new(values);
+        let count = storage.subrange(slot_storage_words::<V>(capacity)?, 1);
         self.launch_retrieve_all::<K, V, _, _, _, _>(
             stream, config, &slots, &keys, &values, &count, empty_key, erased_key,
         )
@@ -609,9 +612,9 @@ where
         let config =
             launch_config(u32::try_from(capacity).map_err(|_| MapError::CapacityOverflow)?);
         let storage = crate::kernel_args::AtomicU64StorageArg::new(storage);
-        let slots = storage.plain_subrange(0, capacity);
-        let count = storage.subrange(capacity, 1);
-        self.launch_count::<K, _, _>(stream, config, &slots, &count, empty_key, erased_key)
+        let slots = storage.plain_subrange(0, slot_storage_words::<V>(capacity)?);
+        let count = storage.subrange(slot_storage_words::<V>(capacity)?, 1);
+        self.launch_count::<K, V, _, _>(stream, config, &slots, &count, empty_key, erased_key)
             .map_err(MapError::Contract)
     }
 
@@ -628,10 +631,11 @@ where
         probing: P,
     ) -> Result<(), MapError> {
         let config = bulk_launch_config::<CG>(source_capacity)?;
-        let source_prefix = crate::kernel_args::Prefix::new(source, source_capacity);
+        let source_prefix =
+            crate::kernel_args::Prefix::new(source, slot_storage_words::<V>(source_capacity)?);
         let source = crate::kernel_args::RangeArg::new(&source_prefix);
         let destination = crate::kernel_args::AtomicU64StorageArg::new(destination);
-        let destination = destination.subrange(0, destination_capacity);
+        let destination = destination.subrange(0, slot_storage_words::<V>(destination_capacity)?);
         self.launch_rehash::<K, V, P, CG, _, _>(
             stream,
             config,
@@ -676,9 +680,10 @@ where
         } = self;
         let config = bulk_launch_config::<CG>(keys.len())?;
         let storage = crate::kernel_args::AtomicU64StorageArg::new(storage);
-        let slots = storage.subrange(0, capacity);
-        let inserted = storage.subrange(capacity, 1);
-        let invalid = storage.subrange(capacity + 1, 1);
+        let slot_words = slot_storage_words::<V>(capacity)?;
+        let slots = storage.subrange(0, slot_words);
+        let inserted = storage.subrange(slot_words, 1);
+        let invalid = storage.subrange(slot_words + 1, 1);
         let keys = crate::kernel_args::RangeArg::new(keys);
         let values = crate::kernel_args::RangeArg::new(values);
         let result = if ASSIGN {
@@ -733,7 +738,8 @@ where
         } = self;
         let config = bulk_launch_config::<CG>(keys.len())?;
         let storage = crate::kernel_args::AtomicU64StorageArg::new(storage);
-        let slots = storage.subrange(0, capacity);
+        let slot_words = slot_storage_words::<V>(capacity)?;
+        let slots = storage.subrange(0, slot_words);
         let keys = crate::kernel_args::RangeArg::new(keys);
         let values = crate::kernel_args::RangeArg::new(values);
         let result = if SUPPORTS_ERASE {
@@ -763,6 +769,12 @@ where
         };
         result.map_err(MapError::Contract)
     }
+}
+
+fn slot_storage_words<V: MapValue>(capacity: usize) -> Result<usize, MapError> {
+    capacity
+        .checked_mul(V::SLOT_WORDS)
+        .ok_or(MapError::CapacityOverflow)
 }
 
 fn bulk_launch_config<const CG: u32>(items: usize) -> Result<LaunchConfig1D, MapError> {
@@ -969,9 +981,7 @@ macro_rules! __cuco_backend {
                 P: $crate::ProbingScheme<K>,
                 S: $crate::__private::cuda_host::KernelSliceArg<Elem = u64>,
                 KR: $crate::__private::cuda_host::KernelSliceArg<Elem = K>,
-                OR: $crate::__private::cuda_host::KernelSliceArg<
-                        Elem = $crate::__private::cuda_device::atomic::DeviceAtomicU32,
-                    >,
+                OR: $crate::__private::cuda_host::KernelSliceArg<Elem = V::Atomic>,
             {
                 let prepared = self.prepare_static_map_find::<K, V, P, CG>(config)?;
                 self.static_map_find::<K, V, P, CG>(
@@ -1079,9 +1089,7 @@ macro_rules! __cuco_backend {
                 KO: $crate::__private::cuda_host::KernelSliceArg<
                         Elem = $crate::__private::cuda_device::atomic::DeviceAtomicU32,
                     >,
-                VO: $crate::__private::cuda_host::KernelSliceArg<
-                        Elem = $crate::__private::cuda_device::atomic::DeviceAtomicU32,
-                    >,
+                VO: $crate::__private::cuda_host::KernelSliceArg<Elem = V::Atomic>,
                 C: $crate::__private::cuda_host::KernelSliceArg<
                         Elem = $crate::__private::cuda_device::atomic::DeviceAtomicU64,
                     >,
@@ -1092,7 +1100,7 @@ macro_rules! __cuco_backend {
                 )
             }
 
-            fn launch_count<K, S, C>(
+            fn launch_count<K, V, S, C>(
                 &self,
                 stream: &$crate::__private::cuda_core::CudaStream,
                 config: $crate::__private::cuda_core::LaunchConfig1D,
@@ -1103,13 +1111,16 @@ macro_rules! __cuco_backend {
             ) -> Result<(), $crate::__private::cuda_core::LaunchContractError>
             where
                 K: $crate::MapKey,
+                V: $crate::MapValue,
                 S: $crate::__private::cuda_host::KernelSliceArg<Elem = u64>,
                 C: $crate::__private::cuda_host::KernelSliceArg<
                         Elem = $crate::__private::cuda_device::atomic::DeviceAtomicU64,
                     >,
             {
-                let prepared = self.prepare_static_map_count::<K>(config)?;
-                self.static_map_count::<K>(stream, &prepared, slots, count, empty_key, erased_key)
+                let prepared = self.prepare_static_map_count::<K, V>(config)?;
+                self.static_map_count::<K, V>(
+                    stream, &prepared, slots, count, empty_key, erased_key,
+                )
             }
 
             fn launch_rehash<K, V, P, const CG: u32, S, D>(

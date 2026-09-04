@@ -46,23 +46,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     assert_eq!(copied[ITEMS - 1], ITEMS as u32 - 1 ^ MASK);
 
     for _ in 0..WARMUPS {
-        gather_async(
-            &execution,
-            input.view(),
-            indices.view(),
-            output.view_mut(),
-        )
-        .wait()?;
+        gather_async(&execution, input.view(), indices.view(), output.view_mut()).wait()?;
     }
     let mut gather_values = Vec::with_capacity(SAMPLES);
     for _ in 0..SAMPLES {
         let start = stream.record_event(timing)?;
-        let pending = gather_async(
-            &execution,
-            input.view(),
-            indices.view(),
-            output.view_mut(),
-        );
+        let pending = gather_async(&execution, input.view(), indices.view(), output.view_mut());
         let end = stream.record_event(timing)?;
         end.synchronize()?;
         gather_values.push(start.elapsed_ms(&end)?);
@@ -85,10 +74,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         fill_values.push(start.elapsed_ms(&end)?);
         pending.wait()?;
     }
-    assert!(output
-        .to_host_vec(&stream)?
-        .into_iter()
-        .all(|value| value == 0xdead_beef));
+    assert!(
+        output
+            .to_host_vec(&stream)?
+            .into_iter()
+            .all(|value| value == 0xdead_beef)
+    );
 
     for _ in 0..WARMUPS {
         tabulate_range_async(&execution, output.view_mut(), |index| {

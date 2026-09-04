@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0 OR MIT"
 description = "Umbrella crate for RCCL's Thrust-shaped, CUB-level, and cuCollections-style CUDA primitives"
+homepage = "https://github.com/StarGazerM/rccl"
+repository = "https://github.com/StarGazerM/rccl"
+documentation = "https://docs.rs/rccl"
+include = ["src/**", "README.md", "LICENSE-*", "SECURITY.md", "CONTRIBUTING.md", "CODE_OF_CONDUCT.md", "THIRD_PARTY_NOTICES.md", "Cargo.toml"]
 
 [workspace]
 members = [

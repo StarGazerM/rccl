@@ -17,10 +17,7 @@ pub type PendingCopy<'borrow, 'stream, 'program, T, A> = CudaCompletion<
     DeviceAlgorithmError,
     (
         &'borrow Execution<'stream, 'program, A>,
-        (
-            &'borrow DeviceBuffer<T>,
-            &'borrow mut DeviceBuffer<T>,
-        ),
+        (&'borrow DeviceBuffer<T>, &'borrow mut DeviceBuffer<T>),
     ),
 >;
 
@@ -29,10 +26,7 @@ pub type PendingRangeCopy<'borrow, 'stream, 'program, Input, Output, A> = CudaCo
     'borrow,
     (),
     DeviceAlgorithmError,
-    (
-        &'borrow Execution<'stream, 'program, A>,
-        (Input, Output),
-    ),
+    (&'borrow Execution<'stream, 'program, A>, (Input, Output)),
 >;
 
 /// In-flight indexed gather between zero-materialization device ranges.
@@ -95,7 +89,6 @@ where
     copy_async(execution, input, output).wait()
 }
 
-
 /// Enqueue an allocation-free copy between equally sized device ranges.
 ///
 /// Adaptors are lowered directly to scalar descriptors; no iterator or index
@@ -121,12 +114,7 @@ where
     // construction sites and all work is submitted on execution's stream.
     unsafe {
         execution.submit((input, output), |execution, resources| {
-            crate::backend::range_transform(
-                execution,
-                &resources.0,
-                &resources.1,
-                &|value| value,
-            )
+            crate::backend::range_transform(execution, &resources.0, &resources.1, &|value| value)
         })
     }
 }

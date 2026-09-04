@@ -59,15 +59,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         .map(|index| u32::from(index % 5 <= 1))
         .collect::<Vec<_>>();
     let flags = DeviceBuffer::from_host(&stream, &flags_host)?;
-    let unique_host = (0..ITEMS).map(|index| (index / 3) as u32).collect::<Vec<_>>();
+    let unique_host = (0..ITEMS)
+        .map(|index| (index / 3) as u32)
+        .collect::<Vec<_>>();
     let unique_input = DeviceBuffer::from_host(&stream, &unique_host)?;
     let mut output = DeviceBuffer::from_host(&stream, &vec![0_u32; ITEMS])?;
     let mut count = DeviceBuffer::from_host(&stream, &[0_u64])?;
-    let mut workspace = rccl_cub::thrust_integration::compaction_workspace_in(
-        &allocator,
-        &launch,
-        ITEMS,
-    )?;
+    let mut workspace =
+        rccl_cub::thrust_integration::compaction_workspace_in(&allocator, &launch, ITEMS)?;
     let bytes = workspace.allocation_bytes();
 
     let timing = measure(&stream, || {
@@ -130,7 +129,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         .filter(|value| value % 5 <= 1)
         .chain(input_host.iter().copied().filter(|value| value % 5 > 1))
         .collect::<Vec<_>>();
-    assert_eq!(selected, flags_host.iter().filter(|&&flag| flag != 0).count());
+    assert_eq!(
+        selected,
+        flags_host.iter().filter(|&&flag| flag != 0).count()
+    );
     assert_eq!(output.to_host_vec(&stream)?, expected);
     Ok(())
 }

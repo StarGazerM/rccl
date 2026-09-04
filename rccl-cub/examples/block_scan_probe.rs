@@ -20,8 +20,7 @@ mod kernels {
     {
         let lane = thread::threadIdx_x() as usize;
         let value = input.get(lane).copied().unwrap_or_else(T::zero);
-        let shared =
-            rccl_cub::__private::BlockSharedMemory::new(8 * core::mem::size_of::<T>());
+        let shared = rccl_cub::__private::BlockSharedMemory::new(8 * core::mem::size_of::<T>());
         let result = rccl_cub::__private::block_scan_sum_256(value, valid, &shared);
         let mut inclusive = rccl_cub::__private::DeviceRegion::new(inclusive);
         let mut exclusive = rccl_cub::__private::DeviceRegion::new(exclusive);
@@ -42,22 +41,14 @@ fn run_case<T>(
     input: &[T],
 ) -> Result<(), Box<dyn Error>>
 where
-    T: rccl_cub::__private::BlockScanValue
-        + DeviceCopy
-        + PartialEq
-        + core::fmt::Debug
-        + 'static,
+    T: rccl_cub::__private::BlockScanValue + DeviceCopy + PartialEq + core::fmt::Debug + 'static,
 {
     let input_device = DeviceBuffer::from_host(stream, input)?;
     let zeros = vec![T::zero(); input.len()];
     let mut inclusive = DeviceBuffer::from_host(stream, &zeros)?;
     let mut exclusive = DeviceBuffer::from_host(stream, &zeros)?;
     let mut aggregate = DeviceBuffer::from_host(stream, &[T::zero()])?;
-    let config = LaunchConfig1D::new(
-        1,
-        256,
-        (8 * core::mem::size_of::<T>()) as u32,
-    );
+    let config = LaunchConfig1D::new(1, 256, (8 * core::mem::size_of::<T>()) as u32);
     let prepared = program.prepare_block_scan::<T>(config)?;
     program.block_scan(
         stream,

@@ -15,12 +15,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let input = DeviceBuffer::from_host(&stream, &[10_u32, 20, 30])?;
         let indices = DeviceBuffer::from_host(&stream, &[3_u32])?;
         let mut output = DeviceBuffer::<u32>::zeroed(&stream, 1)?;
-        if let Err(error) = gather(
-            &execution,
-            input.view(),
-            indices.view(),
-            output.view_mut(),
-        ) {
+        if let Err(error) = gather(&execution, input.view(), indices.view(), output.view_mut()) {
             eprintln!("gather index OOB surfaced: {error}");
             std::process::exit(0);
         }
@@ -36,11 +31,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     assert!(copy(&execution, &input, &mut wrong_length).is_err());
 
     let mut sliced = DeviceBuffer::<u32>::zeroed(&stream, 2)?;
-    copy_range(
-        &execution,
-        input.view().slice(1..3)?,
-        sliced.view_mut(),
-    )?;
+    copy_range(&execution, input.view().slice(1..3)?, sliced.view_mut())?;
     assert_eq!(sliced.to_host_vec(&stream)?, [22, 33]);
 
     let indices32 = DeviceBuffer::from_host(&stream, &[3_u32, 0, 3, 1])?;
@@ -89,10 +80,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut reverse_sequence = DeviceBuffer::<u64>::zeroed(&stream, 5)?;
     sequence_range_by(&execution, reverse_sequence.view_mut().rev(), 10_u64, 2_u64)?;
-    assert_eq!(
-        reverse_sequence.to_host_vec(&stream)?,
-        [18, 16, 14, 12, 10]
-    );
+    assert_eq!(reverse_sequence.to_host_vec(&stream)?, [18, 16, 14, 12, 10]);
 
     let mut generated = DeviceBuffer::<u32>::zeroed(&stream, 2_305)?;
     tabulate_range_async(&execution, generated.view_mut(), |index| {

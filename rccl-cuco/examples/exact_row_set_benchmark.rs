@@ -7,19 +7,28 @@ use rccl_cuco::{ExactRowSetConfig, Row};
 
 fn argument(name: &str, default: usize) -> usize {
     let arguments = std::env::args().collect::<Vec<_>>();
-    arguments.windows(2).find(|pair| pair[0] == name)
-        .and_then(|pair| pair[1].parse().ok()).unwrap_or(default)
+    arguments
+        .windows(2)
+        .find(|pair| pair[0] == name)
+        .and_then(|pair| pair[1].parse().ok())
+        .unwrap_or(default)
 }
 
 fn float_argument(name: &str, default: f64) -> f64 {
     let arguments = std::env::args().collect::<Vec<_>>();
-    arguments.windows(2).find(|pair| pair[0] == name)
-        .and_then(|pair| pair[1].parse().ok()).unwrap_or(default)
+    arguments
+        .windows(2)
+        .find(|pair| pair[0] == name)
+        .and_then(|pair| pair[1].parse().ok())
+        .unwrap_or(default)
 }
 
 fn string_argument<'a>(arguments: &'a [String], name: &str, default: &'a str) -> &'a str {
-    arguments.windows(2).find(|pair| pair[0] == name)
-        .map(|pair| pair[1].as_str()).unwrap_or(default)
+    arguments
+        .windows(2)
+        .find(|pair| pair[0] == name)
+        .map(|pair| pair[1].as_str())
+        .unwrap_or(default)
 }
 
 fn row(index: u32) -> Row<2> {
@@ -43,8 +52,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     let iterations = argument("--iterations", 10);
     let occupancy = float_argument("--occupancy", 0.5);
     let operation = string_argument(&arguments, "--operation", "insert");
-    if items == 0 || items >= u32::MAX as usize || iterations == 0
-        || !occupancy.is_finite() || occupancy <= 0.0 || occupancy > 1.0
+    if items == 0
+        || items >= u32::MAX as usize
+        || iterations == 0
+        || !occupancy.is_finite()
+        || occupancy <= 0.0
+        || occupancy > 1.0
         || !matches!(operation, "insert" | "contains")
     {
         return Err("invalid benchmark arguments".into());
@@ -54,7 +67,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let stream = context.default_stream();
     let program = rccl_cuco::cuco_program!(&context)?;
     let launch = program.on(&stream)?;
-    let host_rows = (0..items).map(|index| row(index as u32)).collect::<Vec<_>>();
+    let host_rows = (0..items)
+        .map(|index| row(index as u32))
+        .collect::<Vec<_>>();
     let rows = DeviceBuffer::from_host(&stream, &host_rows)?;
     let requested_capacity = (items as f64 / occupancy) as usize;
     let mut set = ExactRowSetConfig::with_capacity(requested_capacity, Row::new([u32::MAX; 2]))
@@ -77,7 +92,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let end = stream.context().new_event(Some(0))?;
     let mut timings = Vec::with_capacity(iterations);
     for _ in 0..iterations {
-        if operation == "insert" { set.clear(&launch)?; }
+        if operation == "insert" {
+            set.clear(&launch)?;
+        }
         start.record(&stream)?;
         let pending = if operation == "insert" {
             set.insert_prevalidated_async(&rows, &launch)?
@@ -90,11 +107,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         pending.wait()?;
     }
     if operation == "contains" {
-        assert!(output.to_host_vec(&stream)?.into_iter().all(|value| value == 1));
+        assert!(
+            output
+                .to_host_vec(&stream)?
+                .into_iter()
+                .all(|value| value == 1)
+        );
     }
     println!(
         "implementation=rccl-cuco algorithm=exact_row_set_{operation} type=row2_u32 items={items} occupancy={occupancy:.2} capacity={} median_ms={:.9}",
-        set.capacity(), median(timings),
+        set.capacity(),
+        median(timings),
     );
     Ok(())
 }

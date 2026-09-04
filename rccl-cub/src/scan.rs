@@ -3,9 +3,7 @@
 use core::{marker::PhantomData, mem};
 
 use cuda_core::DeviceBuffer;
-use rccl_memory::{
-    DeviceAllocator, TemporaryRegion, TemporaryValue, TemporaryWorkspace2,
-};
+use rccl_memory::{DeviceAllocator, TemporaryRegion, TemporaryValue, TemporaryWorkspace2};
 
 use crate::{DeviceAlgorithmError, block_scan::BlockScanValue, cuda::Launch};
 
@@ -21,10 +19,7 @@ mod sealed {
 }
 
 /// Unsigned counter type supported by the SRDatalog/HISA scan path.
-pub trait DeviceScanValue:
-    BlockScanValue + TemporaryValue + sealed::Sealed + 'static
-{
-}
+pub trait DeviceScanValue: BlockScanValue + TemporaryValue + sealed::Sealed + 'static {}
 
 impl DeviceScanValue for u32 {}
 impl DeviceScanValue for u64 {}
@@ -134,9 +129,7 @@ where
 pub fn device_scan_workspace<'stream, T>(
     launch: &Launch<'stream, '_>,
     len: usize,
-) -> Result<
-    DeviceScanWorkspace<'stream, rccl_memory::BorrowedCudaMemoryResource<'stream>, T>,
->
+) -> Result<DeviceScanWorkspace<'stream, rccl_memory::BorrowedCudaMemoryResource<'stream>, T>>
 where
     T: DeviceScanValue,
 {
@@ -206,7 +199,8 @@ fn raw_subregion<T: DeviceScanValue>(
 
 fn device_scan_sum_impl<A, T, const EXCLUSIVE: bool>(
     launch: &Launch<'_, '_>,
-    pointer: cuda_core::sys::CUdeviceptr,
+    input_pointer: cuda_core::sys::CUdeviceptr,
+    output_pointer: cuda_core::sys::CUdeviceptr,
     len: usize,
     workspace: &mut DeviceScanWorkspace<'_, A, T>,
 ) -> Result<()>
@@ -223,8 +217,8 @@ where
         });
     }
 
-    let input = RawKernelSlice::<T>::new(pointer, len);
-    let mut output = RawKernelSlice::<T>::new(pointer, len);
+    let input = RawKernelSlice::<T>::new(input_pointer, len);
+    let mut output = RawKernelSlice::<T>::new(output_pointer, len);
     let (partials, prefixes) = workspace.parts_mut();
     let mut first_sums = if layout.levels == 0 {
         RawKernelSlice::empty()
@@ -260,11 +254,7 @@ where
 
     if layout.levels > 1 {
         for lower in (0..layout.levels - 1).rev() {
-            let mut values = raw_subregion(
-                prefixes,
-                layout.offsets[lower],
-                layout.lengths[lower],
-            )?;
+            let mut values = raw_subregion(prefixes, layout.offsets[lower], layout.lengths[lower])?;
             let offsets = raw_subregion(
                 prefixes,
                 layout.offsets[lower + 1],
@@ -285,16 +275,25 @@ where
     Ok(())
 }
 
-pub(crate) fn device_exclusive_sum_u32_region<A, Values>(
+pub(crate) fn device_exclusive_sum_u32_region_into<A, Input, Output>(
     launch: &Launch<'_, '_>,
-    values: &mut Values,
+    input: &Input,
+    output: &mut Output,
     workspace: &mut DeviceScanWorkspace<'_, A, u32>,
 ) -> Result<()>
 where
     A: DeviceAllocator,
-    Values: cuda_host::KernelSliceArgMut<Elem = u32>,
+    Input: cuda_host::KernelSliceArg<Elem = u32>,
+    Output: cuda_host::KernelSliceArgMut<Elem = u32>,
 {
-    let len = cuda_host::KernelSliceArg::len(values);
+    let len = cuda_host::KernelSliceArg::len(input);
+    if cuda_host::KernelSliceArg::len(output) != len {
+        return Err(DeviceAlgorithmError::LengthMismatch {
+            role: "scan output",
+            expected: len,
+            actual: cuda_host::KernelSliceArg::len(output),
+        });
+    }
     let tile_count = len.div_ceil(crate::scan_kernels::LOOKBACK_SCAN_TILE_ITEMS);
     let state_items = tile_count
         .checked_add(crate::scan_kernels::LOOKBACK_SCAN_PADDING)
@@ -319,32 +318,44 @@ where
     };
     if let Some(mut state) = state {
         launch
-            .scan_lookback_u32(values, &mut state, len)
+            .scan_lookback_u32(input, output, &mut state, len)
             .map_err(DeviceAlgorithmError::Launch)
     } else {
         device_scan_sum_impl::<A, u32, true>(
             launch,
-            cuda_host::KernelSliceArg::cu_deviceptr(values),
+            cuda_host::KernelSliceArg::cu_deviceptr(input),
+            cuda_host::KernelSliceArg::cu_deviceptr(output),
             len,
             workspace,
         )
     }
 }
 
-pub(crate) fn device_exclusive_sum_region<A, T, Values>(
+pub(crate) fn device_exclusive_sum_region_into<A, T, Input, Output>(
     launch: &Launch<'_, '_>,
-    values: &mut Values,
+    input: &Input,
+    output: &mut Output,
     workspace: &mut DeviceScanWorkspace<'_, A, T>,
 ) -> Result<()>
 where
     A: DeviceAllocator,
     T: DeviceScanValue,
-    Values: cuda_host::KernelSliceArgMut<Elem = T>,
+    Input: cuda_host::KernelSliceArg<Elem = T>,
+    Output: cuda_host::KernelSliceArgMut<Elem = T>,
 {
+    let len = cuda_host::KernelSliceArg::len(input);
+    if cuda_host::KernelSliceArg::len(output) != len {
+        return Err(DeviceAlgorithmError::LengthMismatch {
+            role: "scan output",
+            expected: len,
+            actual: cuda_host::KernelSliceArg::len(output),
+        });
+    }
     device_scan_sum_impl::<A, T, true>(
         launch,
-        cuda_host::KernelSliceArg::cu_deviceptr(values),
-        cuda_host::KernelSliceArg::len(values),
+        cuda_host::KernelSliceArg::cu_deviceptr(input),
+        cuda_host::KernelSliceArg::cu_deviceptr(output),
+        len,
         workspace,
     )
 }
@@ -359,7 +370,13 @@ where
     A: DeviceAllocator,
     T: DeviceScanValue,
 {
-    device_scan_sum_impl::<A, T, false>(launch, values.cu_deviceptr(), values.len(), workspace)
+    device_scan_sum_impl::<A, T, false>(
+        launch,
+        values.cu_deviceptr(),
+        values.cu_deviceptr(),
+        values.len(),
+        workspace,
+    )
 }
 
 /// Exclusive wrapping prefix sum with zero identity in place.
@@ -372,7 +389,13 @@ where
     A: DeviceAllocator,
     T: DeviceScanValue,
 {
-    device_scan_sum_impl::<A, T, true>(launch, values.cu_deviceptr(), values.len(), workspace)
+    device_scan_sum_impl::<A, T, true>(
+        launch,
+        values.cu_deviceptr(),
+        values.cu_deviceptr(),
+        values.len(),
+        workspace,
+    )
 }
 
 #[cfg(test)]
@@ -388,7 +411,10 @@ mod tests {
                 levels: 0,
             }
         );
-        assert_eq!(device_scan_workspace_counts(256).unwrap().temporary_items, 0);
+        assert_eq!(
+            device_scan_workspace_counts(256).unwrap().temporary_items,
+            0
+        );
         assert_eq!(
             device_scan_workspace_counts(257).unwrap(),
             DeviceScanWorkspaceCounts {

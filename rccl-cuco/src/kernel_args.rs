@@ -4,9 +4,10 @@
 //! public API uses Rust borrows and `rccl-memory` contiguous ranges.
 
 use core::marker::PhantomData;
-
 use cuda_host::{KernelSliceArg, KernelSliceArgMut};
 use rccl_memory::{ContiguousDeviceRange, ContiguousDeviceRangeMut};
+
+use crate::MapValue;
 
 #[doc(hidden)]
 pub struct RangeArg<'a, T, R: ?Sized> {
@@ -173,6 +174,45 @@ unsafe impl<T, R: ContiguousDeviceRangeMut<T> + ?Sized> KernelSliceArg
 }
 
 #[doc(hidden)]
+pub struct ValueAtomicRangeMutArg<'a, V, R: ?Sized>
+where
+    V: MapValue,
+{
+    range: &'a mut R,
+    marker: PhantomData<fn() -> V>,
+}
+
+impl<'a, V, R> ValueAtomicRangeMutArg<'a, V, R>
+where
+    V: MapValue,
+    R: ContiguousDeviceRangeMut<V> + ?Sized,
+{
+    pub fn new(range: &'a mut R) -> Self {
+        assert!(core::mem::align_of::<V>() >= core::mem::align_of::<V::Atomic>());
+        Self {
+            range,
+            marker: PhantomData,
+        }
+    }
+}
+
+unsafe impl<V, R> KernelSliceArg for ValueAtomicRangeMutArg<'_, V, R>
+where
+    V: MapValue,
+    R: ContiguousDeviceRangeMut<V> + ?Sized,
+{
+    type Elem = V::Atomic;
+
+    fn cu_deviceptr(&self) -> cuda_core::sys::CUdeviceptr {
+        self.range.cu_deviceptr()
+    }
+
+    fn len(&self) -> usize {
+        self.range.len()
+    }
+}
+
+#[doc(hidden)]
 pub struct AtomicU32RangeArg<'a, R: ?Sized> {
     range: &'a R,
 }
@@ -183,9 +223,7 @@ impl<'a, R: ContiguousDeviceRange<u32> + ?Sized> AtomicU32RangeArg<'a, R> {
     }
 }
 
-unsafe impl<R: ContiguousDeviceRange<u32> + ?Sized> KernelSliceArg
-    for AtomicU32RangeArg<'_, R>
-{
+unsafe impl<R: ContiguousDeviceRange<u32> + ?Sized> KernelSliceArg for AtomicU32RangeArg<'_, R> {
     type Elem = cuda_device::atomic::DeviceAtomicU32;
 
     fn cu_deviceptr(&self) -> cuda_core::sys::CUdeviceptr {
@@ -208,9 +246,7 @@ impl<'a, R: ContiguousDeviceRange<u64> + ?Sized> AtomicU64RangeArg<'a, R> {
     }
 }
 
-unsafe impl<R: ContiguousDeviceRange<u64> + ?Sized> KernelSliceArg
-    for AtomicU64RangeArg<'_, R>
-{
+unsafe impl<R: ContiguousDeviceRange<u64> + ?Sized> KernelSliceArg for AtomicU64RangeArg<'_, R> {
     type Elem = cuda_device::atomic::DeviceAtomicU64;
 
     fn cu_deviceptr(&self) -> cuda_core::sys::CUdeviceptr {

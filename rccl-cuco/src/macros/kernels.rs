@@ -392,7 +392,7 @@ macro_rules! __cuco_device_kernels {
             pub fn static_map_find<K, V, P, const CG: u32>(
                 slots: &[u64],
                 keys: &[K],
-                output: &[DeviceAtomicU32],
+                output: &[V::Atomic],
                 empty_key: K,
                 empty_value: V,
                 erased_key: K,
@@ -476,7 +476,7 @@ macro_rules! __cuco_device_kernels {
             pub fn static_map_retrieve_all<K, V>(
                 slots: &[u64],
                 keys: &[DeviceAtomicU32],
-                values: &[DeviceAtomicU32],
+                values: &[V::Atomic],
                 count: &[DeviceAtomicU64],
                 empty_key: K,
                 erased_key: K,
@@ -498,15 +498,16 @@ macro_rules! __cuco_device_kernels {
             #[kernel]
             #[launch_bounds(128)]
             #[launch_contract(domain = 1, coordinates = u32, block = (128, 1, 1))]
-            pub fn static_map_count<K>(
+            pub fn static_map_count<K, V>(
                 slots: &[u64],
                 count: &[DeviceAtomicU64],
                 empty_key: K,
                 erased_key: K,
             ) where
                 K: MapKey,
+                V: MapValue,
             {
-                $crate::__private::device_count::<K>(
+                $crate::__private::device_count::<K, V>(
                     thread::index_1d().get(),
                     slots,
                     count,

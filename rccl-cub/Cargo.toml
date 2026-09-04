@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0 OR MIT"
 description = "Device-wide and cooperative CUDA primitives for RCCL"
+homepage = "https://github.com/StarGazerM/rccl"
+repository = "https://github.com/StarGazerM/rccl"
+documentation = "https://docs.rs/rccl-cub"
+readme = "README.md"
+include = ["src/**", "examples/**", "README.md", "LICENSE-*", "Cargo.toml"]
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [

@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0 OR MIT"
 description = "Rust-native GPU concurrent containers modeled on NVIDIA cuCollections"
+homepage = "https://github.com/StarGazerM/rccl"
+repository = "https://github.com/StarGazerM/rccl"
+documentation = "https://docs.rs/rccl-cuco"
+readme = "README.md"
+include = ["src/**", "examples/**", "README.md", "LICENSE-*", "Cargo.toml"]
 
 [features]
 cuda-oxide-example = []
@@ -17,6 +22,20 @@ rccl-memory = { path = "../rccl-memory" }
 [[example]]
 name = "static_map"
 path = "examples/static_map.rs"
+test = false
+required-features = ["cuda-oxide-example"]
+
+
+[[example]]
+name = "static_map_u64"
+path = "examples/static_map_u64.rs"
+test = false
+required-features = ["cuda-oxide-example"]
+
+
+[[example]]
+name = "static_map_u64_benchmark"
+path = "examples/static_map_u64_benchmark.rs"
 test = false
 required-features = ["cuda-oxide-example"]
 

@@ -1,18 +1,16 @@
 use cuda_core::{CudaContext, DeviceBuffer};
 use rccl_thrust::{
-    BooleanOr, BooleanProvenance, DeviceBufferExt, DeviceRangeExt,
-    IndependentProbabilityOr, NaturalBagAdd, arithmetic_range, reduce_by_key,
-    reduce_by_key_async,
+    BooleanOr, BooleanProvenance, DeviceBufferExt, DeviceRangeExt, IndependentProbabilityOr,
+    NaturalBagAdd, arithmetic_range, reduce_by_key, reduce_by_key_async,
 };
 use std::error::Error;
 
-type Exec<'a> = rccl_thrust::cuda::Execution<
-    'a,
-    'a,
-    rccl_memory::BorrowedCudaMemoryResource<'a>,
->;
+type Exec<'a> = rccl_thrust::cuda::Execution<'a, 'a, rccl_memory::BorrowedCudaMemoryResource<'a>>;
 
-fn count(stream: &cuda_core::CudaStream, value: &DeviceBuffer<u64>) -> Result<usize, Box<dyn Error>> {
+fn count(
+    stream: &cuda_core::CudaStream,
+    value: &DeviceBuffer<u64>,
+) -> Result<usize, Box<dyn Error>> {
     Ok(value.to_host_vec(stream)?[0] as usize)
 }
 
@@ -31,7 +29,10 @@ fn cpu_u64(keys: &[u32], values: &[u64]) -> (Vec<u32>, Vec<u64>) {
     (out_keys, out_values)
 }
 
-fn u64_boundaries(execution: &Exec<'_>, stream: &cuda_core::CudaStream) -> Result<(), Box<dyn Error>> {
+fn u64_boundaries(
+    execution: &Exec<'_>,
+    stream: &cuda_core::CudaStream,
+) -> Result<(), Box<dyn Error>> {
     for len in [0_usize, 1, 31, 32, 33, 255, 256, 257, 513, 65_537] {
         for pattern in 0..3 {
             let keys = (0..len)
@@ -42,7 +43,13 @@ fn u64_boundaries(execution: &Exec<'_>, stream: &cuda_core::CudaStream) -> Resul
                 })
                 .collect::<Vec<_>>();
             let values = (0..len)
-                .map(|i| if i % 17 == 0 { u64::MAX } else { (i % 13 + 1) as u64 })
+                .map(|i| {
+                    if i % 17 == 0 {
+                        u64::MAX
+                    } else {
+                        (i % 13 + 1) as u64
+                    }
+                })
                 .collect::<Vec<_>>();
             let expected = cpu_u64(&keys, &values);
             let keys_device = DeviceBuffer::from_host(stream, &keys)?;
@@ -61,15 +68,25 @@ fn u64_boundaries(execution: &Exec<'_>, stream: &cuda_core::CudaStream) -> Resul
                 NaturalBagAdd,
             )?;
             let actual_groups = count(stream, &groups)?;
-            assert_eq!(actual_groups, expected.0.len(), "len={len} pattern={pattern}");
+            assert_eq!(
+                actual_groups,
+                expected.0.len(),
+                "len={len} pattern={pattern}"
+            );
             assert_eq!(&out_keys.to_host_vec(stream)?[..actual_groups], expected.0);
-            assert_eq!(&out_values.to_host_vec(stream)?[..actual_groups], expected.1);
+            assert_eq!(
+                &out_values.to_host_vec(stream)?[..actual_groups],
+                expected.1
+            );
         }
     }
     Ok(())
 }
 
-fn generated_ranges(execution: &Exec<'_>, stream: &cuda_core::CudaStream) -> Result<(), Box<dyn Error>> {
+fn generated_ranges(
+    execution: &Exec<'_>,
+    stream: &cuda_core::CudaStream,
+) -> Result<(), Box<dyn Error>> {
     let len = 513;
     let mut out_keys = DeviceBuffer::from_host(stream, &vec![0_u32; len])?;
     let mut out_values = DeviceBuffer::from_host(stream, &vec![0_u64; len])?;
@@ -100,7 +117,10 @@ fn generated_ranges(execution: &Exec<'_>, stream: &cuda_core::CudaStream) -> Res
     Ok(())
 }
 
-fn provenance_and_adjacent(execution: &Exec<'_>, stream: &cuda_core::CudaStream) -> Result<(), Box<dyn Error>> {
+fn provenance_and_adjacent(
+    execution: &Exec<'_>,
+    stream: &cuda_core::CudaStream,
+) -> Result<(), Box<dyn Error>> {
     let columns = DeviceBuffer::from_host(stream, &[1_u32, 1, 2, 1, 1])?;
     let key_provenance = DeviceBuffer::from_host(stream, &[90_u32, 91, 92, 93, 94])?;
     let values = DeviceBuffer::from_host(stream, &[2_u64, 3, 5, 7, 11])?;
@@ -112,7 +132,9 @@ fn provenance_and_adjacent(execution: &Exec<'_>, stream: &cuda_core::CudaStream)
         execution,
         columns.view().with_values(key_provenance.view())?,
         values.view(),
-        out_columns.view_mut().with_values(out_key_provenance.view_mut())?,
+        out_columns
+            .view_mut()
+            .with_values(out_key_provenance.view_mut())?,
         out_values.view_mut(),
         &mut groups,
         |left, right| left.0 == right.0,
@@ -122,12 +144,18 @@ fn provenance_and_adjacent(execution: &Exec<'_>, stream: &cuda_core::CudaStream)
     let group_count = count(stream, &groups)?;
     assert_eq!(group_count, 3);
     assert_eq!(&out_columns.to_host_vec(stream)?[..group_count], [1, 2, 1]);
-    assert_eq!(&out_key_provenance.to_host_vec(stream)?[..group_count], [90, 92, 93]);
+    assert_eq!(
+        &out_key_provenance.to_host_vec(stream)?[..group_count],
+        [90, 92, 93]
+    );
     assert_eq!(&out_values.to_host_vec(stream)?[..group_count], [5, 5, 18]);
     Ok(())
 }
 
-fn workload_operators(execution: &Exec<'_>, stream: &cuda_core::CudaStream) -> Result<(), Box<dyn Error>> {
+fn workload_operators(
+    execution: &Exec<'_>,
+    stream: &cuda_core::CudaStream,
+) -> Result<(), Box<dyn Error>> {
     let keys = DeviceBuffer::from_host(stream, &[0_u32, 0, 0, 1, 1, 2])?;
 
     let bool_values = DeviceBuffer::from_host(
@@ -141,8 +169,7 @@ fn workload_operators(execution: &Exec<'_>, stream: &cuda_core::CudaStream) -> R
             BooleanProvenance::TRUE,
         ],
     )?;
-    let mut bool_out =
-        DeviceBuffer::from_host(stream, &[BooleanProvenance::FALSE; 6])?;
+    let mut bool_out = DeviceBuffer::from_host(stream, &[BooleanProvenance::FALSE; 6])?;
     let mut bool_keys = DeviceBuffer::from_host(stream, &[0_u32; 6])?;
     let mut groups = DeviceBuffer::from_host(stream, &[0_u64])?;
     reduce_by_key(
@@ -176,10 +203,8 @@ fn workload_operators(execution: &Exec<'_>, stream: &cuda_core::CudaStream) -> R
         IndependentProbabilityOr,
     )?;
     let actual = probability_out.to_host_vec(stream)?;
-    let first = IndependentProbabilityOrCpu::combine(
-        IndependentProbabilityOrCpu::combine(0.1, 0.2),
-        0.3,
-    );
+    let first =
+        IndependentProbabilityOrCpu::combine(IndependentProbabilityOrCpu::combine(0.1, 0.2), 0.3);
     assert_eq!(actual[0].to_bits(), first.to_bits());
     assert_eq!(actual[1].to_bits(), (0.4_f64 + 0.5 - 0.4 * 0.5).to_bits());
     assert_eq!(actual[2], 1.0);
@@ -207,7 +232,10 @@ impl IndependentProbabilityOrCpu {
     }
 }
 
-fn contract_errors(execution: &Exec<'_>, stream: &cuda_core::CudaStream) -> Result<(), Box<dyn Error>> {
+fn contract_errors(
+    execution: &Exec<'_>,
+    stream: &cuda_core::CudaStream,
+) -> Result<(), Box<dyn Error>> {
     let keys = DeviceBuffer::from_host(stream, &[1_u32, 1, 2])?;
     let short_values = DeviceBuffer::from_host(stream, &[1_u64, 2])?;
     let values = DeviceBuffer::from_host(stream, &[1_u64, 2, 3])?;
@@ -215,35 +243,66 @@ fn contract_errors(execution: &Exec<'_>, stream: &cuda_core::CudaStream) -> Resu
     let mut out_values = DeviceBuffer::from_host(stream, &[0_u64; 3])?;
     let mut groups = DeviceBuffer::from_host(stream, &[0_u64])?;
     let error = reduce_by_key(
-        execution, keys.view(), short_values.view(), out_keys.view_mut(), out_values.view_mut(),
-        &mut groups, |a, b| a == b, NaturalBagAdd,
-    ).unwrap_err();
+        execution,
+        keys.view(),
+        short_values.view(),
+        out_keys.view_mut(),
+        out_values.view_mut(),
+        &mut groups,
+        |a, b| a == b,
+        NaturalBagAdd,
+    )
+    .unwrap_err();
     assert!(error.to_string().contains("values length"));
 
     let mut short_keys = DeviceBuffer::from_host(stream, &[0_u32; 2])?;
     let error = reduce_by_key(
-        execution, keys.view(), values.view(), short_keys.view_mut(), out_values.view_mut(),
-        &mut groups, |a, b| a == b, NaturalBagAdd,
-    ).unwrap_err();
+        execution,
+        keys.view(),
+        values.view(),
+        short_keys.view_mut(),
+        out_values.view_mut(),
+        &mut groups,
+        |a, b| a == b,
+        NaturalBagAdd,
+    )
+    .unwrap_err();
     assert!(error.to_string().contains("key output"));
 
     let mut short_aggregates = DeviceBuffer::from_host(stream, &[0_u64; 2])?;
     let error = reduce_by_key(
-        execution, keys.view(), values.view(), out_keys.view_mut(), short_aggregates.view_mut(),
-        &mut groups, |a, b| a == b, NaturalBagAdd,
-    ).unwrap_err();
+        execution,
+        keys.view(),
+        values.view(),
+        out_keys.view_mut(),
+        short_aggregates.view_mut(),
+        &mut groups,
+        |a, b| a == b,
+        NaturalBagAdd,
+    )
+    .unwrap_err();
     assert!(error.to_string().contains("aggregate output"));
 
     let mut empty_count = DeviceBuffer::from_host(stream, &[])?;
     let error = reduce_by_key(
-        execution, keys.view(), values.view(), out_keys.view_mut(), out_values.view_mut(),
-        &mut empty_count, |a, b| a == b, NaturalBagAdd,
-    ).unwrap_err();
+        execution,
+        keys.view(),
+        values.view(),
+        out_keys.view_mut(),
+        out_values.view_mut(),
+        &mut empty_count,
+        |a, b| a == b,
+        NaturalBagAdd,
+    )
+    .unwrap_err();
     assert!(error.to_string().contains("group-count output"));
     Ok(())
 }
 
-fn injected_oob(execution: &Exec<'_>, stream: &cuda_core::CudaStream) -> Result<(), Box<dyn Error>> {
+fn injected_oob(
+    execution: &Exec<'_>,
+    stream: &cuda_core::CudaStream,
+) -> Result<(), Box<dyn Error>> {
     let keys = DeviceBuffer::from_host(stream, &[1_u32, 1])?;
     let values = DeviceBuffer::from_host(stream, &[4_u64, 5])?;
     let indices = DeviceBuffer::from_host(stream, &[0_usize, 2])?;
