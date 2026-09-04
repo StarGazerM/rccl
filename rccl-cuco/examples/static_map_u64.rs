@@ -1,7 +1,10 @@
 use std::error::Error;
 
 use cuda_core::{CudaContext, DeviceBuffer};
-use rccl_cuco::{MapError, Sentinels, StaticMapConfig, XxHash32, entries};
+use rccl_cuco::{
+    KeyValue, MapError, MapRangeExt, Sentinels, StaticMapConfig, XxHash32, arithmetic_range,
+    entries,
+};
 
 fn compress_u32(start: u32, len: u32) -> u64 {
     ((start as u64) << 32) | len as u64
@@ -39,6 +42,109 @@ fn main() -> Result<(), Box<dyn Error>> {
     let empty_value = u32::MAX as u64;
     let sentinels = Sentinels::new(empty_key, empty_value).with_erased_key(erased_key)?;
     let mut map = StaticMapConfig::for_insert_count(10, 0.5, sentinels).build(&launch)?;
+
+    let lazy_entries = arithmetic_range(100_u32, 1, 4).transform(|key| KeyValue {
+        key,
+        value: ((key as u64) << 32) | 4,
+    });
+    assert_eq!(map.insert_range(&lazy_entries, &launch)?, 4);
+
+    let query_source = DeviceBuffer::from_host(&stream, &[100_u32, 101, 999])?;
+    let query_indices = DeviceBuffer::from_host(&stream, &[2_u32, 0, 1])?;
+    let permuted_queries = (&query_source).permutation(&query_indices);
+    let untouched = 0xfeed_face_dead_beef_u64;
+    let mut range_found =
+        DeviceBuffer::from_host(&stream, &[untouched, untouched, untouched, untouched])?;
+    map.find_range_async(&permuted_queries, &mut range_found, &launch)?
+        .wait()?;
+    assert_eq!(
+        range_found.to_host_vec(&stream)?,
+        [
+            empty_value,
+            (100_u64 << 32) | 4,
+            (101_u64 << 32) | 4,
+            untouched
+        ]
+    );
+
+    let mut range_present = DeviceBuffer::from_host(&stream, &[9_u32, 9, 9, 9])?;
+    map.contains_range_async(&permuted_queries, &mut range_present, &launch)?
+        .wait()?;
+    assert_eq!(range_present.to_host_vec(&stream)?, [0, 1, 1, 9]);
+
+    let bypass_indices = DeviceBuffer::from_host(&stream, &[99_u32, 0, 1])?;
+    let bypass_queries = (&query_source).permutation(&bypass_indices);
+    let stencil = DeviceBuffer::from_host(&stream, &[0_u32, 1, 1])?;
+    let selected_predicate = |selected: u32| selected != 0;
+    map.contains_if_async(
+        &bypass_queries,
+        &stencil,
+        &mut range_present,
+        &selected_predicate,
+        &launch,
+    )?
+    .wait()?;
+    assert_eq!(range_present.to_host_vec(&stream)?, [0, 1, 1, 9]);
+
+    let selected = DeviceBuffer::from_host(&stream, &[1_u32, 1, 1])?;
+    assert!(matches!(
+        map.contains_if(
+            &bypass_queries,
+            &selected,
+            &mut range_present,
+            |value| value != 0,
+            &launch,
+        ),
+        Err(MapError::PermutationIndexOutOfBounds { source_len: 3 })
+    ));
+    let stencil_source = DeviceBuffer::from_host(&stream, &[1_u32, 1, 1, 1])?;
+    let valid_stencil_indices = DeviceBuffer::from_host(&stream, &[0_u32, 1, 2])?;
+    let permuted_stencil = (&stencil_source).permutation(&valid_stencil_indices);
+    assert!(matches!(
+        map.contains_if(
+            &bypass_queries,
+            &permuted_stencil,
+            &mut range_present,
+            |value| value != 0,
+            &launch,
+        ),
+        Err(MapError::PermutationIndexOutOfBounds { source_len: 3 })
+    ));
+    let invalid_stencil_indices = DeviceBuffer::from_host(&stream, &[0_u32, 7, 2])?;
+    let invalid_stencil = (&stencil_source).permutation(&invalid_stencil_indices);
+    assert!(matches!(
+        map.contains_if(
+            &permuted_queries,
+            &invalid_stencil,
+            &mut range_present,
+            |value| value != 0,
+            &launch,
+        ),
+        Err(MapError::PermutationIndexOutOfBounds { source_len: 4 })
+    ));
+    let short_stencil = DeviceBuffer::from_host(&stream, &[1_u32, 1])?;
+    assert!(matches!(
+        map.contains_if(
+            &permuted_queries,
+            &short_stencil,
+            &mut range_present,
+            |value| value != 0,
+            &launch,
+        ),
+        Err(MapError::RangeLengthMismatch {
+            input: 3,
+            stencil: 2
+        })
+    ));
+    let mut short_output = DeviceBuffer::<u64>::zeroed(&stream, 2)?;
+    assert!(matches!(
+        map.find_range(&permuted_queries, &mut short_output, &launch),
+        Err(MapError::OutputTooSmall {
+            needed: 3,
+            available: 2
+        })
+    ));
+    map.clear(&launch)?;
 
     let keys = [7_u32, 11, 19, 23, 29, 31, 37, 41];
     let values = [
@@ -126,10 +232,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         &stream,
         &[compress_u32(0x8000_0001, 4), compress_u32(0, 0xffff_fffe)],
     )?;
-    assert_eq!(
-        map.insert(entries(&reinsertion_keys, &reinsertion_values)?, &launch)?,
-        2
-    );
+    let reinsertion_entries = entries(&reinsertion_keys, &reinsertion_values)?;
+    map.insert_prevalidated_range_async(&reinsertion_entries, &launch)?
+        .wait()?;
     assert_eq!(map.len(&launch)?, keys.len());
     map.rehash(40, &launch)?;
     assert!(map.capacity() >= 40);

@@ -40,12 +40,15 @@ pub use exact_set::{
 };
 pub use hash::{StableHashBytes, XxHash64};
 pub use map::{
-    PendingInsert, Sentinels, StaticHashMap, StaticMap, StaticMapConfig, StaticMapReadRef,
-    StaticMapRef,
+    PendingContainsIf, PendingInsert, PendingRangeInsert, PendingRangeQuery, Sentinels,
+    StaticHashMap, StaticMap, StaticMapConfig, StaticMapReadRef, StaticMapRef,
 };
 pub use probing::{DoubleHashing, LinearProbing, ProbingScheme, XxHash32};
 pub use program::{Launch, Program};
-pub use range::{Entries, entries};
+pub use range::{
+    ArithmeticRange, Entries, KeyValue, MapRangeExt, MapReadRange, MapWriteRange, Permutation,
+    Transform, arithmetic_range, entries,
+};
 pub use word::{MapKey, MapValue};
 
 pub use rccl_memory as memory;

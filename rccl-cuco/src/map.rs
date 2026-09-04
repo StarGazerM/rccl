@@ -1,7 +1,7 @@
 use core::marker::PhantomData;
 
 use cuda_core::{
-    CudaStream,
+    CudaStream, DeviceCopy,
     memory::{memcpy_dtoh_async, memset_d8_async},
 };
 use cuda_device::{
@@ -15,8 +15,9 @@ use rccl_memory::{
 
 use crate::{
     Entries, Launch, LinearProbing, MapError, MapKey, MapValue, ProbingScheme,
-    backend::{InsertCall, StaticMapBackend},
+    backend::{InsertCall, StaticMapBackend, StaticMapRangeBackend},
     probing::valid_capacity,
+    range::{KeyValue, MapReadRange, MapWriteRange},
 };
 
 const METADATA_WORDS: usize = 2;
@@ -84,6 +85,7 @@ where
     capacity: usize,
     sentinels: Sentinels<K, V>,
     probing: P,
+    has_tombstones: bool,
 }
 
 /// Rust-style name for [`StaticMap`].
@@ -243,6 +245,65 @@ impl PendingInsert<'_> {
     }
 }
 
+struct PendingRangeInputResources<'borrow, 'stream, I: ?Sized> {
+    _input: &'borrow I,
+    status: DeviceBuffer<'stream, u64, BorrowedCudaAsyncMemoryResource<'stream>>,
+    source_len: usize,
+    _map: PhantomData<&'borrow mut ()>,
+}
+
+/// In-flight lazy-range insertion retaining the map, input, launch, and status.
+pub struct PendingRangeInsert<'borrow, 'stream, I: ?Sized>(
+    CudaCompletion<'borrow, (), MapError, PendingRangeInputResources<'borrow, 'stream, I>>,
+);
+
+impl<I: ?Sized> PendingRangeInsert<'_, '_, I> {
+    pub fn wait(self) -> Result<(), MapError> {
+        self.0.wait()
+    }
+}
+
+struct PendingRangeQueryResources<'borrow, 'stream, I: ?Sized, O: ?Sized> {
+    _input: &'borrow I,
+    _output: &'borrow mut O,
+    status: DeviceBuffer<'stream, u64, BorrowedCudaAsyncMemoryResource<'stream>>,
+    _map: PhantomData<&'borrow ()>,
+    source_len: usize,
+}
+
+/// In-flight lazy-range query retaining every input and output borrow.
+pub struct PendingRangeQuery<'borrow, 'stream, I: ?Sized, O: ?Sized>(
+    CudaCompletion<'borrow, (), MapError, PendingRangeQueryResources<'borrow, 'stream, I, O>>,
+);
+
+impl<I: ?Sized, O: ?Sized> PendingRangeQuery<'_, '_, I, O> {
+    pub fn wait(self) -> Result<(), MapError> {
+        self.0.wait()
+    }
+}
+
+struct PendingContainsIfResources<'borrow, 'stream, I: ?Sized, S: ?Sized, O: ?Sized, F: ?Sized> {
+    _input: &'borrow I,
+    _stencil: &'borrow S,
+    _output: &'borrow mut O,
+    _predicate: &'borrow F,
+    status: DeviceBuffer<'stream, u64, BorrowedCudaAsyncMemoryResource<'stream>>,
+    input_source_len: usize,
+    stencil_source_len: usize,
+    _map: PhantomData<&'borrow ()>,
+}
+
+/// In-flight conditional query retaining query, stencil, predicate, and output.
+pub struct PendingContainsIf<'borrow, 'stream, I: ?Sized, S: ?Sized, O: ?Sized, F: ?Sized>(
+    CudaCompletion<'borrow, (), MapError, PendingContainsIfResources<'borrow, 'stream, I, S, O, F>>,
+);
+
+impl<I: ?Sized, S: ?Sized, O: ?Sized, F: ?Sized> PendingContainsIf<'_, '_, I, S, O, F> {
+    pub fn wait(self) -> Result<(), MapError> {
+        self.0.wait()
+    }
+}
+
 impl<'stream, K, V, P, const CG: u32>
     StaticMap<'stream, K, V, BorrowedCudaAsyncMemoryResource<'stream>, P, CG>
 where
@@ -326,6 +387,7 @@ where
             capacity,
             sentinels,
             probing,
+            has_tombstones: false,
         })
     }
 
@@ -381,7 +443,11 @@ where
             self.capacity,
             empty_slot_word(self.sentinels.empty_key, self.sentinels.empty_value),
         );
-        finish_submission(submitted, launch.stream())
+        let result = finish_submission(submitted, launch.stream());
+        if result.is_ok() {
+            self.has_tombstones = false;
+        }
+        result
     }
 
     /// Insert unique keys and return the number of newly occupied slots.
@@ -509,7 +575,7 @@ where
                 CudaCompletion::ready(launch.stream(), PendingInsertResources(PhantomData), Ok(()))
             }));
         }
-        let supports_erase = self.sentinels.erased_key.is_some();
+        let supports_erase = self.has_tombstones;
         let call = self.insert_call(input, launch.stream());
         let submitted = if supports_erase {
             launch.module().insert_prevalidated_with_erase(call)
@@ -529,6 +595,147 @@ where
                 PendingInsertResources(PhantomData),
                 |_| Ok(()),
             )
+        }))
+    }
+
+    /// Insert a zero-materialization input range and return newly occupied slots.
+    ///
+    /// Checked range access reports [`MapError::PermutationIndexOutOfBounds`].
+    pub fn insert_range<M, I>(
+        &mut self,
+        input: &I,
+        launch: &Launch<'stream, '_, M>,
+    ) -> Result<usize, MapError>
+    where
+        M: StaticMapRangeBackend<K, V, P, CG>,
+        I: MapReadRange<KeyValue<K, V>> + ?Sized,
+    {
+        self.insert_counted_range::<false, _, _>(input, launch)
+    }
+
+    /// Insert or replace values from a zero-materialization input range.
+    pub fn insert_or_assign_range<M, I>(
+        &mut self,
+        input: &I,
+        launch: &Launch<'stream, '_, M>,
+    ) -> Result<usize, MapError>
+    where
+        M: StaticMapRangeBackend<K, V, P, CG>,
+        I: MapReadRange<KeyValue<K, V>> + ?Sized,
+    {
+        self.insert_counted_range::<true, _, _>(input, launch)
+    }
+
+    fn insert_counted_range<const ASSIGN: bool, M, I>(
+        &mut self,
+        input: &I,
+        launch: &Launch<'stream, '_, M>,
+    ) -> Result<usize, MapError>
+    where
+        M: StaticMapRangeBackend<K, V, P, CG>,
+        I: MapReadRange<KeyValue<K, V>> + ?Sized,
+    {
+        self.ensure_launch(launch)?;
+        input.ensure_usable_on(launch.stream())?;
+        if input.is_empty() {
+            return Ok(0);
+        }
+        self.reset_metadata()?;
+        let mut status = range_status(launch.stream())?;
+        let submitted = launch.module().insert_range::<ASSIGN, _, _, _>(
+            launch.stream(),
+            &mut self.storage,
+            self.capacity,
+            input.lower(),
+            input.len(),
+            &mut status,
+            self.sentinels.empty_key,
+            self.sentinels.empty_value,
+            self.sentinels.device_erased_key(),
+            self.probing,
+        );
+        finish_submission(submitted, launch.stream())?;
+        ensure_range_success(input, &status)?;
+        let [inserted, invalid] = self.read_metadata()?;
+        if invalid != 0 {
+            return Err(MapError::ReservedSentinels {
+                count: invalid as usize,
+            });
+        }
+        usize::try_from(inserted).map_err(|_| MapError::CapacityOverflow)
+    }
+
+    /// Insert a prevalidated zero-materialization range without counting.
+    pub fn insert_prevalidated_range<M, I>(
+        &mut self,
+        input: &I,
+        launch: &Launch<'stream, '_, M>,
+    ) -> Result<(), MapError>
+    where
+        M: StaticMapRangeBackend<K, V, P, CG>,
+        I: MapReadRange<KeyValue<K, V>> + ?Sized,
+    {
+        self.insert_prevalidated_range_async(input, launch)?.wait()
+    }
+
+    /// Enqueue prevalidated lazy-range insertion and retain all captures.
+    pub fn insert_prevalidated_range_async<'borrow, M, I>(
+        &'borrow mut self,
+        input: &'borrow I,
+        launch: &'borrow Launch<'stream, '_, M>,
+    ) -> Result<PendingRangeInsert<'borrow, 'stream, I>, MapError>
+    where
+        M: StaticMapRangeBackend<K, V, P, CG>,
+        I: MapReadRange<KeyValue<K, V>> + ?Sized,
+    {
+        self.ensure_launch(launch)?;
+        input.ensure_usable_on(launch.stream())?;
+        let mut status = range_status(launch.stream())?;
+        let submitted = if input.is_empty() {
+            Ok(())
+        } else if self.has_tombstones {
+            launch.module().insert_prevalidated_range::<true, _, _, _>(
+                launch.stream(),
+                &mut self.storage,
+                self.capacity,
+                input.lower(),
+                input.len(),
+                &mut status,
+                self.sentinels.empty_key,
+                self.sentinels.empty_value,
+                self.sentinels.device_erased_key(),
+                self.probing,
+            )
+        } else {
+            launch.module().insert_prevalidated_range::<false, _, _, _>(
+                launch.stream(),
+                &mut self.storage,
+                self.capacity,
+                input.lower(),
+                input.len(),
+                &mut status,
+                self.sentinels.empty_key,
+                self.sentinels.empty_value,
+                self.sentinels.device_erased_key(),
+                self.probing,
+            )
+        };
+        if let Err(error) = submitted {
+            let _ = launch.stream().synchronize();
+            return Err(error);
+        }
+        let resources = PendingRangeInputResources {
+            _input: input,
+            status,
+            source_len: input.failure_source_len().unwrap_or(input.len()),
+            _map: PhantomData,
+        };
+        // SAFETY: resources retain the input and exclusive map borrow until
+        // the sole submission stream has completed.
+        Ok(PendingRangeInsert(unsafe {
+            CudaCompletion::from_submission(launch.stream(), resources, |resources| {
+                range_status_result(&resources.status, resources.source_len)
+            })
         }))
     }
 
@@ -592,6 +799,241 @@ where
             self.probing,
         );
         finish_submission(submitted, launch.stream())
+    }
+
+    /// Find values through a finite random-access range.
+    ///
+    /// Misses receive the configured empty-value sentinel. Only the first
+    /// `keys.len()` output elements are written.
+    pub fn find_range<M, I, O>(
+        &self,
+        keys: &I,
+        output: &mut O,
+        launch: &Launch<'stream, '_, M>,
+    ) -> Result<(), MapError>
+    where
+        M: StaticMapRangeBackend<K, V, P, CG>,
+        I: MapReadRange<K> + ?Sized,
+        O: MapWriteRange<V> + ?Sized,
+    {
+        self.find_range_async(keys, output, launch)?.wait()
+    }
+
+    /// Enqueue lazy-range find and retain map, input, output, and launch.
+    pub fn find_range_async<'borrow, M, I, O>(
+        &'borrow self,
+        keys: &'borrow I,
+        output: &'borrow mut O,
+        launch: &'borrow Launch<'stream, '_, M>,
+    ) -> Result<PendingRangeQuery<'borrow, 'stream, I, O>, MapError>
+    where
+        M: StaticMapRangeBackend<K, V, P, CG>,
+        I: MapReadRange<K> + ?Sized,
+        O: MapWriteRange<V> + ?Sized,
+    {
+        self.ensure_launch(launch)?;
+        ensure_map_range_output(keys, output, launch.stream())?;
+        let mut status = range_status(launch.stream())?;
+        let submitted = if keys.is_empty() {
+            Ok(())
+        } else {
+            let output_device = output.lower_write();
+            launch.module().find_range(
+                launch.stream(),
+                &self.storage,
+                self.capacity,
+                keys.lower(),
+                output_device,
+                keys.len(),
+                &mut status,
+                self.sentinels.empty_key,
+                self.sentinels.empty_value,
+                self.sentinels.device_erased_key(),
+                self.probing,
+            )
+        };
+        if let Err(error) = submitted {
+            let _ = launch.stream().synchronize();
+            return Err(error);
+        }
+        let resources = PendingRangeQueryResources {
+            _input: keys,
+            _output: output,
+            status,
+            _map: PhantomData,
+            source_len: keys.failure_source_len().unwrap_or(keys.len()),
+        };
+        // SAFETY: resources retain every allocation borrow used by the launch.
+        Ok(PendingRangeQuery(unsafe {
+            CudaCompletion::from_submission(launch.stream(), resources, |resources| {
+                range_status_result(&resources.status, resources.source_len)
+            })
+        }))
+    }
+
+    /// Write one `u32` Boolean for each key in a random-access range.
+    pub fn contains_range<M, I, O>(
+        &self,
+        keys: &I,
+        output: &mut O,
+        launch: &Launch<'stream, '_, M>,
+    ) -> Result<(), MapError>
+    where
+        M: StaticMapRangeBackend<K, V, P, CG>,
+        I: MapReadRange<K> + ?Sized,
+        O: MapWriteRange<u32> + ?Sized,
+    {
+        self.contains_range_async(keys, output, launch)?.wait()
+    }
+
+    /// Enqueue lazy-range containment and retain all participating borrows.
+    pub fn contains_range_async<'borrow, M, I, O>(
+        &'borrow self,
+        keys: &'borrow I,
+        output: &'borrow mut O,
+        launch: &'borrow Launch<'stream, '_, M>,
+    ) -> Result<PendingRangeQuery<'borrow, 'stream, I, O>, MapError>
+    where
+        M: StaticMapRangeBackend<K, V, P, CG>,
+        I: MapReadRange<K> + ?Sized,
+        O: MapWriteRange<u32> + ?Sized,
+    {
+        self.ensure_launch(launch)?;
+        ensure_map_range_output(keys, output, launch.stream())?;
+        let mut status = range_status(launch.stream())?;
+        let submitted = if keys.is_empty() {
+            Ok(())
+        } else {
+            let output_device = output.lower_write();
+            launch.module().contains_range(
+                launch.stream(),
+                &self.storage,
+                self.capacity,
+                keys.lower(),
+                output_device,
+                keys.len(),
+                &mut status,
+                self.sentinels.empty_key,
+                self.sentinels.empty_value,
+                self.sentinels.device_erased_key(),
+                self.probing,
+            )
+        };
+        if let Err(error) = submitted {
+            let _ = launch.stream().synchronize();
+            return Err(error);
+        }
+        let resources = PendingRangeQueryResources {
+            _input: keys,
+            _output: output,
+            status,
+            _map: PhantomData,
+            source_len: keys.failure_source_len().unwrap_or(keys.len()),
+        };
+        // SAFETY: resources retain every allocation borrow used by the launch.
+        Ok(PendingRangeQuery(unsafe {
+            CudaCompletion::from_submission(launch.stream(), resources, |resources| {
+                range_status_result(&resources.status, resources.source_len)
+            })
+        }))
+    }
+
+    /// Conditionally query keys selected by a parallel stencil range.
+    ///
+    /// A false predicate writes zero without reading the corresponding key or
+    /// probing the map. Query and stencil lengths must match.
+    pub fn contains_if<M, I, S, O, T, F>(
+        &self,
+        keys: &I,
+        stencil: &S,
+        output: &mut O,
+        predicate: F,
+        launch: &Launch<'stream, '_, M>,
+    ) -> Result<(), MapError>
+    where
+        M: StaticMapRangeBackend<K, V, P, CG>,
+        I: MapReadRange<K> + ?Sized,
+        S: MapReadRange<T> + ?Sized,
+        O: MapWriteRange<u32> + ?Sized,
+        T: DeviceCopy,
+        F: Fn(T) -> bool + Copy,
+    {
+        self.contains_if_async(keys, stencil, output, &predicate, launch)?
+            .wait()
+    }
+
+    /// Enqueue conditional containment and retain all callable captures.
+    pub fn contains_if_async<'borrow, M, I, S, O, T, F>(
+        &'borrow self,
+        keys: &'borrow I,
+        stencil: &'borrow S,
+        output: &'borrow mut O,
+        predicate: &'borrow F,
+        launch: &'borrow Launch<'stream, '_, M>,
+    ) -> Result<PendingContainsIf<'borrow, 'stream, I, S, O, F>, MapError>
+    where
+        M: StaticMapRangeBackend<K, V, P, CG>,
+        I: MapReadRange<K> + ?Sized,
+        S: MapReadRange<T> + ?Sized,
+        O: MapWriteRange<u32> + ?Sized,
+        T: DeviceCopy,
+        F: Fn(T) -> bool + Copy,
+    {
+        self.ensure_launch(launch)?;
+        if keys.len() != stencil.len() {
+            return Err(MapError::RangeLengthMismatch {
+                input: keys.len(),
+                stencil: stencil.len(),
+            });
+        }
+        ensure_map_range_output(keys, output, launch.stream())?;
+        stencil.ensure_usable_on(launch.stream())?;
+        let mut status = range_status(launch.stream())?;
+        let submitted = if keys.is_empty() {
+            Ok(())
+        } else {
+            let output_device = output.lower_write();
+            launch.module().contains_if_range(
+                launch.stream(),
+                &self.storage,
+                self.capacity,
+                keys.lower(),
+                stencil.lower(),
+                output_device,
+                *predicate,
+                keys.len(),
+                &mut status,
+                self.sentinels.empty_key,
+                self.sentinels.empty_value,
+                self.sentinels.device_erased_key(),
+                self.probing,
+            )
+        };
+        if let Err(error) = submitted {
+            let _ = launch.stream().synchronize();
+            return Err(error);
+        }
+        let resources = PendingContainsIfResources {
+            _input: keys,
+            _stencil: stencil,
+            _output: output,
+            _predicate: predicate,
+            status,
+            input_source_len: keys.failure_source_len().unwrap_or(keys.len()),
+            stencil_source_len: stencil.failure_source_len().unwrap_or(stencil.len()),
+            _map: PhantomData,
+        };
+        // SAFETY: resources retain map, range, output, predicate, and launch
+        // borrows until the single submission stream completes.
+        Ok(PendingContainsIf(unsafe {
+            CudaCompletion::from_submission(launch.stream(), resources, |resources| {
+                contains_if_range_status_result(
+                    &resources.status,
+                    resources.input_source_len,
+                    resources.stencil_source_len,
+                )
+            })
+        }))
     }
 
     /// Rust-native lookup which keeps the entire mapped-value domain
@@ -680,7 +1122,9 @@ where
             return Err(error);
         }
         let [erased, _] = self.read_metadata()?;
-        usize::try_from(erased).map_err(|_| MapError::CapacityOverflow)
+        let erased = usize::try_from(erased).map_err(|_| MapError::CapacityOverflow)?;
+        self.has_tombstones |= erased != 0;
+        Ok(erased)
     }
 
     /// Rust-style deletion alias for [`Self::erase`].
@@ -816,6 +1260,7 @@ where
         finish_submission(submitted, launch.stream())?;
         self.storage = destination;
         self.capacity = destination_capacity;
+        self.has_tombstones = false;
         Ok(())
     }
 
@@ -829,7 +1274,7 @@ where
     }
 
     fn ensure_launch<M>(&self, launch: &Launch<'stream, '_, M>) -> Result<(), MapError> {
-        self.storage.ensure_usable_on(launch.stream())?;
+        ContiguousDeviceRange::ensure_usable_on(&self.storage, launch.stream())?;
         Ok(())
     }
 
@@ -915,6 +1360,76 @@ where
             self.storage.stream().synchronize()?;
         }
         Ok(values)
+    }
+}
+fn ensure_map_range_output<T, O, I, OR>(
+    input: &I,
+    output: &OR,
+    stream: &CudaStream,
+) -> Result<(), MapError>
+where
+    T: DeviceCopy,
+    O: DeviceCopy,
+    I: MapReadRange<T> + ?Sized,
+    OR: MapWriteRange<O> + ?Sized,
+{
+    input.ensure_usable_on(stream)?;
+    output.ensure_usable_on(stream)?;
+    if output.len() < input.len() {
+        return Err(MapError::OutputTooSmall {
+            needed: input.len(),
+            available: output.len(),
+        });
+    }
+    Ok(())
+}
+
+fn range_status<'stream>(
+    stream: &'stream CudaStream,
+) -> Result<DeviceBuffer<'stream, u64, BorrowedCudaAsyncMemoryResource<'stream>>, MapError> {
+    DeviceBuffer::zeroed_in(
+        BorrowedCudaAsyncMemoryResource::new(stream.context()),
+        stream,
+        1,
+    )
+    .map_err(Into::into)
+}
+
+fn ensure_range_success<T, I>(
+    input: &I,
+    status: &DeviceBuffer<'_, u64, BorrowedCudaAsyncMemoryResource<'_>>,
+) -> Result<(), MapError>
+where
+    T: DeviceCopy,
+    I: MapReadRange<T> + ?Sized,
+{
+    range_status_result(status, input.failure_source_len().unwrap_or(input.len()))
+}
+
+fn range_status_result(
+    status: &DeviceBuffer<'_, u64, BorrowedCudaAsyncMemoryResource<'_>>,
+    source_len: usize,
+) -> Result<(), MapError> {
+    if status.to_host_vec()?[0] == 0 {
+        Ok(())
+    } else {
+        Err(MapError::PermutationIndexOutOfBounds { source_len })
+    }
+}
+
+fn contains_if_range_status_result(
+    status: &DeviceBuffer<'_, u64, BorrowedCudaAsyncMemoryResource<'_>>,
+    input_source_len: usize,
+    stencil_source_len: usize,
+) -> Result<(), MapError> {
+    match status.to_host_vec()?[0] {
+        0 => Ok(()),
+        2 => Err(MapError::PermutationIndexOutOfBounds {
+            source_len: stencil_source_len,
+        }),
+        _ => Err(MapError::PermutationIndexOutOfBounds {
+            source_len: input_source_len,
+        }),
     }
 }
 
@@ -1112,9 +1627,12 @@ where
     #[doc(hidden)]
     #[inline(always)]
     pub fn insert_prevalidated<const SUPPORTS_ERASE: bool>(&self, key: K, value: V) -> bool {
-        self.insert_impl::<SUPPORTS_ERASE, false, false>(key, value)
+        if !SUPPORTS_ERASE && V::SLOT_WORDS > 1 {
+            self.insert_wide_prevalidated_no_tombstones(key, value)
+        } else {
+            self.insert_impl::<SUPPORTS_ERASE, false, false>(key, value)
+        }
     }
-
     #[inline(always)]
     fn insert_impl<const SUPPORTS_ERASE: bool, const CHECK_SENTINELS: bool, const ASSIGN: bool>(
         &self,
@@ -1276,6 +1794,66 @@ where
                 }
             }
         }
+    }
+
+    #[inline(always)]
+    fn insert_wide_prevalidated_no_tombstones(&self, key: K, value: V) -> bool {
+        let tile = this_thread_block().tiled_partition::<CG>();
+        let rank = tile.thread_rank();
+        let groups = self.capacity() / CG as usize;
+        let mut group = self.probing.initial_group(key, groups);
+        let step = self.probing.step_groups(key, groups);
+        let empty_slot = wide_control(self.empty_key, WIDE_EMPTY);
+        let full_slot = wide_control(key, WIDE_FULL);
+        let mut visited = 0_usize;
+
+        while visited < groups {
+            let index = group * CG as usize + rank as usize;
+            let observed = self.optimistic_slot_snapshot(index);
+            let observed_key = packed_key::<K>(observed);
+            if tile.ballot(wide_state(observed) == WIDE_FULL && observed_key == key) != 0 {
+                return false;
+            }
+
+            let available = tile.ballot(observed_key == self.empty_key);
+            if available != 0 {
+                let owner = available.trailing_zeros();
+                let status = if rank == owner {
+                    match self.slots[Self::word_index(index)]
+                        .compare_exchange_relaxed(empty_slot, full_slot)
+                    {
+                        Ok(_) => {
+                            self.slots[Self::value_word_index(index)].store(
+                                value.to_bits(),
+                                cuda_device::atomic::AtomicOrdering::Relaxed,
+                            );
+                            1
+                        }
+                        Err(actual)
+                            if wide_state(actual) == WIDE_FULL
+                                && packed_key::<K>(actual) == key =>
+                        {
+                            2
+                        }
+                        Err(_) => 0,
+                    }
+                } else {
+                    0
+                };
+                match tile.shfl(status, owner) {
+                    1 => return true,
+                    2 => return false,
+                    _ => continue,
+                }
+            }
+
+            visited += 1;
+            group += step;
+            if group >= groups {
+                group -= groups;
+            }
+        }
+        false
     }
 
     #[inline(always)]

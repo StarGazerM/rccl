@@ -157,19 +157,17 @@ The CUDA compiler contract is intentionally single-source and checked:
 | Input | Required identity |
 |---|---|
 | Rust | `nightly-2026-08-28` from `rust-toolchain.toml` |
-| cuda-oxide | `97f8b2b7882f0c15ad9ce9b53abed5553920caa8` |
-| compiler patch | `patches/cuda-oxide-read-only-i32x4.patch` |
-| patch SHA-256 | `9d92f1e838614af92514b062fc3f0540bf22dee6dcbe1596cfd045d6341f163f` |
+| cuda-oxide fork | `https://github.com/StarGazerM/cuda-oxide.git` |
+| cuda-oxide revision | `5f7c34fddadcf250f2e45d0cffe83a3d27f2bea3` |
 | default CUDA/NVVM/libdevice | NVIDIA HPC SDK 25.5, CUDA 12.9, as recorded in `.cargo/config.toml` |
 
-`scripts/setup-cuda-oxide.sh` is the only compiler setup flow. The canonical
-patch contains the architecture cfg, read-only vector, safe bounds-proved
-`ThreadTile`, and ordering/warp-vote semantic and code-shape fixture changes.
-Setup verifies its checksum before applying it to the pinned cuda-oxide commit.
-The root manifest's three vendored crate overrides and every cuda-oxide Git
-dependency remain tied to that same commit; `Cargo.lock` records no other
-cuda-oxide source revision. CUDA path defaults remain overridable through the
-environment.
+`scripts/setup-cuda-oxide.sh` is the only compiler setup flow. The pinned RCCL
+fork contains the architecture cfg, read-only vector, safe bounds-proved
+`ThreadTile`, launch/runtime extensions, and ordering/warp-vote semantic and
+code-shape fixtures required by this workspace. Every cuda-oxide Git dependency
+and `Cargo.lock` use the same immutable fork revision. CUDA path defaults remain
+overridable through the environment. The fork's scheduled upstream checker
+tracks semantic integration against NVlabs/cuda-oxide.
 
 Run the identity check and its deterministic rejection fixtures from any
 working directory:

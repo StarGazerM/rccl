@@ -1,8 +1,5 @@
-# The repository root is the build context only so the canonical patch can be
-# verified and copied. Nothing else from the mutable RCCL tree enters context.
+# The repository root is the build context, but only image inputs are admitted.
 **
-!patches/
-!patches/cuda-oxide-read-only-i32x4.patch
 !runpod/
 !runpod/rccl-dev/
 !runpod/rccl-dev/Dockerfile

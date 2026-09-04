@@ -389,6 +389,271 @@ macro_rules! __cuco_device_kernels {
             #[kernel]
             #[launch_bounds(128)]
             #[launch_contract(domain = 1, coordinates = u32, block = (128, 1, 1))]
+            #[allow(clippy::too_many_arguments)]
+            pub fn static_map_insert_range<K, V, P, Input, const CG: u32>(
+                slots: &[DeviceAtomicU64],
+                input: Input,
+                len: usize,
+                inserted: &[DeviceAtomicU64],
+                invalid: &[DeviceAtomicU64],
+                range_error: &[DeviceAtomicU64],
+                empty_key: K,
+                empty_value: V,
+                erased_key: K,
+                probing: P,
+            ) where
+                K: MapKey,
+                V: MapValue,
+                P: ProbingScheme<K>,
+                Input: $crate::__private::DeviceMapRead<Item = $crate::KeyValue<K, V>>,
+            {
+                $crate::__private::device_insert_range::<K, V, P, Input, CG, false>(
+                    thread::index_1d().get(),
+                    slots,
+                    input,
+                    len,
+                    inserted,
+                    invalid,
+                    range_error,
+                    empty_key,
+                    empty_value,
+                    erased_key,
+                    probing,
+                );
+            }
+
+            #[kernel]
+            #[launch_bounds(128)]
+            #[launch_contract(domain = 1, coordinates = u32, block = (128, 1, 1))]
+            #[allow(clippy::too_many_arguments)]
+            pub fn static_map_insert_or_assign_range<K, V, P, Input, const CG: u32>(
+                slots: &[DeviceAtomicU64],
+                input: Input,
+                len: usize,
+                inserted: &[DeviceAtomicU64],
+                invalid: &[DeviceAtomicU64],
+                range_error: &[DeviceAtomicU64],
+                empty_key: K,
+                empty_value: V,
+                erased_key: K,
+                probing: P,
+            ) where
+                K: MapKey,
+                V: MapValue,
+                P: ProbingScheme<K>,
+                Input: $crate::__private::DeviceMapRead<Item = $crate::KeyValue<K, V>>,
+            {
+                $crate::__private::device_insert_range::<K, V, P, Input, CG, true>(
+                    thread::index_1d().get(),
+                    slots,
+                    input,
+                    len,
+                    inserted,
+                    invalid,
+                    range_error,
+                    empty_key,
+                    empty_value,
+                    erased_key,
+                    probing,
+                );
+            }
+
+            #[kernel]
+            #[launch_bounds(128)]
+            #[launch_contract(domain = 1, coordinates = u32, block = (128, 1, 1))]
+            #[allow(clippy::too_many_arguments)]
+            pub fn static_map_insert_prevalidated_range<K, V, P, Input, const CG: u32>(
+                slots: &[DeviceAtomicU64],
+                input: Input,
+                len: usize,
+                range_error: &[DeviceAtomicU64],
+                empty_key: K,
+                empty_value: V,
+                erased_key: K,
+                probing: P,
+            ) where
+                K: MapKey,
+                V: MapValue,
+                P: ProbingScheme<K>,
+                Input: $crate::__private::DeviceMapRead<Item = $crate::KeyValue<K, V>>,
+            {
+                $crate::__private::device_insert_range_prevalidated::<K, V, P, Input, CG, false>(
+                    thread::index_1d().get(),
+                    slots,
+                    input,
+                    len,
+                    range_error,
+                    empty_key,
+                    empty_value,
+                    erased_key,
+                    probing,
+                );
+            }
+
+            #[kernel]
+            #[launch_bounds(128)]
+            #[launch_contract(domain = 1, coordinates = u32, block = (128, 1, 1))]
+            #[allow(clippy::too_many_arguments)]
+            pub fn static_map_insert_prevalidated_range_with_erase<K, V, P, Input, const CG: u32>(
+                slots: &[DeviceAtomicU64],
+                input: Input,
+                len: usize,
+                range_error: &[DeviceAtomicU64],
+                empty_key: K,
+                empty_value: V,
+                erased_key: K,
+                probing: P,
+            ) where
+                K: MapKey,
+                V: MapValue,
+                P: ProbingScheme<K>,
+                Input: $crate::__private::DeviceMapRead<Item = $crate::KeyValue<K, V>>,
+            {
+                $crate::__private::device_insert_range_prevalidated::<K, V, P, Input, CG, true>(
+                    thread::index_1d().get(),
+                    slots,
+                    input,
+                    len,
+                    range_error,
+                    empty_key,
+                    empty_value,
+                    erased_key,
+                    probing,
+                );
+            }
+
+            #[kernel]
+            #[launch_bounds(128)]
+            #[launch_contract(domain = 1, coordinates = u32, block = (128, 1, 1))]
+            #[allow(clippy::too_many_arguments)]
+            pub fn static_map_find_range<K, V, P, Input, Output, const CG: u32>(
+                slots: &[u64],
+                input: Input,
+                output: Output,
+                len: usize,
+                range_error: &[DeviceAtomicU64],
+                empty_key: K,
+                empty_value: V,
+                erased_key: K,
+                probing: P,
+            ) where
+                K: MapKey,
+                V: MapValue,
+                P: ProbingScheme<K>,
+                Input: $crate::__private::DeviceMapRead<Item = K>,
+                Output: $crate::__private::DeviceMapWrite<Item = V>,
+            {
+                $crate::__private::device_find_range::<K, V, P, Input, Output, CG>(
+                    thread::index_1d().get(),
+                    slots,
+                    input,
+                    output,
+                    len,
+                    range_error,
+                    empty_key,
+                    empty_value,
+                    erased_key,
+                    probing,
+                );
+            }
+
+            #[kernel]
+            #[launch_bounds(128)]
+            #[launch_contract(domain = 1, coordinates = u32, block = (128, 1, 1))]
+            #[allow(clippy::too_many_arguments)]
+            pub fn static_map_contains_range<K, V, P, Input, Output, const CG: u32>(
+                slots: &[u64],
+                input: Input,
+                output: Output,
+                len: usize,
+                range_error: &[DeviceAtomicU64],
+                empty_key: K,
+                empty_value: V,
+                erased_key: K,
+                probing: P,
+            ) where
+                K: MapKey,
+                V: MapValue,
+                P: ProbingScheme<K>,
+                Input: $crate::__private::DeviceMapRead<Item = K>,
+                Output: $crate::__private::DeviceMapWrite<Item = u32>,
+            {
+                $crate::__private::device_contains_range::<K, V, P, Input, Output, CG>(
+                    thread::index_1d().get(),
+                    slots,
+                    input,
+                    output,
+                    len,
+                    range_error,
+                    empty_key,
+                    empty_value,
+                    erased_key,
+                    probing,
+                );
+            }
+
+            #[kernel]
+            #[launch_bounds(128)]
+            #[launch_contract(domain = 1, coordinates = u32, block = (128, 1, 1))]
+            #[allow(clippy::too_many_arguments)]
+            pub fn static_map_contains_if_range<
+                K,
+                V,
+                P,
+                Input,
+                Stencil,
+                Output,
+                Predicate,
+                const CG: u32,
+            >(
+                slots: &[u64],
+                input: Input,
+                stencil: Stencil,
+                output: Output,
+                predicate: Predicate,
+                len: usize,
+                range_error: &[DeviceAtomicU64],
+                empty_key: K,
+                empty_value: V,
+                erased_key: K,
+                probing: P,
+            ) where
+                K: MapKey,
+                V: MapValue,
+                P: ProbingScheme<K>,
+                Input: $crate::__private::DeviceMapRead<Item = K>,
+                Stencil: $crate::__private::DeviceMapRead,
+                Output: $crate::__private::DeviceMapWrite<Item = u32>,
+                Predicate: Fn(Stencil::Item) -> bool + Copy,
+            {
+                $crate::__private::device_contains_if_range::<
+                    K,
+                    V,
+                    P,
+                    Input,
+                    Stencil,
+                    Output,
+                    Predicate,
+                    CG,
+                >(
+                    thread::index_1d().get(),
+                    slots,
+                    input,
+                    stencil,
+                    output,
+                    predicate,
+                    len,
+                    range_error,
+                    empty_key,
+                    empty_value,
+                    erased_key,
+                    probing,
+                );
+            }
+
+            #[kernel]
+            #[launch_bounds(128)]
+            #[launch_contract(domain = 1, coordinates = u32, block = (128, 1, 1))]
             pub fn static_map_find<K, V, P, const CG: u32>(
                 slots: &[u64],
                 keys: &[K],

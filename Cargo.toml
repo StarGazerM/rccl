@@ -16,7 +16,6 @@ members = [
     "rccl-memory",
     "rccl-thrust",
 ]
-exclude = ["vendor/cuda-core", "vendor/cuda-device", "vendor/cuda-host", "vendor/cuda-macros"]
 
 [dependencies]
 rccl-cuco = { path = "rccl-cuco" }
@@ -29,13 +28,3 @@ codegen-units = 1
 # object inside the rlib. Rust ThinLTO assumes every rlib object contains
 # LLVM bitcode and rejects that deliberately native archive member.
 lto = false
-
-# Pinned cuda-oxide currently accepts arbitrary safe slice arguments only on
-# its async launcher surface. RCCL uses the same KernelSliceArg contract for
-# synchronous launches so one CUB temporary allocation can expose disjoint,
-# typed regions without manufacturing DeviceBuffer owners.
-[patch."https://github.com/NVlabs/cuda-oxide.git"]
-cuda-core = { path = "vendor/cuda-core" }
-cuda-device = { path = "vendor/cuda-device" }
-cuda-host = { path = "vendor/cuda-host" }
-cuda-macros = { path = "vendor/cuda-macros" }

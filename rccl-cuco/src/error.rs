@@ -18,6 +18,8 @@ pub enum MapError {
     ReservedSentinels { count: usize },
     LengthMismatch { keys: usize, values: usize },
     OutputTooSmall { needed: usize, available: usize },
+    RangeLengthMismatch { input: usize, stencil: usize },
+    PermutationIndexOutOfBounds { source_len: usize },
     ContextMismatch,
 }
 
@@ -61,6 +63,14 @@ impl fmt::Display for MapError {
             Self::OutputTooSmall { needed, available } => write!(
                 formatter,
                 "map output needs {needed} elements but only {available} are available"
+            ),
+            Self::RangeLengthMismatch { input, stencil } => write!(
+                formatter,
+                "map query and stencil lengths differ: {input} and {stencil}"
+            ),
+            Self::PermutationIndexOutOfBounds { source_len } => write!(
+                formatter,
+                "map permutation selected an index outside source length {source_len}"
             ),
             Self::ContextMismatch => {
                 formatter.write_str("map operands and execution must share one CUDA context")

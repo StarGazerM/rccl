@@ -6,32 +6,35 @@ files into `/workspace/rccl` for each pod.
 
 ## Published image
 
-Tag: `docker.io/stargazermiao/rccl-dev:v1.0.0`
+Tag: `docker.io/stargazermiao/rccl-dev:v1.0.1`
+
+Immutable reference:
+`docker.io/stargazermiao/rccl-dev:v1.0.1@sha256:5cad8d9a21bfec7dd5ab489835f63ca3bf289df031a577d1eae460d3ec9ea77e`
 
 The base is
 `runpod/pytorch:1.1.0-cu1290-torch260-ubuntu2404@sha256:c23076b7331b4f5b4bb2978740358a574f602473e77706c9f1747cd6b75f8485`.
 It retains the base image's `/opt/nvidia/nvidia_entrypoint.sh` entrypoint and
 `/start.sh` command, including Runpod SSH startup.
 
-The image pins CUDA 12.9, Rust `nightly-2026-08-28`, cuda-oxide
-`97f8b2b7882f0c15ad9ce9b53abed5553920caa8` with the repository patch
-SHA-256 `9d92f1e838614af92514b062fc3f0540bf22dee6dcbe1596cfd045d6341f163f`,
-CCCL `571f2fc3bc53cd710e306ad43d58995c1fe4219f`, and cuCollections
+Published image `v1.0.1` is the validated pre-fork checkpoint. The current
+`v1.0.2` Dockerfile pins CUDA 12.9, Rust `nightly-2026-08-28`, RCCL's
+cuda-oxide fork at `5f7c34fddadcf250f2e45d0cffe83a3d27f2bea3`, CCCL
+`571f2fc3bc53cd710e306ad43d58995c1fe4219f`, and cuCollections
 `1d538b6befc286ab450d9e27d7ffbc4f1415c641`.
 
 ## Rebuild and push
 
 Run from the repository root. The Dockerfile-specific ignore file admits only
-the Dockerfile, self-check, and canonical patch; local Cargo credentials,
-Docker credentials, SSH keys, environment files, the mutable RCCL tree, and
-other repository data cannot enter the build context.
+the Dockerfile and self-check. Local Cargo credentials, Docker credentials,
+SSH keys, environment files, the mutable RCCL tree, and other repository data
+cannot enter the build context.
 
 ```bash
 docker buildx build \
   --platform linux/amd64 \
   --provenance=false \
   --file runpod/rccl-dev/Dockerfile \
-  --tag stargazermiao/rccl-dev:v1.0.0 \
+  --tag stargazermiao/rccl-dev:v1.0.2 \
   --push \
   .
 ```
@@ -49,8 +52,8 @@ architecture. For Ada/SM89, one example is the RTX 2000 Ada:
 ```bash
 runpodctl gpu list --include-unavailable
 runpodctl pod create \
-  --name rccl-dev-v1-sm89 \
-  --image docker.io/stargazermiao/rccl-dev:v1.0.0 \
+  --name rccl-dev-v101-sm89 \
+  --image docker.io/stargazermiao/rccl-dev:v1.0.1@sha256:5cad8d9a21bfec7dd5ab489835f63ca3bf289df031a577d1eae460d3ec9ea77e \
   --gpu-id 'NVIDIA RTX 2000 Ada Generation' \
   --ports '22/tcp' \
   --container-disk-in-gb 40 \
@@ -97,8 +100,11 @@ watchdog logs, and credential/secret files.
 ## Compile and benchmark
 
 The image exports `CUDA_HOME`, `CUDA_TOOLKIT_PATH`, `LIBCLANG_PATH`,
-`RUSTUP_TOOLCHAIN`, `CCCL_ROOT`, and `CUCO_ROOT`; no setup script or package
-installation is needed after SSH login.
+`RUSTUP_TOOLCHAIN`, `CCCL_ROOT`, and `CUCO_ROOT` through the container
+environment and `/etc/profile.d/rccl-toolchain.sh`. It also sources that
+profile before the base image's non-interactive `.bashrc` return, because
+Runpod SSH does not preserve Docker environment variables. No setup script or
+package installation is needed after SSH login.
 
 ```bash
 cd /workspace/rccl
@@ -111,10 +117,29 @@ For repeatable timing, use an otherwise idle exclusive GPU, warm up first, and
 run the repository performance script's complete round set rather than timing
 a single process launch.
 
+## Validation evidence
+
+The immutable `v1.0.1` reference above was validated on 2026-09-04 using one
+RTX 2000 Ada Generation GPU (compute capability 8.9, driver 580.159.04):
+
+- Build/push of the corrected cached image took 13.11 seconds.
+- Pod creation through reachable SSH took 29.31 seconds.
+- `rccl-image-self-check` passed over SSH in 3.00 seconds. PID 1 retained
+  `/opt/nvidia/nvidia_entrypoint.sh /start.sh`, and `sshd` was running.
+- No `apt`, `apt-get`, `dpkg`, `rustup`, or `cargo` process was running before
+  source sync. The baked apt history predated pod creation, and the container
+  emitted no startup log line requiring installation.
+- Source-only sync transferred 426 files (4.98 MB) in 2.95 seconds. The remote
+  tree contained no `.git`, `target`, `.oxide-artifacts`, Cargo credential, or
+  `.env` input.
+- The SM89 `warp_reduce` build completed in 55.38 seconds, including public
+  dependency downloads, and the resulting GPU example passed in 1.94 seconds.
+
 ## Cleanup
 
-Delete the test pod even if verification fails, stop the local watchdog, and
-confirm the API returns `not_found` for the deleted ID:
+Delete the test pod even if verification fails, unless it is immediately
+handed to active RCCL work. Stop the local watchdog after explicit deletion,
+and confirm the API returns `not_found` for the deleted ID:
 
 ```bash
 runpodctl pod delete "$POD_ID"

@@ -14,10 +14,11 @@ include = ["src/**", "examples/**", "README.md", "LICENSE-*", "Cargo.toml"]
 cuda-oxide-example = []
 
 [dependencies]
-cuda-core = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "97f8b2b7882f0c15ad9ce9b53abed5553920caa8" }
-cuda-device = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "97f8b2b7882f0c15ad9ce9b53abed5553920caa8" }
-cuda-host = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "97f8b2b7882f0c15ad9ce9b53abed5553920caa8" }
+cuda-core = { git = "https://github.com/StarGazerM/cuda-oxide.git", rev = "5f7c34fddadcf250f2e45d0cffe83a3d27f2bea3" }
+cuda-device = { git = "https://github.com/StarGazerM/cuda-oxide.git", rev = "5f7c34fddadcf250f2e45d0cffe83a3d27f2bea3" }
+cuda-host = { git = "https://github.com/StarGazerM/cuda-oxide.git", rev = "5f7c34fddadcf250f2e45d0cffe83a3d27f2bea3" }
 rccl-memory = { path = "../rccl-memory" }
+rccl-cub = { path = "../rccl-cub" }
 
 [[example]]
 name = "static_map"

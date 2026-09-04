@@ -1,23 +1,22 @@
 # Third-party notices
 
-This repository contains Rust source and a paused local checkout of selected
-cuda-oxide crates. It does not redistribute the CUDA SDK, NVIDIA HPC SDK,
+This repository depends on RCCL's pinned fork of selected cuda-oxide crates. It
+does not redistribute a local cuda-oxide source copy or the CUDA SDK,
 CUDA driver, NVVM, libdevice, or generated device binaries; those components
 remain subject to their respective NVIDIA license terms and must be installed
 separately by users.
 
 ## cuda-oxide
 
-The vendored `cuda-core`, `cuda-device`, `cuda-host`, and `cuda-macros`
-packages identify themselves as Apache-2.0 in their local `Cargo.toml` files.
-They are from NVlabs/cuda-oxide at revision
-`97f8b2b7882f0c15ad9ce9b53abed5553920caa8`:
+The `cuda-core`, `cuda-device`, `cuda-host`, and `cuda-macros` dependencies
+identify themselves as Apache-2.0. RCCL pins its compatibility branch at
+`5f7c34fddadcf250f2e45d0cffe83a3d27f2bea3`:
+
+<https://github.com/StarGazerM/cuda-oxide>
+
+The fork derives from NVlabs/cuda-oxide and retains upstream license notices:
 
 <https://github.com/NVlabs/cuda-oxide>
-
-The repository's local vendor copy is a build/reproducibility candidate, not a
-new license grant. The upstream license and notices must be retained when the
-vendor copy is redistributed.
 
 ## Rust dependencies
 

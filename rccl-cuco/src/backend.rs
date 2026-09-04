@@ -165,6 +165,119 @@ where
 }
 
 #[doc(hidden)]
+pub trait StaticMapRangeBackend<K, V, P, const CG: u32>: Sized
+where
+    K: MapKey,
+    V: MapValue,
+    P: ProbingScheme<K>,
+{
+    #[allow(clippy::too_many_arguments)]
+    fn insert_range<const ASSIGN: bool, A, SA, Input>(
+        &self,
+        stream: &CudaStream,
+        storage: &mut DeviceBuffer<'_, u64, A>,
+        capacity: usize,
+        input: Input,
+        len: usize,
+        status: &mut DeviceBuffer<'_, u64, SA>,
+        empty_key: K,
+        empty_value: V,
+        erased_key: K,
+        probing: P,
+    ) -> Result<(), MapError>
+    where
+        A: DeviceAllocator,
+        SA: DeviceAllocator,
+        Input: crate::range::DeviceMapRead<Item = crate::KeyValue<K, V>>;
+
+    #[allow(clippy::too_many_arguments)]
+    fn insert_prevalidated_range<const SUPPORTS_ERASE: bool, A, SA, Input>(
+        &self,
+        stream: &CudaStream,
+        storage: &mut DeviceBuffer<'_, u64, A>,
+        capacity: usize,
+        input: Input,
+        len: usize,
+        status: &mut DeviceBuffer<'_, u64, SA>,
+        empty_key: K,
+        empty_value: V,
+        erased_key: K,
+        probing: P,
+    ) -> Result<(), MapError>
+    where
+        A: DeviceAllocator,
+        SA: DeviceAllocator,
+        Input: crate::range::DeviceMapRead<Item = crate::KeyValue<K, V>>;
+
+    #[allow(clippy::too_many_arguments)]
+    fn find_range<A, SA, Input, Output>(
+        &self,
+        stream: &CudaStream,
+        storage: &DeviceBuffer<'_, u64, A>,
+        capacity: usize,
+        input: Input,
+        output: Output,
+        len: usize,
+        status: &mut DeviceBuffer<'_, u64, SA>,
+        empty_key: K,
+        empty_value: V,
+        erased_key: K,
+        probing: P,
+    ) -> Result<(), MapError>
+    where
+        A: DeviceAllocator,
+        SA: DeviceAllocator,
+        Input: crate::range::DeviceMapRead<Item = K>,
+        Output: crate::range::DeviceMapWrite<Item = V>;
+
+    #[allow(clippy::too_many_arguments)]
+    fn contains_range<A, SA, Input, Output>(
+        &self,
+        stream: &CudaStream,
+        storage: &DeviceBuffer<'_, u64, A>,
+        capacity: usize,
+        input: Input,
+        output: Output,
+        len: usize,
+        status: &mut DeviceBuffer<'_, u64, SA>,
+        empty_key: K,
+        empty_value: V,
+        erased_key: K,
+        probing: P,
+    ) -> Result<(), MapError>
+    where
+        A: DeviceAllocator,
+        SA: DeviceAllocator,
+        Input: crate::range::DeviceMapRead<Item = K>,
+        Output: crate::range::DeviceMapWrite<Item = u32>;
+
+    #[allow(clippy::too_many_arguments)]
+    fn contains_if_range<A, SA, Input, Stencil, Output, Predicate>(
+        &self,
+        stream: &CudaStream,
+        storage: &DeviceBuffer<'_, u64, A>,
+        capacity: usize,
+        input: Input,
+        stencil: Stencil,
+        output: Output,
+        predicate: Predicate,
+        len: usize,
+        status: &mut DeviceBuffer<'_, u64, SA>,
+        empty_key: K,
+        empty_value: V,
+        erased_key: K,
+        probing: P,
+    ) -> Result<(), MapError>
+    where
+        A: DeviceAllocator,
+        SA: DeviceAllocator,
+        Input: crate::range::DeviceMapRead<Item = K>,
+        Stencil: crate::range::DeviceMapRead,
+        Output: crate::range::DeviceMapWrite<Item = u32>,
+        Predicate: Fn(Stencil::Item) -> bool + Copy;
+}
+
+#[doc(hidden)]
 pub fn launch_config(elements: u32) -> LaunchConfig1D {
     const BLOCK: u32 = 128;
     LaunchConfig1D::new(elements.div_ceil(BLOCK), BLOCK, 0)
@@ -393,6 +506,177 @@ pub trait StaticMapKernelModule {
         P: ProbingScheme<K>,
         S: KernelSliceArg<Elem = u64>,
         D: KernelSliceArg<Elem = DeviceAtomicU64>;
+}
+
+#[doc(hidden)]
+pub trait StaticMapRangeKernelModule {
+    #[allow(clippy::too_many_arguments)]
+    fn launch_insert_range<K, V, P, Input, const CG: u32, S, C>(
+        &self,
+        stream: &CudaStream,
+        config: LaunchConfig1D,
+        slots: &S,
+        input: Input,
+        len: usize,
+        inserted: &C,
+        invalid: &C,
+        range_error: &C,
+        empty_key: K,
+        empty_value: V,
+        erased_key: K,
+        probing: P,
+    ) -> Result<(), LaunchContractError>
+    where
+        K: MapKey,
+        V: MapValue,
+        P: ProbingScheme<K>,
+        Input: crate::range::DeviceMapRead<Item = crate::KeyValue<K, V>>,
+        S: KernelSliceArg<Elem = DeviceAtomicU64>,
+        C: KernelSliceArg<Elem = DeviceAtomicU64>;
+
+    #[allow(clippy::too_many_arguments)]
+    fn launch_insert_or_assign_range<K, V, P, Input, const CG: u32, S, C>(
+        &self,
+        stream: &CudaStream,
+        config: LaunchConfig1D,
+        slots: &S,
+        input: Input,
+        len: usize,
+        inserted: &C,
+        invalid: &C,
+        range_error: &C,
+        empty_key: K,
+        empty_value: V,
+        erased_key: K,
+        probing: P,
+    ) -> Result<(), LaunchContractError>
+    where
+        K: MapKey,
+        V: MapValue,
+        P: ProbingScheme<K>,
+        Input: crate::range::DeviceMapRead<Item = crate::KeyValue<K, V>>,
+        S: KernelSliceArg<Elem = DeviceAtomicU64>,
+        C: KernelSliceArg<Elem = DeviceAtomicU64>;
+
+    #[allow(clippy::too_many_arguments)]
+    fn launch_insert_prevalidated_range<K, V, P, Input, const CG: u32, S, C>(
+        &self,
+        stream: &CudaStream,
+        config: LaunchConfig1D,
+        slots: &S,
+        input: Input,
+        len: usize,
+        range_error: &C,
+        empty_key: K,
+        empty_value: V,
+        erased_key: K,
+        probing: P,
+    ) -> Result<(), LaunchContractError>
+    where
+        K: MapKey,
+        V: MapValue,
+        P: ProbingScheme<K>,
+        Input: crate::range::DeviceMapRead<Item = crate::KeyValue<K, V>>,
+        S: KernelSliceArg<Elem = DeviceAtomicU64>,
+        C: KernelSliceArg<Elem = DeviceAtomicU64>;
+
+    #[allow(clippy::too_many_arguments)]
+    fn launch_insert_prevalidated_range_with_erase<K, V, P, Input, const CG: u32, S, C>(
+        &self,
+        stream: &CudaStream,
+        config: LaunchConfig1D,
+        slots: &S,
+        input: Input,
+        len: usize,
+        range_error: &C,
+        empty_key: K,
+        empty_value: V,
+        erased_key: K,
+        probing: P,
+    ) -> Result<(), LaunchContractError>
+    where
+        K: MapKey,
+        V: MapValue,
+        P: ProbingScheme<K>,
+        Input: crate::range::DeviceMapRead<Item = crate::KeyValue<K, V>>,
+        S: KernelSliceArg<Elem = DeviceAtomicU64>,
+        C: KernelSliceArg<Elem = DeviceAtomicU64>;
+
+    #[allow(clippy::too_many_arguments)]
+    fn launch_find_range<K, V, P, Input, Output, const CG: u32, S, C>(
+        &self,
+        stream: &CudaStream,
+        config: LaunchConfig1D,
+        slots: &S,
+        input: Input,
+        output: Output,
+        len: usize,
+        range_error: &C,
+        empty_key: K,
+        empty_value: V,
+        erased_key: K,
+        probing: P,
+    ) -> Result<(), LaunchContractError>
+    where
+        K: MapKey,
+        V: MapValue,
+        P: ProbingScheme<K>,
+        Input: crate::range::DeviceMapRead<Item = K>,
+        Output: crate::range::DeviceMapWrite<Item = V>,
+        S: KernelSliceArg<Elem = u64>,
+        C: KernelSliceArg<Elem = DeviceAtomicU64>;
+
+    #[allow(clippy::too_many_arguments)]
+    fn launch_contains_range<K, V, P, Input, Output, const CG: u32, S, C>(
+        &self,
+        stream: &CudaStream,
+        config: LaunchConfig1D,
+        slots: &S,
+        input: Input,
+        output: Output,
+        len: usize,
+        range_error: &C,
+        empty_key: K,
+        empty_value: V,
+        erased_key: K,
+        probing: P,
+    ) -> Result<(), LaunchContractError>
+    where
+        K: MapKey,
+        V: MapValue,
+        P: ProbingScheme<K>,
+        Input: crate::range::DeviceMapRead<Item = K>,
+        Output: crate::range::DeviceMapWrite<Item = u32>,
+        S: KernelSliceArg<Elem = u64>,
+        C: KernelSliceArg<Elem = DeviceAtomicU64>;
+
+    #[allow(clippy::too_many_arguments)]
+    fn launch_contains_if_range<K, V, P, Input, Stencil, Output, Predicate, const CG: u32, S, C>(
+        &self,
+        stream: &CudaStream,
+        config: LaunchConfig1D,
+        slots: &S,
+        input: Input,
+        stencil: Stencil,
+        output: Output,
+        predicate: Predicate,
+        len: usize,
+        range_error: &C,
+        empty_key: K,
+        empty_value: V,
+        erased_key: K,
+        probing: P,
+    ) -> Result<(), LaunchContractError>
+    where
+        K: MapKey,
+        V: MapValue,
+        P: ProbingScheme<K>,
+        Input: crate::range::DeviceMapRead<Item = K>,
+        Stencil: crate::range::DeviceMapRead,
+        Output: crate::range::DeviceMapWrite<Item = u32>,
+        Predicate: Fn(Stencil::Item) -> bool + Copy,
+        S: KernelSliceArg<Elem = u64>,
+        C: KernelSliceArg<Elem = DeviceAtomicU64>;
 }
 
 impl<M, K, V, P, const CG: u32> StaticMapBackend<K, V, P, CG> for M
@@ -641,6 +925,256 @@ where
             config,
             &source,
             &destination,
+            empty_key,
+            empty_value,
+            erased_key,
+            probing,
+        )
+        .map_err(MapError::Contract)
+    }
+}
+
+impl<M, K, V, P, const CG: u32> StaticMapRangeBackend<K, V, P, CG> for M
+where
+    M: StaticMapRangeKernelModule,
+    K: MapKey,
+    V: MapValue,
+    P: ProbingScheme<K>,
+{
+    fn insert_range<const ASSIGN: bool, A, SA, Input>(
+        &self,
+        stream: &CudaStream,
+        storage: &mut DeviceBuffer<'_, u64, A>,
+        capacity: usize,
+        input: Input,
+        len: usize,
+        status: &mut DeviceBuffer<'_, u64, SA>,
+        empty_key: K,
+        empty_value: V,
+        erased_key: K,
+        probing: P,
+    ) -> Result<(), MapError>
+    where
+        A: DeviceAllocator,
+        SA: DeviceAllocator,
+        Input: crate::range::DeviceMapRead<Item = crate::KeyValue<K, V>>,
+    {
+        let config = bulk_launch_config::<CG>(len)?;
+        let storage = crate::kernel_args::AtomicU64StorageArg::new(storage);
+        let slot_words = slot_storage_words::<V>(capacity)?;
+        let slots = storage.subrange(0, slot_words);
+        let inserted = storage.subrange(slot_words, 1);
+        let invalid = storage.subrange(slot_words + 1, 1);
+        let status = crate::kernel_args::AtomicU64StorageArg::new(status);
+        let range_error = status.subrange(0, 1);
+        let result = if ASSIGN {
+            self.launch_insert_or_assign_range::<K, V, P, Input, CG, _, _>(
+                stream,
+                config,
+                &slots,
+                input,
+                len,
+                &inserted,
+                &invalid,
+                &range_error,
+                empty_key,
+                empty_value,
+                erased_key,
+                probing,
+            )
+        } else {
+            self.launch_insert_range::<K, V, P, Input, CG, _, _>(
+                stream,
+                config,
+                &slots,
+                input,
+                len,
+                &inserted,
+                &invalid,
+                &range_error,
+                empty_key,
+                empty_value,
+                erased_key,
+                probing,
+            )
+        };
+        result.map_err(MapError::Contract)
+    }
+
+    fn insert_prevalidated_range<const SUPPORTS_ERASE: bool, A, SA, Input>(
+        &self,
+        stream: &CudaStream,
+        storage: &mut DeviceBuffer<'_, u64, A>,
+        capacity: usize,
+        input: Input,
+        len: usize,
+        status: &mut DeviceBuffer<'_, u64, SA>,
+        empty_key: K,
+        empty_value: V,
+        erased_key: K,
+        probing: P,
+    ) -> Result<(), MapError>
+    where
+        A: DeviceAllocator,
+        SA: DeviceAllocator,
+        Input: crate::range::DeviceMapRead<Item = crate::KeyValue<K, V>>,
+    {
+        let config = bulk_launch_config::<CG>(len)?;
+        let storage = crate::kernel_args::AtomicU64StorageArg::new(storage);
+        let slots = storage.subrange(0, slot_storage_words::<V>(capacity)?);
+        let status = crate::kernel_args::AtomicU64StorageArg::new(status);
+        let range_error = status.subrange(0, 1);
+        let result = if SUPPORTS_ERASE {
+            self.launch_insert_prevalidated_range_with_erase::<K, V, P, Input, CG, _, _>(
+                stream,
+                config,
+                &slots,
+                input,
+                len,
+                &range_error,
+                empty_key,
+                empty_value,
+                erased_key,
+                probing,
+            )
+        } else {
+            self.launch_insert_prevalidated_range::<K, V, P, Input, CG, _, _>(
+                stream,
+                config,
+                &slots,
+                input,
+                len,
+                &range_error,
+                empty_key,
+                empty_value,
+                erased_key,
+                probing,
+            )
+        };
+        result.map_err(MapError::Contract)
+    }
+
+    fn find_range<A, SA, Input, Output>(
+        &self,
+        stream: &CudaStream,
+        storage: &DeviceBuffer<'_, u64, A>,
+        capacity: usize,
+        input: Input,
+        output: Output,
+        len: usize,
+        status: &mut DeviceBuffer<'_, u64, SA>,
+        empty_key: K,
+        empty_value: V,
+        erased_key: K,
+        probing: P,
+    ) -> Result<(), MapError>
+    where
+        A: DeviceAllocator,
+        SA: DeviceAllocator,
+        Input: crate::range::DeviceMapRead<Item = K>,
+        Output: crate::range::DeviceMapWrite<Item = V>,
+    {
+        let config = bulk_launch_config::<CG>(len)?;
+        let prefix = crate::kernel_args::Prefix::new(storage, slot_storage_words::<V>(capacity)?);
+        let slots = crate::kernel_args::RangeArg::new(&prefix);
+        let status = crate::kernel_args::AtomicU64StorageArg::new(status);
+        let range_error = status.subrange(0, 1);
+        self.launch_find_range::<K, V, P, Input, Output, CG, _, _>(
+            stream,
+            config,
+            &slots,
+            input,
+            output,
+            len,
+            &range_error,
+            empty_key,
+            empty_value,
+            erased_key,
+            probing,
+        )
+        .map_err(MapError::Contract)
+    }
+
+    fn contains_range<A, SA, Input, Output>(
+        &self,
+        stream: &CudaStream,
+        storage: &DeviceBuffer<'_, u64, A>,
+        capacity: usize,
+        input: Input,
+        output: Output,
+        len: usize,
+        status: &mut DeviceBuffer<'_, u64, SA>,
+        empty_key: K,
+        empty_value: V,
+        erased_key: K,
+        probing: P,
+    ) -> Result<(), MapError>
+    where
+        A: DeviceAllocator,
+        SA: DeviceAllocator,
+        Input: crate::range::DeviceMapRead<Item = K>,
+        Output: crate::range::DeviceMapWrite<Item = u32>,
+    {
+        let config = bulk_launch_config::<CG>(len)?;
+        let prefix = crate::kernel_args::Prefix::new(storage, slot_storage_words::<V>(capacity)?);
+        let slots = crate::kernel_args::RangeArg::new(&prefix);
+        let status = crate::kernel_args::AtomicU64StorageArg::new(status);
+        let range_error = status.subrange(0, 1);
+        self.launch_contains_range::<K, V, P, Input, Output, CG, _, _>(
+            stream,
+            config,
+            &slots,
+            input,
+            output,
+            len,
+            &range_error,
+            empty_key,
+            empty_value,
+            erased_key,
+            probing,
+        )
+        .map_err(MapError::Contract)
+    }
+
+    fn contains_if_range<A, SA, Input, Stencil, Output, Predicate>(
+        &self,
+        stream: &CudaStream,
+        storage: &DeviceBuffer<'_, u64, A>,
+        capacity: usize,
+        input: Input,
+        stencil: Stencil,
+        output: Output,
+        predicate: Predicate,
+        len: usize,
+        status: &mut DeviceBuffer<'_, u64, SA>,
+        empty_key: K,
+        empty_value: V,
+        erased_key: K,
+        probing: P,
+    ) -> Result<(), MapError>
+    where
+        A: DeviceAllocator,
+        SA: DeviceAllocator,
+        Input: crate::range::DeviceMapRead<Item = K>,
+        Stencil: crate::range::DeviceMapRead,
+        Output: crate::range::DeviceMapWrite<Item = u32>,
+        Predicate: Fn(Stencil::Item) -> bool + Copy,
+    {
+        let config = bulk_launch_config::<CG>(len)?;
+        let prefix = crate::kernel_args::Prefix::new(storage, slot_storage_words::<V>(capacity)?);
+        let slots = crate::kernel_args::RangeArg::new(&prefix);
+        let status = crate::kernel_args::AtomicU64StorageArg::new(status);
+        let range_error = status.subrange(0, 1);
+        self.launch_contains_if_range::<K, V, P, Input, Stencil, Output, Predicate, CG, _, _>(
+            stream,
+            config,
+            &slots,
+            input,
+            stencil,
+            output,
+            predicate,
+            len,
+            &range_error,
             empty_key,
             empty_value,
             erased_key,
@@ -1149,6 +1683,324 @@ macro_rules! __cuco_backend {
                     &prepared,
                     source,
                     destination,
+                    empty_key,
+                    empty_value,
+                    erased_key,
+                    probing,
+                )
+            }
+        }
+
+        impl $crate::__private::StaticMapRangeKernelModule for $module::LoadedModule {
+            fn launch_insert_range<K, V, P, Input, const CG: u32, S, C>(
+                &self,
+                stream: &$crate::__private::cuda_core::CudaStream,
+                config: $crate::__private::cuda_core::LaunchConfig1D,
+                slots: &S,
+                input: Input,
+                len: usize,
+                inserted: &C,
+                invalid: &C,
+                range_error: &C,
+                empty_key: K,
+                empty_value: V,
+                erased_key: K,
+                probing: P,
+            ) -> Result<(), $crate::__private::cuda_core::LaunchContractError>
+            where
+                K: $crate::MapKey,
+                V: $crate::MapValue,
+                P: $crate::ProbingScheme<K>,
+                Input: $crate::__private::DeviceMapRead<Item = $crate::KeyValue<K, V>>,
+                S: $crate::__private::cuda_host::KernelSliceArg<
+                        Elem = $crate::__private::cuda_device::atomic::DeviceAtomicU64,
+                    >,
+                C: $crate::__private::cuda_host::KernelSliceArg<
+                        Elem = $crate::__private::cuda_device::atomic::DeviceAtomicU64,
+                    >,
+            {
+                let prepared =
+                    self.prepare_static_map_insert_range::<K, V, P, Input, CG>(config)?;
+                self.static_map_insert_range::<K, V, P, Input, CG>(
+                    stream,
+                    &prepared,
+                    slots,
+                    input,
+                    len,
+                    inserted,
+                    invalid,
+                    range_error,
+                    empty_key,
+                    empty_value,
+                    erased_key,
+                    probing,
+                )
+            }
+
+            fn launch_insert_or_assign_range<K, V, P, Input, const CG: u32, S, C>(
+                &self,
+                stream: &$crate::__private::cuda_core::CudaStream,
+                config: $crate::__private::cuda_core::LaunchConfig1D,
+                slots: &S,
+                input: Input,
+                len: usize,
+                inserted: &C,
+                invalid: &C,
+                range_error: &C,
+                empty_key: K,
+                empty_value: V,
+                erased_key: K,
+                probing: P,
+            ) -> Result<(), $crate::__private::cuda_core::LaunchContractError>
+            where
+                K: $crate::MapKey,
+                V: $crate::MapValue,
+                P: $crate::ProbingScheme<K>,
+                Input: $crate::__private::DeviceMapRead<Item = $crate::KeyValue<K, V>>,
+                S: $crate::__private::cuda_host::KernelSliceArg<
+                        Elem = $crate::__private::cuda_device::atomic::DeviceAtomicU64,
+                    >,
+                C: $crate::__private::cuda_host::KernelSliceArg<
+                        Elem = $crate::__private::cuda_device::atomic::DeviceAtomicU64,
+                    >,
+            {
+                let prepared =
+                    self.prepare_static_map_insert_or_assign_range::<K, V, P, Input, CG>(config)?;
+                self.static_map_insert_or_assign_range::<K, V, P, Input, CG>(
+                    stream,
+                    &prepared,
+                    slots,
+                    input,
+                    len,
+                    inserted,
+                    invalid,
+                    range_error,
+                    empty_key,
+                    empty_value,
+                    erased_key,
+                    probing,
+                )
+            }
+
+            fn launch_insert_prevalidated_range<K, V, P, Input, const CG: u32, S, C>(
+                &self,
+                stream: &$crate::__private::cuda_core::CudaStream,
+                config: $crate::__private::cuda_core::LaunchConfig1D,
+                slots: &S,
+                input: Input,
+                len: usize,
+                range_error: &C,
+                empty_key: K,
+                empty_value: V,
+                erased_key: K,
+                probing: P,
+            ) -> Result<(), $crate::__private::cuda_core::LaunchContractError>
+            where
+                K: $crate::MapKey,
+                V: $crate::MapValue,
+                P: $crate::ProbingScheme<K>,
+                Input: $crate::__private::DeviceMapRead<Item = $crate::KeyValue<K, V>>,
+                S: $crate::__private::cuda_host::KernelSliceArg<
+                        Elem = $crate::__private::cuda_device::atomic::DeviceAtomicU64,
+                    >,
+                C: $crate::__private::cuda_host::KernelSliceArg<
+                        Elem = $crate::__private::cuda_device::atomic::DeviceAtomicU64,
+                    >,
+            {
+                let prepared = self
+                    .prepare_static_map_insert_prevalidated_range::<K, V, P, Input, CG>(config)?;
+                self.static_map_insert_prevalidated_range::<K, V, P, Input, CG>(
+                    stream,
+                    &prepared,
+                    slots,
+                    input,
+                    len,
+                    range_error,
+                    empty_key,
+                    empty_value,
+                    erased_key,
+                    probing,
+                )
+            }
+
+            fn launch_insert_prevalidated_range_with_erase<K, V, P, Input, const CG: u32, S, C>(
+                &self,
+                stream: &$crate::__private::cuda_core::CudaStream,
+                config: $crate::__private::cuda_core::LaunchConfig1D,
+                slots: &S,
+                input: Input,
+                len: usize,
+                range_error: &C,
+                empty_key: K,
+                empty_value: V,
+                erased_key: K,
+                probing: P,
+            ) -> Result<(), $crate::__private::cuda_core::LaunchContractError>
+            where
+                K: $crate::MapKey,
+                V: $crate::MapValue,
+                P: $crate::ProbingScheme<K>,
+                Input: $crate::__private::DeviceMapRead<Item = $crate::KeyValue<K, V>>,
+                S: $crate::__private::cuda_host::KernelSliceArg<
+                        Elem = $crate::__private::cuda_device::atomic::DeviceAtomicU64,
+                    >,
+                C: $crate::__private::cuda_host::KernelSliceArg<
+                        Elem = $crate::__private::cuda_device::atomic::DeviceAtomicU64,
+                    >,
+            {
+                let prepared = self
+                    .prepare_static_map_insert_prevalidated_range_with_erase::<K, V, P, Input, CG>(
+                        config,
+                    )?;
+                self.static_map_insert_prevalidated_range_with_erase::<K, V, P, Input, CG>(
+                    stream,
+                    &prepared,
+                    slots,
+                    input,
+                    len,
+                    range_error,
+                    empty_key,
+                    empty_value,
+                    erased_key,
+                    probing,
+                )
+            }
+
+            fn launch_find_range<K, V, P, Input, Output, const CG: u32, S, C>(
+                &self,
+                stream: &$crate::__private::cuda_core::CudaStream,
+                config: $crate::__private::cuda_core::LaunchConfig1D,
+                slots: &S,
+                input: Input,
+                output: Output,
+                len: usize,
+                range_error: &C,
+                empty_key: K,
+                empty_value: V,
+                erased_key: K,
+                probing: P,
+            ) -> Result<(), $crate::__private::cuda_core::LaunchContractError>
+            where
+                K: $crate::MapKey,
+                V: $crate::MapValue,
+                P: $crate::ProbingScheme<K>,
+                Input: $crate::__private::DeviceMapRead<Item = K>,
+                Output: $crate::__private::DeviceMapWrite<Item = V>,
+                S: $crate::__private::cuda_host::KernelSliceArg<Elem = u64>,
+                C: $crate::__private::cuda_host::KernelSliceArg<
+                        Elem = $crate::__private::cuda_device::atomic::DeviceAtomicU64,
+                    >,
+            {
+                let prepared =
+                    self.prepare_static_map_find_range::<K, V, P, Input, Output, CG>(config)?;
+                self.static_map_find_range::<K, V, P, Input, Output, CG>(
+                    stream,
+                    &prepared,
+                    slots,
+                    input,
+                    output,
+                    len,
+                    range_error,
+                    empty_key,
+                    empty_value,
+                    erased_key,
+                    probing,
+                )
+            }
+
+            fn launch_contains_range<K, V, P, Input, Output, const CG: u32, S, C>(
+                &self,
+                stream: &$crate::__private::cuda_core::CudaStream,
+                config: $crate::__private::cuda_core::LaunchConfig1D,
+                slots: &S,
+                input: Input,
+                output: Output,
+                len: usize,
+                range_error: &C,
+                empty_key: K,
+                empty_value: V,
+                erased_key: K,
+                probing: P,
+            ) -> Result<(), $crate::__private::cuda_core::LaunchContractError>
+            where
+                K: $crate::MapKey,
+                V: $crate::MapValue,
+                P: $crate::ProbingScheme<K>,
+                Input: $crate::__private::DeviceMapRead<Item = K>,
+                Output: $crate::__private::DeviceMapWrite<Item = u32>,
+                S: $crate::__private::cuda_host::KernelSliceArg<Elem = u64>,
+                C: $crate::__private::cuda_host::KernelSliceArg<
+                        Elem = $crate::__private::cuda_device::atomic::DeviceAtomicU64,
+                    >,
+            {
+                let prepared =
+                    self.prepare_static_map_contains_range::<K, V, P, Input, Output, CG>(config)?;
+                self.static_map_contains_range::<K, V, P, Input, Output, CG>(
+                    stream,
+                    &prepared,
+                    slots,
+                    input,
+                    output,
+                    len,
+                    range_error,
+                    empty_key,
+                    empty_value,
+                    erased_key,
+                    probing,
+                )
+            }
+
+            fn launch_contains_if_range<
+                K,
+                V,
+                P,
+                Input,
+                Stencil,
+                Output,
+                Predicate,
+                const CG: u32,
+                S,
+                C,
+            >(
+                &self,
+                stream: &$crate::__private::cuda_core::CudaStream,
+                config: $crate::__private::cuda_core::LaunchConfig1D,
+                slots: &S,
+                input: Input,
+                stencil: Stencil,
+                output: Output,
+                predicate: Predicate,
+                len: usize,
+                range_error: &C,
+                empty_key: K,
+                empty_value: V,
+                erased_key: K,
+                probing: P,
+            ) -> Result<(), $crate::__private::cuda_core::LaunchContractError>
+            where
+                K: $crate::MapKey,
+                V: $crate::MapValue,
+                P: $crate::ProbingScheme<K>,
+                Input: $crate::__private::DeviceMapRead<Item = K>,
+                Stencil: $crate::__private::DeviceMapRead,
+                Output: $crate::__private::DeviceMapWrite<Item = u32>,
+                Predicate: Fn(Stencil::Item) -> bool + Copy,
+                S: $crate::__private::cuda_host::KernelSliceArg<Elem = u64>,
+                C: $crate::__private::cuda_host::KernelSliceArg<
+                        Elem = $crate::__private::cuda_device::atomic::DeviceAtomicU64,
+                    >,
+            {
+                let prepared = self.prepare_static_map_contains_if_range(config)?;
+                self.static_map_contains_if_range::<K, V, P, Input, Stencil, Output, Predicate, CG>(
+                    stream,
+                    &prepared,
+                    slots,
+                    input,
+                    stencil,
+                    output,
+                    predicate,
+                    len,
+                    range_error,
                     empty_key,
                     empty_value,
                     erased_key,

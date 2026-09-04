@@ -1,10 +1,4 @@
 /target/
-/vendor/cuda-device/Cargo.lock
-/vendor/cuda-device/target/
-/vendor/cuda-host/Cargo.lock
-/vendor/cuda-host/target/
-/vendor/cuda-macros/Cargo.lock
-/vendor/cuda-macros/target/
 /.oxide-artifacts/
 *.ll
 *.ptx

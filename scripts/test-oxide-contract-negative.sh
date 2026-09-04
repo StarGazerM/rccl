@@ -10,9 +10,7 @@ trap 'rm -rf -- "$scratch"' EXIT
 fixture_paths=(
   .cargo/config.toml
   Cargo.lock
-  Cargo.toml
   README.md
-  patches/cuda-oxide-read-only-i32x4.patch
   rccl-cub/Cargo.toml
   rccl-cuco/Cargo.toml
   rccl-memory/Cargo.toml
@@ -21,9 +19,6 @@ fixture_paths=(
   scripts/check-oxide-contract.sh
   scripts/oxide-env.sh
   scripts/setup-cuda-oxide.sh
-  vendor/cuda-device/Cargo.toml
-  vendor/cuda-host/Cargo.toml
-  vendor/cuda-macros/Cargo.toml
 )
 
 populate_fixture() {
@@ -51,24 +46,16 @@ expect_rejection() {
 populate_fixture
 "$fixture/scripts/check-oxide-contract.sh" >/dev/null
 
-expected_commit=97f8b2b7882f0c15ad9ce9b53abed5553920caa8
+expected_commit=5f7c34fddadcf250f2e45d0cffe83a3d27f2bea3
 mismatched_commit=0000000000000000000000000000000000000000
 sed -i "s/$expected_commit/$mismatched_commit/g" "$fixture/rccl-cub/Cargo.toml"
 expect_rejection 'manifest pin mismatch' 'manifest pin mismatch in rccl-cub/Cargo.toml' \
   "$fixture/scripts/check-oxide-contract.sh"
 
 populate_fixture
-rm -- "$fixture/patches/cuda-oxide-read-only-i32x4.patch"
-expect_rejection 'missing patch (contract)' 'required cuda-oxide patch is missing' \
+sed -i 's#https://github.com/StarGazerM/cuda-oxide.git#https://github.com/NVlabs/cuda-oxide.git#g' \
+  "$fixture/rccl-memory/Cargo.toml"
+expect_rejection 'manifest origin mismatch' 'manifest pin mismatch in rccl-memory/Cargo.toml' \
   "$fixture/scripts/check-oxide-contract.sh"
-expect_rejection 'missing patch (setup)' 'missing cuda-oxide patch' \
-  "$fixture/scripts/setup-cuda-oxide.sh" "$scratch/unused-checkout"
-
-populate_fixture
-printf '\n# deterministic fixture mutation\n' >>"$fixture/patches/cuda-oxide-read-only-i32x4.patch"
-expect_rejection 'modified patch (contract)' 'cuda-oxide patch checksum mismatch' \
-  "$fixture/scripts/check-oxide-contract.sh"
-expect_rejection 'modified patch (setup)' 'cuda-oxide patch checksum mismatch' \
-  "$fixture/scripts/setup-cuda-oxide.sh" "$scratch/unused-checkout"
 
 printf '%s\n' 'cuda-oxide negative fixture checks: PASS'

@@ -98,6 +98,101 @@ pub fn insert_prevalidated<K, V, P, const CG: u32, const SUPPORTS_ERASE: bool>(
 
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
+pub fn insert_range<K, V, P, Input, const CG: u32, const ASSIGN: bool>(
+    global_thread: usize,
+    slots: &[DeviceAtomicU64],
+    input: Input,
+    len: usize,
+    inserted: &[DeviceAtomicU64],
+    invalid: &[DeviceAtomicU64],
+    range_error: &[DeviceAtomicU64],
+    empty_key: K,
+    empty_value: V,
+    erased_key: K,
+    probing: P,
+) where
+    K: MapKey,
+    V: MapValue,
+    P: ProbingScheme<K>,
+    Input: crate::range::DeviceMapRead<Item = crate::KeyValue<K, V>>,
+{
+    let input_index = global_thread / CG as usize;
+    let active = input_index < len;
+    let item = if active {
+        // SAFETY: input_index is bounded by the host range extent.
+        unsafe { input.read_at(input_index) }
+    } else {
+        None
+    };
+    let mut fresh = false;
+    let reserved = item.is_some_and(|item| {
+        item.key == empty_key
+            || item.key == erased_key
+            || item.value.to_bits() == empty_value.to_bits()
+    });
+    if let Some(item) = item {
+        if !reserved {
+            // SAFETY: map construction validates the cooperative group and
+            // table extent; this kernel assigns one convergent tile per item.
+            let map = unsafe {
+                StaticMapRef::<K, V, P, CG>::new(slots, empty_key, empty_value, erased_key, probing)
+            };
+            fresh = map.insert_counted::<ASSIGN>(item.key, item.value);
+        }
+    } else if active && global_thread.is_multiple_of(CG as usize) {
+        range_error[0].store(1, AtomicOrdering::Relaxed);
+    }
+
+    let tile_rank = global_thread % CG as usize;
+    let successes = warp::ballot(active && tile_rank == 0 && fresh).count_ones() as u64;
+    if warp::lane_id() == 0 && successes != 0 {
+        inserted[0].fetch_add(successes, AtomicOrdering::Relaxed);
+    }
+    let invalid_items = warp::ballot(active && tile_rank == 0 && reserved).count_ones() as u64;
+    if warp::lane_id() == 0 && invalid_items != 0 {
+        invalid[0].fetch_add(invalid_items, AtomicOrdering::Relaxed);
+    }
+}
+
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+pub fn insert_range_prevalidated<K, V, P, Input, const CG: u32, const SUPPORTS_ERASE: bool>(
+    global_thread: usize,
+    slots: &[DeviceAtomicU64],
+    input: Input,
+    len: usize,
+    range_error: &[DeviceAtomicU64],
+    empty_key: K,
+    empty_value: V,
+    erased_key: K,
+    probing: P,
+) where
+    K: MapKey,
+    V: MapValue,
+    P: ProbingScheme<K>,
+    Input: crate::range::DeviceMapRead<Item = crate::KeyValue<K, V>>,
+{
+    let input_index = global_thread / CG as usize;
+    if input_index >= len {
+        return;
+    }
+    // SAFETY: input_index is bounded by the host range extent.
+    let Some(item) = (unsafe { input.read_at(input_index) }) else {
+        if global_thread.is_multiple_of(CG as usize) {
+            range_error[0].store(1, AtomicOrdering::Relaxed);
+        }
+        return;
+    };
+    // SAFETY: map construction validates the cooperative group and table
+    // extent; this kernel assigns one convergent tile per item.
+    let map = unsafe {
+        StaticMapRef::<K, V, P, CG>::new(slots, empty_key, empty_value, erased_key, probing)
+    };
+    let _ = map.insert_prevalidated::<SUPPORTS_ERASE>(item.key, item.value);
+}
+
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
 pub fn find<K, V, P, const CG: u32>(
     global_thread: usize,
     slots: &[u64],
@@ -149,6 +244,159 @@ pub fn contains<K, V, P, const CG: u32>(
     let present = map.contains(keys[input_index]);
     if global_thread.is_multiple_of(CG as usize) {
         output[input_index].store(present as u32, AtomicOrdering::Relaxed);
+    }
+}
+
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+pub fn find_range<K, V, P, Input, Output, const CG: u32>(
+    global_thread: usize,
+    slots: &[u64],
+    input: Input,
+    output: Output,
+    len: usize,
+    range_error: &[DeviceAtomicU64],
+    empty_key: K,
+    empty_value: V,
+    erased_key: K,
+    probing: P,
+) where
+    K: MapKey,
+    V: MapValue,
+    P: ProbingScheme<K>,
+    Input: crate::range::DeviceMapRead<Item = K>,
+    Output: crate::range::DeviceMapWrite<Item = V>,
+{
+    let input_index = global_thread / CG as usize;
+    if input_index >= len {
+        return;
+    }
+    // SAFETY: input_index is bounded by the host range extent.
+    let key = unsafe { input.read_at(input_index) };
+    let value = key.map_or(empty_value, |key| {
+        let map = StaticMapReadRef::<K, V, P, CG>::new(
+            slots,
+            empty_key,
+            empty_value,
+            erased_key,
+            probing,
+        );
+        map.find(key).unwrap_or(empty_value)
+    });
+    if global_thread.is_multiple_of(CG as usize) {
+        if key.is_none() {
+            range_error[0].store(1, AtomicOrdering::Relaxed);
+        }
+        // SAFETY: output length was checked against len and only tile leaders
+        // write, so distinct input indices cannot alias.
+        unsafe { output.write_at(input_index, value) };
+    }
+}
+
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+pub fn contains_range<K, V, P, Input, Output, const CG: u32>(
+    global_thread: usize,
+    slots: &[u64],
+    input: Input,
+    output: Output,
+    len: usize,
+    range_error: &[DeviceAtomicU64],
+    empty_key: K,
+    empty_value: V,
+    erased_key: K,
+    probing: P,
+) where
+    K: MapKey,
+    V: MapValue,
+    P: ProbingScheme<K>,
+    Input: crate::range::DeviceMapRead<Item = K>,
+    Output: crate::range::DeviceMapWrite<Item = u32>,
+{
+    let input_index = global_thread / CG as usize;
+    if input_index >= len {
+        return;
+    }
+    // SAFETY: input_index is bounded by the host range extent.
+    let key = unsafe { input.read_at(input_index) };
+    let present = key.is_some_and(|key| {
+        let map = StaticMapReadRef::<K, V, P, CG>::new(
+            slots,
+            empty_key,
+            empty_value,
+            erased_key,
+            probing,
+        );
+        map.contains(key)
+    });
+    if global_thread.is_multiple_of(CG as usize) {
+        if key.is_none() {
+            range_error[0].store(1, AtomicOrdering::Relaxed);
+        }
+        // SAFETY: output length was checked against len and only tile leaders
+        // write, so distinct input indices cannot alias.
+        unsafe { output.write_at(input_index, present as u32) };
+    }
+}
+
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+pub fn contains_if_range<K, V, P, Input, Stencil, Output, Predicate, const CG: u32>(
+    global_thread: usize,
+    slots: &[u64],
+    input: Input,
+    stencil: Stencil,
+    output: Output,
+    predicate: Predicate,
+    len: usize,
+    range_error: &[DeviceAtomicU64],
+    empty_key: K,
+    empty_value: V,
+    erased_key: K,
+    probing: P,
+) where
+    K: MapKey,
+    V: MapValue,
+    P: ProbingScheme<K>,
+    Input: crate::range::DeviceMapRead<Item = K>,
+    Stencil: crate::range::DeviceMapRead,
+    Output: crate::range::DeviceMapWrite<Item = u32>,
+    Predicate: Fn(Stencil::Item) -> bool + Copy,
+{
+    let input_index = global_thread / CG as usize;
+    if input_index >= len {
+        return;
+    }
+    // Read the stencil first. A false predicate deliberately bypasses both
+    // the query range and the map lookup.
+    let stencil_item = unsafe { stencil.read_at(input_index) };
+    let selected = stencil_item.is_some_and(predicate);
+    let key = if selected {
+        // SAFETY: input and stencil extents were checked equal on the host.
+        unsafe { input.read_at(input_index) }
+    } else {
+        None
+    };
+    let present = selected
+        && key.is_some_and(|key| {
+            let map = StaticMapReadRef::<K, V, P, CG>::new(
+                slots,
+                empty_key,
+                empty_value,
+                erased_key,
+                probing,
+            );
+            map.contains(key)
+        });
+    if global_thread.is_multiple_of(CG as usize) {
+        if stencil_item.is_none() {
+            range_error[0].store(2, AtomicOrdering::Relaxed);
+        } else if selected && key.is_none() {
+            range_error[0].store(1, AtomicOrdering::Relaxed);
+        }
+        // SAFETY: output length was checked against len and only tile leaders
+        // write, so distinct input indices cannot alias.
+        unsafe { output.write_at(input_index, present as u32) };
     }
 }
 

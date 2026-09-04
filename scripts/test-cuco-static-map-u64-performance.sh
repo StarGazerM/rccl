@@ -94,6 +94,8 @@ median_file() {
   }'
 }
 
+max_ratio="${RCCL_CUCO_U64_MAX_RATIO:-1.050}"
+
 for occupancy in 0.50 0.75 0.90; do
   reference_samples="$build_dir/reference-$occupancy.txt"
   rust_samples="$build_dir/rust-$occupancy.txt"
@@ -129,10 +131,11 @@ for occupancy in 0.50 0.75 0.90; do
   fi
   reference="$(median_file "$reference_samples")"
   rust="$(median_file "$rust_samples")"
-  awk -v occupancy="$occupancy" -v reference="$reference" -v rust="$rust" 'BEGIN {
+  awk -v occupancy="$occupancy" -v reference="$reference" -v rust="$rust" \
+    -v limit="$max_ratio" 'BEGIN {
     ratio = rust / reference
-    printf "static_map u32_u64 insert occupancy=%s median-of-medians ratio=%.6f (RCCL %.9f ms / cuco %.9f ms; limit 2.500)\n", occupancy, ratio, rust, reference
-    if (ratio > 2.500) exit 1
+    printf "static_map u32_u64 insert occupancy=%s median-of-medians ratio=%.6f (RCCL %.9f ms / cuco %.9f ms; limit %.3f)\n", occupancy, ratio, rust, reference, limit
+    if (ratio > limit) exit 1
   }'
 done
 
