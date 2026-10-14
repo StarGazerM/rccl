@@ -16,6 +16,7 @@ mod ordering;
 mod record_sort;
 mod reduce;
 mod scan;
+mod search;
 mod set;
 mod transform;
 
@@ -67,6 +68,11 @@ pub use reduce::{DeviceReduceExt, reduce};
 pub use scan::{
     DeviceScanExt, PendingScan, exclusive_scan, exclusive_scan_async, inclusive_scan,
     inclusive_scan_async,
+};
+pub use search::{
+    PendingEqualRange, PendingSearch, equal_range, equal_range_async, equal_range_by,
+    equal_range_by_async, lower_bound, lower_bound_async, lower_bound_by, lower_bound_by_async,
+    upper_bound, upper_bound_async, upper_bound_by, upper_bound_by_async,
 };
 pub use set::{
     ArithmeticSetRangeExt, Difference, DifferenceBy, Intersection, IntersectionBy,

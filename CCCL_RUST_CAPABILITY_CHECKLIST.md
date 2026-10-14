@@ -104,7 +104,7 @@ Nim/JIT API row is inferred from build artifacts or stale plans.
 | `thrust::sort`, `stable_sort`, `stable_sort_by_key` | `generalized_datalog/benchmark/cuda_test.cpp:121-160`; `gpu/device_lsm_index.ipp:143,175-180`; `vflog/src/indexing.cu:30-32`; `vflog/src/persistence.cu:133-139` | `DeviceSortExt::{sort,sort_unstable,sort_by,sort_unstable_by}`, `DeviceKeyValueSortExt::{sort,sort_unstable,sort_by,sort_unstable_by}`; `rccl-thrust/src/ordering.rs:8-128`; row forms in `rccl-thrust/src/record_sort.rs:168-233`; `scripts/test-record-sort.sh` | Device relation-row forms complete/benchmark-backed; there is no root free `rccl_thrust::sort`; host TBB policy in `cuda_test.cpp:145-160` is not a GPU workload → **NOT NECESSARY** for TBB facade |
 | `thrust::merge`, `merge_by_key` | `generalized_datalog/benchmark/merge_overhead_benchmark.cpp:120-121`; `gpu/device_lsm_index.ipp:569-571`; `gpu/device_sorted_array_index.ipp:455-457`; `vflog/src/persistence.cu:28-34,149-153` | `DeviceView::merge`, `DeviceView::merge_by`, `KeyValueRange::merge`, `KeyValueRange::merge_by`, returning `Merge`/`MergeBy`; `rccl-thrust/src/merge.rs:12-80`; ordering probes and `scripts/test-gpu.sh` | Basic keys/key-value semantics complete; there is no root free `rccl_thrust::merge`; complex SoA/custom comparator paths are partial concrete composition |
 | `thrust::set_union`, `set_difference` | `gpu/device_sorted_array_index.ipp:491-493,591-597`; `test/test_reproduce_set_diff_bug.cpp:101-109` | `rccl_thrust::{Union,Difference,...}` and `ArithmeticSetRangeExt`; `rccl-thrust/src/set.rs`; `scripts/test-set-operations.sh` | Ordinary set operations complete → **NOT NECESSARY**; mutable-provenance `set_difference_by_key_with_match_custom` remains genuinely missing reachable behavior |
-| `thrust::lower_bound` | `vflog/src/column.cu:20-27`; `vflog/src/ram/join_filtered.cu:125-127,175-177,210-212,379-381,438-440,483-485`; `vflog/src/ram/materialization.cu:69-71,120-122,155-157` | `rccl_thrust` has no exported lower-bound operation; `rccl-cub/src/ordering_backend` contains merge/sort but no bound-search public API | Genuinely-missing-reachable behavior (binary lower-bound search) |
+| `thrust::lower_bound` | `vflog/src/column.cu:20-27`; `vflog/src/ram/join_filtered.cu:125-127,175-177,210-212,379-381,438-440,483-485`; `vflog/src/ram/materialization.cu:69-71,120-122,155-157` | `rccl_thrust::{lower_bound,upper_bound,equal_range}` with comparator/async variants in `src/search.rs`; SM89 oracle/sanitizer coverage in `scripts/test-sorted-search.sh` | Implemented primitive; external caller migration and performance parity remain open |
 | `thrust::adjacent_difference` | Header included by `vflog/src/hisa.cu:8` but no operational call found in scanned non-comment source | No caller contract | **NOT NECESSARY**; include-only surface is not a reachable behavior |
 | `thrust::extrema` | Header included by `vflog/src/hisa.cu:11` but no operational call found in scanned non-comment source | No caller contract | **NOT NECESSARY** |
 | `thrust::device_ptr`, `device_vector`, host/device execution policies | `generalized_datalog/gpu/device_array.h:79-80,138-142`; `gpu/deduplication.h:137-265`; vflog uses RMM vectors and `EXE_POLICY` (`utils.cuh:96-99`) | `DeviceBuffer`, `DeviceSlice`, `Execution`, allocator-bearing ranges; `rccl-memory/src/buffer.rs`; `rccl-thrust/src/cuda.rs` | Rust ownership/execution model is the semantic replacement → **NOT NECESSARY** to clone C++ containers/policies |
@@ -123,11 +123,12 @@ Nim/JIT API row is inferred from build artifacts or stale plans.
 3. **Static-map `contains_if` — Genuinely-missing-reachable.** The operation is
    called at `include/column.cuh:106-115` and `src/ram/join.cu:94-99`; RCCL has
    no public stencil-filtered map-membership operation.
-4. **Lower-bound search — Genuinely-missing-reachable.** vflog calls
-   `thrust::lower_bound` in `src/column.cu:20-27`,
+4. **Lower-bound search — primitive implemented, integration/performance open.**
+   vflog calls `thrust::lower_bound` in `src/column.cu:20-27`,
    `src/ram/join_filtered.cu:125-127,175-177,210-212,379-381,438-440,483-485`,
-   and `src/ram/materialization.cu:69-71,120-122,155-157`; no RCCL public
-   lower-bound symbol exists.
+   and `src/ram/materialization.cu:69-71,120-122,155-157`. RCCL now exports
+   batched lower/upper/equal-range search; these external callsites are not
+   migrated or verified by the standalone R1 correctness example.
 5. **Custom mutable-provenance set difference — Partial-lowering.**
    `device_sorted_array_index.ipp:560-597` performs set-difference-by-key with
    mutable provenance matching; the Rust public path does not yet prove this
@@ -166,8 +167,8 @@ no-caller non-goals. Do not remove existing basic merge or set families.
    compressed-range values and the `UINT32_MAX` miss sentinel against vflog.
 2. Complete static-map bulk transform/counting range input/output composition.
 3. Add public stencil-filtered map membership (`contains_if`).
-4. Add public lower-bound search and exercise all vflog join/materialization
-   callsites listed in section 5.
+4. Integrate public lower-bound search and exercise all vflog join/materialization
+   callsites listed in section 5; close the separate search performance gate.
 5. Implement the mutable-provenance set-difference/delta contract used by
    `device_sorted_array_index.ipp:560-597`.
 6. Prove the custom semiring `reduce_by_key` composition at

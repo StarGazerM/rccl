@@ -34,6 +34,25 @@ The current executable vertical slices include:
 - Thrust binary in-place transform with a finite constant input;
 - Thrust sort/stable-sort/by-key, merge/by-key, and four set-operation families
   lowered through their pinned CUB/CUDA substrate.
+- Batched `lower_bound`, `upper_bound`, and `equal_range` over lowered read
+  ranges, with `u64` output indices, comparator variants and async completion.
+  Natural ordering requires `Ord`; floating keys require an explicit total
+  comparator. Outputs must match the needle count; positions are relative to
+  the haystack view. Example:
+
+  ```rust,ignore
+  rccl_thrust::equal_range(
+      &exec, keys.view(), needles.view(), begins.view_mut(), ends.view_mut(),
+  )?;
+  ```
+
+  `scripts/test-sorted-search.sh` exercises CPU-oracle correctness, sanitizers
+  and async range faults. `scripts/test-sorted-search-performance.sh` retains
+  seven alternating paired rounds against pinned Thrust. R1 correctness is
+  exercised on SM89; performance parity remains open. Two-item tiles and
+  full-domain equal-range searches reduced the local failing cases from
+  23/36 to 12/36; all equal-range cases now pass the numerical gate.
+  This does not establish exclusive-GPU parity or implement range expansion.
 
 The exact coverage ledger remains explicit about missing and partial CCCL
 surfaces. Passing tests for these slices is not described as full CUB or
@@ -168,6 +187,21 @@ code-shape fixtures required by this workspace. Every cuda-oxide Git dependency
 and `Cargo.lock` use the same immutable fork revision. CUDA path defaults remain
 overridable through the environment. The fork's scheduled upstream checker
 tracks semantic integration against NVlabs/cuda-oxide.
+
+Generated LLVM IR, optimized IR, PTX and embedding objects go under
+`target/oxide-ir/` via `CUDA_OXIDE_PTX_DIR` in `.cargo/config.toml`. Cargo
+resolves this path relative to the workspace, not the invoking directory.
+The setting does not follow a custom `CARGO_TARGET_DIR` automatically; override
+`CUDA_OXIDE_PTX_DIR` with an absolute path when needed, including a separate
+directory for each concurrent architecture/profile build. Existing root
+artifacts are not moved or deleted.
+
+This uses the existing backend option without changing cuda-oxide. It is
+intermediate-file storage, not a query cache. Some compiler inspection,
+pipeline and LTOIR-export helpers still assume source-adjacent files; inspect
+the files in the configured directory directly for RCCL passthrough builds
+rather than assuming those helpers honor the override. Runtime payloads
+remain embedded in the built executable.
 
 Run the identity check and its deterministic rejection fixtures from any
 working directory:

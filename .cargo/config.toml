@@ -6,4 +6,7 @@ CUDA_TOOLKIT_PATH = { value = "/opt/nvidia/hpc_sdk/Linux_x86_64/25.5/cuda/12.9",
 LIBNVVM_PATH = { value = "/opt/nvidia/hpc_sdk/Linux_x86_64/25.5/cuda/12.9/nvvm/lib64/libnvvm.so", force = false }
 CUDA_OXIDE_LIBDEVICE = { value = "/opt/nvidia/hpc_sdk/Linux_x86_64/25.5/cuda/12.9/nvvm/libdevice/libdevice.10.bc", force = false }
 LIBCLANG_PATH = { value = "/lib/x86_64-linux-gnu", force = false }
+# Keep cuda-oxide IR, PTX, and embedding objects out of the source tree.
+# Override per build when compiling concurrently with different configurations.
+CUDA_OXIDE_PTX_DIR = { value = "target/oxide-ir", relative = true, force = false }
 

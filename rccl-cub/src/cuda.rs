@@ -329,6 +329,73 @@ impl<'stream, 'program> Launch<'stream, 'program> {
             .range_generate_4b(self.stream, &prepared, input, output, op, len)
     }
 
+    /// Launch allocation-free vectorized lower/upper bound search.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn range_bound<Haystack, Needles, Output, F>(
+        &self,
+        haystack: Haystack,
+        needles: Needles,
+        output: Output,
+        compare: F,
+        haystack_len: usize,
+        needle_len: usize,
+        upper: bool,
+    ) -> Result<(), cuda_core::LaunchContractError>
+    where
+        Haystack: crate::DeviceReadAt,
+        Needles: crate::DeviceReadAt<Item = Haystack::Item>,
+        Output: crate::DeviceWriteAt<Item = u64>,
+        F: Fn(&Haystack::Item, &Haystack::Item) -> core::cmp::Ordering + Copy,
+    {
+        if needle_len == 0 {
+            return Ok(());
+        }
+        let blocks = needle_len.div_ceil(512).min(65_535) as u32;
+        let launch = cuda_core::LaunchConfig1D::new(blocks, 256, 0);
+        let prepared = self
+            .range_module()
+            .prepare_range_bound_for(&haystack, &needles, &output, &compare, launch)?;
+        self.range_module().range_bound(
+            self.stream, &prepared, haystack, needles, output, compare,
+            haystack_len, needle_len, upper,
+        )
+    }
+
+    /// Launch both insertion bounds into separate affine outputs.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn range_equal_range<Haystack, Needles, Begins, Ends, F>(
+        &self,
+        haystack: Haystack,
+        needles: Needles,
+        begins: Begins,
+        ends: Ends,
+        compare: F,
+        haystack_len: usize,
+        needle_len: usize,
+    ) -> Result<(), cuda_core::LaunchContractError>
+    where
+        Haystack: crate::DeviceReadAt,
+        Needles: crate::DeviceReadAt<Item = Haystack::Item>,
+        Begins: crate::DeviceWriteAt<Item = u64>,
+        Ends: crate::DeviceWriteAt<Item = u64>,
+        F: Fn(&Haystack::Item, &Haystack::Item) -> core::cmp::Ordering + Copy,
+    {
+        if needle_len == 0 {
+            return Ok(());
+        }
+        let blocks = needle_len.div_ceil(512).min(65_535) as u32;
+        let launch = cuda_core::LaunchConfig1D::new(blocks, 256, 0);
+        let prepared = self.range_module().prepare_range_equal_range_for(
+            &haystack, &needles, &begins, &ends, &compare, launch,
+        )?;
+        self.range_module().range_equal_range(
+            self.stream, &prepared, haystack, needles, begins, ends, compare,
+            haystack_len, needle_len,
+        )
+    }
+
     /// Launch the generic zero-materialization range transform kernel.
     #[doc(hidden)]
     pub fn range_transform<Input, Output, F>(

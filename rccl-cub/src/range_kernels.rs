@@ -32,6 +32,131 @@ mod device {
         fourth: T,
     }
 
+    #[inline(always)]
+    fn search_bound<Haystack, F>(
+        haystack: &Haystack,
+        needle: &Haystack::Item,
+        mut begin: usize,
+        mut end: usize,
+        compare: &F,
+        upper: bool,
+    ) -> usize
+    where
+        Haystack: crate::DeviceReadAt,
+        F: Fn(&Haystack::Item, &Haystack::Item) -> core::cmp::Ordering + Copy,
+    {
+        while begin < end {
+            let middle = begin + (end - begin) / 2;
+            // SAFETY: binary search keeps middle inside the supplied haystack.
+            let value = unsafe { haystack.read_at(middle) };
+            let order = compare(&value, needle);
+            if order == core::cmp::Ordering::Less
+                || (upper && order == core::cmp::Ordering::Equal)
+            {
+                begin = middle + 1;
+            } else {
+                end = middle;
+            }
+        }
+        begin
+    }
+
+    #[kernel(launch_context = launch_context)]
+    #[launch_bounds(256)]
+    #[launch_contract(domain = 1, block = (256, 1, 1))]
+    pub fn range_bound<Haystack, Needles, Output, F>(
+        haystack: Haystack,
+        needles: Needles,
+        output: Output,
+        compare: F,
+        haystack_len: usize,
+        needle_len: usize,
+        upper: bool,
+    )
+    where
+        Haystack: crate::DeviceReadAt,
+        Needles: crate::DeviceReadAt<Item = Haystack::Item>,
+        Output: crate::DeviceWriteAt<Item = u64>,
+        F: Fn(&Haystack::Item, &Haystack::Item) -> core::cmp::Ordering + Copy,
+    {
+        let _ = launch_context;
+        // Two contiguous 256-item stripes per block, matching DeviceFor.
+        let mut index = thread::blockIdx_x() as usize * 512
+            + thread::threadIdx_x() as usize;
+        let stride = thread::gridDim_x() as usize * 512;
+        while index < needle_len {
+            // SAFETY: host validation proves matching needle/output extents,
+            // and completion retains both inputs, output, and comparator.
+            let needle = unsafe { needles.read_at(index) };
+            let position = search_bound(&haystack, &needle, 0, haystack_len, &compare, upper);
+            unsafe { output.write_at(index, position as u64) };
+            if needle_len - index > 256 {
+                let second = index + 256;
+                // SAFETY: the subtraction check bounds the second stripe and
+                // proves the addition cannot overflow, including partial tiles.
+                let needle = unsafe { needles.read_at(second) };
+                let position = search_bound(&haystack, &needle, 0, haystack_len, &compare, upper);
+                unsafe { output.write_at(second, position as u64) };
+            }
+            if needle_len - index <= stride {
+                break;
+            }
+            index += stride;
+        }
+    }
+
+    #[kernel(launch_context = launch_context)]
+    #[launch_bounds(256)]
+    #[launch_contract(domain = 1, block = (256, 1, 1))]
+    pub fn range_equal_range<Haystack, Needles, Begins, Ends, F>(
+        haystack: Haystack,
+        needles: Needles,
+        begins: Begins,
+        ends: Ends,
+        compare: F,
+        haystack_len: usize,
+        needle_len: usize,
+    )
+    where
+        Haystack: crate::DeviceReadAt,
+        Needles: crate::DeviceReadAt<Item = Haystack::Item>,
+        Begins: crate::DeviceWriteAt<Item = u64>,
+        Ends: crate::DeviceWriteAt<Item = u64>,
+        F: Fn(&Haystack::Item, &Haystack::Item) -> core::cmp::Ordering + Copy,
+    {
+        let _ = launch_context;
+        let mut index = thread::blockIdx_x() as usize * 512
+            + thread::threadIdx_x() as usize;
+        let stride = thread::gridDim_x() as usize * 512;
+        while index < needle_len {
+            // SAFETY: the host validates both output lengths before launch.
+            let needle = unsafe { needles.read_at(index) };
+            let begin = search_bound(&haystack, &needle, 0, haystack_len, &compare, false);
+            // Keep both searches on the same tree across lanes. Starting at
+            // each lane's lower bound destroys shared early-tree accesses.
+            let end = search_bound(&haystack, &needle, 0, haystack_len, &compare, true);
+            unsafe {
+                begins.write_at(index, begin as u64);
+                ends.write_at(index, end as u64);
+            }
+            if needle_len - index > 256 {
+                let second = index + 256;
+                // SAFETY: the subtraction bounds both second-stripe outputs.
+                let needle = unsafe { needles.read_at(second) };
+                let begin = search_bound(&haystack, &needle, 0, haystack_len, &compare, false);
+                let end = search_bound(&haystack, &needle, 0, haystack_len, &compare, true);
+                unsafe {
+                    begins.write_at(second, begin as u64);
+                    ends.write_at(second, end as u64);
+                }
+            }
+            if needle_len - index <= stride {
+                break;
+            }
+            index += stride;
+        }
+    }
+
     #[kernel(launch_context = launch_context)]
     #[launch_bounds(256)]
     #[launch_contract(domain = 1, block = (256, 1, 1))]

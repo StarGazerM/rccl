@@ -151,3 +151,15 @@ name = "record_sort_benchmark"
 path = "examples/record_sort_benchmark.rs"
 test = false
 required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "sorted_search"
+path = "examples/sorted_search.rs"
+test = false
+required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "sorted_search_benchmark"
+path = "examples/sorted_search_benchmark.rs"
+test = false
+required-features = ["cuda-oxide-example"]
