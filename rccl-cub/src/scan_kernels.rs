@@ -8,7 +8,7 @@ pub const LOOKBACK_SCAN_THREADS: u32 = 128;
 pub const LOOKBACK_SCAN_ITEMS: usize = 15;
 pub const LOOKBACK_SCAN_TILE_ITEMS: usize = LOOKBACK_SCAN_THREADS as usize * LOOKBACK_SCAN_ITEMS;
 pub const LOOKBACK_SCAN_PADDING: usize = 32;
-const LOOKBACK_SCAN_SHARED_BYTES: usize = 8_192;
+pub(crate) const LOOKBACK_SCAN_SHARED_BYTES: usize = 8_192;
 
 macro_rules! for_each_lookback_item {
     ($item:ident, $body:block) => {{
@@ -151,7 +151,7 @@ mod device {
 
     #[kernel(launch_context = launch_context)]
     #[launch_bounds(128)]
-    #[launch_contract(domain = 1, block = (128, 1, 1))]
+    #[launch_contract(domain = 1, block = (128, 1, 1), dynamic_shared_range = (8192, 8192), dynamic_shared_alignment = 16)]
     pub fn device_scan_lookback_u32(
         input: &[u32],
         output: DisjointSlice<u32>,
@@ -159,11 +159,9 @@ mod device {
         len: usize,
     ) {
         let _ = launch_context;
-        let shared = crate::__private::static_block_shared_memory!(
-            __RCCL_SCAN_LOOKBACK_U32,
-            super::LOOKBACK_SCAN_SHARED_BYTES,
-            16usize
-        );
+        // Dynamic storage does not export module-global __shared_mem_N symbols,
+        // so this fixed kernel can coexist with caller-monomorphized radix PTX.
+        let shared = crate::__private::BlockSharedMemory::new(super::LOOKBACK_SCAN_SHARED_BYTES);
         let thread_index = thread::threadIdx_x() as usize;
         let tile_index = thread::blockIdx_x();
         let tile_base = tile_index as usize * super::LOOKBACK_SCAN_TILE_ITEMS;

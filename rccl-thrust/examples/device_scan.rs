@@ -43,7 +43,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let program = rccl_thrust::cuda::Program::load(&context)?;
     let execution = program.par(&stream)?;
 
-    for len in [0_usize, 1, 31, 32, 33, 255, 256, 257, 513, 65_537] {
+    for len in [
+        0_usize, 1, 31, 32, 33, 255, 256, 257, 513, 1919, 1920, 1921, 3840, 3841, 65_537,
+    ] {
         let input: Vec<u32> = (0..len)
             .map(|index| (index as u32).wrapping_mul(17).wrapping_add(1))
             .collect();

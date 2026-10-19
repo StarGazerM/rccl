@@ -357,8 +357,15 @@ impl<'stream, 'program> Launch<'stream, 'program> {
             .range_module()
             .prepare_range_bound_for(&haystack, &needles, &output, &compare, launch)?;
         self.range_module().range_bound(
-            self.stream, &prepared, haystack, needles, output, compare,
-            haystack_len, needle_len, upper,
+            self.stream,
+            &prepared,
+            haystack,
+            needles,
+            output,
+            compare,
+            haystack_len,
+            needle_len,
+            upper,
         )
     }
 
@@ -387,12 +394,19 @@ impl<'stream, 'program> Launch<'stream, 'program> {
         }
         let blocks = needle_len.div_ceil(512).min(65_535) as u32;
         let launch = cuda_core::LaunchConfig1D::new(blocks, 256, 0);
-        let prepared = self.range_module().prepare_range_equal_range_for(
-            &haystack, &needles, &begins, &ends, &compare, launch,
-        )?;
+        let prepared = self
+            .range_module()
+            .prepare_range_equal_range_for(&haystack, &needles, &begins, &ends, &compare, launch)?;
         self.range_module().range_equal_range(
-            self.stream, &prepared, haystack, needles, begins, ends, compare,
-            haystack_len, needle_len,
+            self.stream,
+            &prepared,
+            haystack,
+            needles,
+            begins,
+            ends,
+            compare,
+            haystack_len,
+            needle_len,
         )
     }
 
@@ -506,8 +520,11 @@ impl<'stream, 'program> Launch<'stream, 'program> {
         )?;
 
         let blocks = tile_count.min(u32::MAX as usize) as u32;
-        let scan_launch =
-            cuda_core::LaunchConfig1D::new(blocks, scan_kernels::LOOKBACK_SCAN_THREADS, 0);
+        let scan_launch = cuda_core::LaunchConfig1D::new(
+            blocks,
+            scan_kernels::LOOKBACK_SCAN_THREADS,
+            scan_kernels::LOOKBACK_SCAN_SHARED_BYTES as u32,
+        );
         let prepared = self
             .scan_module()
             .prepare_device_scan_lookback_u32(scan_launch)?;
