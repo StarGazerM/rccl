@@ -405,10 +405,13 @@ where
             actual: bins.len(),
         });
     }
-    if lookback.len() != blocks * 256 {
-        return Err(DeviceAlgorithmError::LengthMismatch {
+    // Lookback slots are addressed `block * 256 + digit` for the blocks of this
+    // sort and the whole buffer is zeroed before every pass, so a workspace
+    // sized for a longer input serves any shorter one.
+    if lookback.len() < blocks * 256 {
+        return Err(DeviceAlgorithmError::WorkspaceTooSmall {
             role: "radix lookback",
-            expected: blocks * 256,
+            required: blocks * 256,
             actual: lookback.len(),
         });
     }
