@@ -11,6 +11,7 @@ mod error;
 mod generation;
 mod grouped_reduction;
 mod histogram;
+mod lexicographic;
 mod merge;
 mod ordering;
 mod record_sort;
@@ -56,6 +57,7 @@ pub use rccl_cub::{
     DeviceHistogramLevelsView, DeviceRange, DoubleBuffer, HistogramRegion, KeyValue,
     RandomAccessRange, ReadRange, WriteRange,
 };
+pub use lexicographic::{LexicographicStrategy, MAX_LEXICOGRAPHIC_COLUMNS, sort_columns_lexicographic};
 pub use rccl_memory as memory;
 pub use record_sort::{
     PendingRowPayloadSort, PendingRowPayloadSortInto, PendingRowSort, PendingRowSortInto,

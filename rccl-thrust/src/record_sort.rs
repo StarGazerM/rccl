@@ -89,7 +89,7 @@ pub type PendingRowPayloadSortInto<'borrow, 'stream, 'program, V, const N: usize
     >;
 
 #[inline(always)]
-fn ascending<const N: usize>(left: &RelationRow<N>, right: &RelationRow<N>) -> Ordering {
+pub(crate) fn ascending<const N: usize>(left: &RelationRow<N>, right: &RelationRow<N>) -> Ordering {
     macro_rules! compare_column {
         ($column:expr) => {
             if N > $column {

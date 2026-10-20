@@ -105,6 +105,12 @@ test = false
 required-features = ["cuda-oxide-example"]
 
 [[example]]
+name = "lexicographic_sort_strategies"
+path = "examples/lexicographic_sort_strategies.rs"
+test = false
+required-features = ["cuda-oxide-example"]
+
+[[example]]
 name = "copy_gather_generation_benchmark"
 path = "examples/copy_gather_generation_benchmark.rs"
 test = false
