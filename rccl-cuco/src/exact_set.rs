@@ -3,7 +3,7 @@ use std::{error::Error, fmt};
 
 use cuda_core::{
     CudaStream, DeviceCopy, DriverError, LaunchContractError,
-    memory::{memcpy_dtoh_async, memset_d8_async},
+    simt::memory::{memcpy_dtoh_async, memset_d8_async},
 };
 use cuda_device::{
     atomic::{AtomicOrdering, DeviceAtomicU32, DeviceAtomicU64},

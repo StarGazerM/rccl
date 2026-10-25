@@ -65,7 +65,7 @@ where
             if input.is_empty() {
                 return Ok(());
             }
-            cuda_core::memory::memcpy_dtod_async(
+            cuda_core::simt::memory::memcpy_dtod_async(
                 output.cu_deviceptr(),
                 input.cu_deviceptr(),
                 input.num_bytes(),

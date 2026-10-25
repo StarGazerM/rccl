@@ -2,7 +2,7 @@ use core::marker::PhantomData;
 
 use cuda_core::{
     CudaStream, DeviceCopy,
-    memory::{memcpy_dtoh_async, memset_d8_async},
+    simt::memory::{memcpy_dtoh_async, memset_d8_async},
 };
 use cuda_device::{
     atomic::DeviceAtomicU64,

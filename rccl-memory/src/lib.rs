@@ -14,7 +14,7 @@
 
 use cuda_core::{
     CudaContext, CudaStream, DeviceCopy, DriverError, IntoResult,
-    memory::{
+    simt::memory::{
         free_async, free_host, free_sync, malloc_async, malloc_host, malloc_sync,
         memcpy_dtod_async, memcpy_dtoh_async, memcpy_htod_async, memset_d8_async,
     },

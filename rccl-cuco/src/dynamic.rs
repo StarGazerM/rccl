@@ -1,6 +1,6 @@
 use cuda_core::{
     CudaStream, DeviceBuffer as CudaDeviceBuffer, DeviceCopy,
-    memory::{memcpy_dtoh_async, memcpy_htod_async},
+    simt::memory::{memcpy_dtoh_async, memcpy_htod_async},
 };
 use rccl_memory::{
     BorrowedCudaAsyncMemoryResource, ContiguousDeviceRange, ContiguousDeviceRangeMut,

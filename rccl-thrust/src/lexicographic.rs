@@ -116,7 +116,7 @@ fn scratch<T: cuda_core::DeviceCopy>(stream: &cuda_core::CudaStream, len: usize)
     // element is written by a stream-ordered kernel before any read.
     unsafe {
         context.bind_to_thread().map_err(DeviceAlgorithmError::Driver)?;
-        let pointer = cuda_core::memory::malloc_async(stream.cu_stream(), bytes).map_err(DeviceAlgorithmError::Driver)?;
+        let pointer = cuda_core::simt::memory::malloc_async(stream.cu_stream(), bytes).map_err(DeviceAlgorithmError::Driver)?;
         Ok(DeviceBuffer::from_raw_parts(pointer, len, context))
     }
 }

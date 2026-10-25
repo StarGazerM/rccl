@@ -394,7 +394,7 @@ fn uninitialized_buffer_requires_explicit_initialization_transition() -> Result<
     let storage =
         DeviceUninitBuffer::<u32, _>::new_in(CudaAsyncMemoryResource::new(context), &stream, 17)?;
     unsafe {
-        cuda_core::memory::memset_d8_async(
+        cuda_core::simt::memory::memset_d8_async(
             storage.cu_deviceptr(),
             0,
             storage.len() * size_of::<u32>(),
@@ -529,7 +529,7 @@ fn coalescing_pool_reuses_across_streams_with_dependency() -> Result<(), Box<dyn
     let first = pool.allocate(layout, &first_stream)?;
     let first_ptr = first.cu_deviceptr();
     unsafe {
-        cuda_core::memory::memset_d8_async(
+        cuda_core::simt::memory::memset_d8_async(
             first.cu_deviceptr(),
             0xA5,
             first.size(),
@@ -541,7 +541,7 @@ fn coalescing_pool_reuses_across_streams_with_dependency() -> Result<(), Box<dyn
     let reused = pool.allocate(layout, &second_stream)?;
     assert_eq!(reused.cu_deviceptr(), first_ptr);
     unsafe {
-        cuda_core::memory::memset_d8_async(
+        cuda_core::simt::memory::memset_d8_async(
             reused.cu_deviceptr(),
             0x5A,
             reused.size(),
@@ -849,7 +849,7 @@ fn coalescing_pool_is_thread_safe_under_multi_stream_load() -> Result<(), Box<dy
                             &stream,
                         )?;
                         unsafe {
-                            cuda_core::memory::memset_d8_async(
+                            cuda_core::simt::memory::memset_d8_async(
                                 block.cu_deviceptr(),
                                 thread_index as u8,
                                 block.size(),
@@ -908,7 +908,7 @@ fn pinned_host_resource_is_visible_to_host_and_device() -> Result<(), Box<dyn Er
     let block = pinned.allocate(Layout::from_size_align(4096, 256)?, &stream)?;
     unsafe {
         std::ptr::write_bytes(block.host_ptr(), 0x11, block.size());
-        cuda_core::memory::memset_d8_async(
+        cuda_core::simt::memory::memset_d8_async(
             block.cu_deviceptr(),
             0x2A,
             block.size(),
@@ -941,7 +941,7 @@ fn system_memory_resource_is_visible_to_host_and_device_when_supported()
     assert_eq!(block.cu_deviceptr() as usize % 256, 0);
     unsafe {
         std::ptr::write_bytes(block.host_ptr(), 0x11, block.size());
-        cuda_core::memory::memset_d8_async(
+        cuda_core::simt::memory::memset_d8_async(
             block.cu_deviceptr(),
             0x3A,
             block.size(),
@@ -975,7 +975,7 @@ fn sam_headroom_resource_preserves_reserved_device_capacity() -> Result<(), Box<
     let block = system.allocate(Layout::from_size_align(4096, 256)?, &stream)?;
     unsafe {
         std::ptr::write_bytes(block.host_ptr(), 0x27, block.size());
-        cuda_core::memory::memset_d8_async(
+        cuda_core::simt::memory::memset_d8_async(
             block.cu_deviceptr(),
             0x4B,
             block.size(),

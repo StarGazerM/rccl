@@ -48,7 +48,7 @@ fn reset<T: DeviceCopy>(
     values: &mut DeviceBuffer<T>,
 ) -> Result<(), cuda_core::DriverError> {
     unsafe {
-        cuda_core::memory::memcpy_dtod_async(
+        cuda_core::simt::memory::memcpy_dtod_async(
             values.cu_deviceptr(),
             baseline.cu_deviceptr(),
             baseline.num_bytes(),

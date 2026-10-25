@@ -188,6 +188,11 @@ and `Cargo.lock` use the same immutable fork revision. CUDA path defaults remain
 overridable through the environment. The fork's scheduled upstream checker
 tracks semantic integration against NVlabs/cuda-oxide.
 
+The maintained monorepo exposes low-level SIMT memory operations under
+`cuda_core::simt::memory`; RCCL uses that namespace rather than the shared
+crate's Tile API. `CudaContext`, `CudaStream`, and dimensional launch
+configurations remain available at the `cuda_core` root.
+
 Generated LLVM IR, optimized IR, PTX and embedding objects go under
 `target/oxide-ir/` via `CUDA_OXIDE_PTX_DIR` in `.cargo/config.toml`. Cargo
 resolves this path relative to the workspace, not the invoking directory.
