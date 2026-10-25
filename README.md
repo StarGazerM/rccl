@@ -177,8 +177,8 @@ The CUDA compiler contract is intentionally single-source and checked:
 |---|---|
 | Rust | stable `1.99.1` from `rust-toolchain.toml`, with `RUSTC_BOOTSTRAP=1` |
 | cuda-oxide fork | `https://github.com/StarGazerM/cuda-oxide.git` |
-| cuda-oxide revision | `5f7c34fddadcf250f2e45d0cffe83a3d27f2bea3` |
-| default CUDA/NVVM/libdevice | NVIDIA HPC SDK 25.5, CUDA 12.9, as recorded in `.cargo/config.toml` |
+| cuda-oxide revision | `496c01bfc5df0dad510bc4ca76e2260d6f586b8f` on the maintained `mini-linq/main` fork branch |
+| default CUDA/NVVM/libdevice | NVIDIA HPC SDK 25.9, CUDA 13.0, as recorded in `.cargo/config.toml`; cuRAND headers are in the SDK's `math_libs/13.0` include directory |
 
 `scripts/setup-cuda-oxide.sh` is the only compiler setup flow. The pinned RCCL
 fork contains the architecture cfg, read-only vector, safe bounds-proved
@@ -192,6 +192,9 @@ The maintained monorepo exposes low-level SIMT memory operations under
 `cuda_core::simt::memory`; RCCL uses that namespace rather than the shared
 crate's Tile API. `CudaContext`, `CudaStream`, and dimensional launch
 configurations remain available at the `cuda_core` root.
+The shared host bindings require CUDA 13.0 or newer. Managed prefetch and
+preferred-location advice use the CUDA 13 `_v2` driver entry points with
+explicit device/host `CUmemLocation` values.
 
 The setup script installs `cargo-oxide` from the monorepo's
 `cuda-oxide/crates/cargo-oxide` directory and runs setup from `cuda-oxide/`.

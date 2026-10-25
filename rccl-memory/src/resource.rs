@@ -406,17 +406,17 @@ impl SamHeadroomMemoryResource {
         &self,
         ptr: sys::CUdeviceptr,
         bytes: usize,
-        device: sys::CUdevice,
+        location: sys::CUmemLocation,
     ) -> Result<(), MemoryError> {
         if bytes == 0 {
             return Ok(());
         }
         unsafe {
-            sys::cuMemAdvise(
+            sys::cuMemAdvise_v2(
                 ptr,
                 bytes,
                 sys::CUmem_advise_enum_CU_MEM_ADVISE_SET_PREFERRED_LOCATION,
-                device,
+                location,
             )
             .result()?;
         }
@@ -446,13 +446,21 @@ unsafe impl DeviceAllocator for SamHeadroomMemoryResource {
             let gpu_bytes = allocatable.min(block.size()) / DEVICE_ALLOCATION_ALIGNMENT
                 * DEVICE_ALLOCATION_ALIGNMENT;
             let host_bytes = block.size() - gpu_bytes;
-            self.advise(block.cu_deviceptr(), gpu_bytes, self.context().cu_device())?;
-            // CUDA's driver API uses -1 for CU_DEVICE_CPU in pre-CUDA-13
-            // preferred-location advice.
+            self.advise(
+                block.cu_deviceptr(),
+                gpu_bytes,
+                sys::CUmemLocation {
+                    type_: sys::CUmemLocationType_enum_CU_MEM_LOCATION_TYPE_DEVICE,
+                    id: self.context().cu_device(),
+                },
+            )?;
             self.advise(
                 block.cu_deviceptr() + gpu_bytes as sys::CUdeviceptr,
                 host_bytes,
-                -1,
+                sys::CUmemLocation {
+                    type_: sys::CUmemLocationType_enum_CU_MEM_LOCATION_TYPE_HOST,
+                    id: 0,
+                },
             )
         })();
         if let Err(error) = advice {

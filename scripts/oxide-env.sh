@@ -5,7 +5,7 @@
 export RUSTC_BOOTSTRAP=1
 if [ -z "${CUDA_HOME:-}" ]; then
   for rccl_cuda_root in \
-    /opt/nvidia/hpc_sdk/Linux_x86_64/25.5/cuda/12.9 \
+    /opt/nvidia/hpc_sdk/Linux_x86_64/25.9/cuda/13.0 \
     /usr/local/cuda
   do
     if [ -d "$rccl_cuda_root" ]; then
@@ -24,6 +24,10 @@ export CUDA_HOME
 export CUDA_TOOLKIT_PATH="${CUDA_TOOLKIT_PATH:-$CUDA_HOME}"
 export LIBNVVM_PATH="${LIBNVVM_PATH:-$CUDA_TOOLKIT_PATH/nvvm/lib64/libnvvm.so}"
 export CUDA_OXIDE_LIBDEVICE="${CUDA_OXIDE_LIBDEVICE:-$CUDA_TOOLKIT_PATH/nvvm/libdevice/libdevice.10.bc}"
+if [ -z "${BINDGEN_EXTRA_CLANG_ARGS:-}" ] &&
+   [ "$CUDA_TOOLKIT_PATH" = /opt/nvidia/hpc_sdk/Linux_x86_64/25.9/cuda/13.0 ]; then
+  export BINDGEN_EXTRA_CLANG_ARGS=-I/opt/nvidia/hpc_sdk/Linux_x86_64/25.9/math_libs/13.0/targets/x86_64-linux/include
+fi
 
 if [ -z "${LIBCLANG_PATH:-}" ]; then
   for rccl_clang_root in \

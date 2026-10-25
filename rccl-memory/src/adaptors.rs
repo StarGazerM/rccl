@@ -219,10 +219,14 @@ impl<U: DeviceAllocator> PrefetchMemoryResource<U> {
             return Ok(());
         }
         let result = unsafe {
-            cuda_core::sys::cuMemPrefetchAsync(
+            cuda_core::sys::cuMemPrefetchAsync_v2(
                 block.cu_deviceptr(),
                 block.size(),
-                self.context().cu_device(),
+                cuda_core::sys::CUmemLocation {
+                    type_: cuda_core::sys::CUmemLocationType_enum_CU_MEM_LOCATION_TYPE_DEVICE,
+                    id: self.context().cu_device(),
+                },
+                0,
                 stream.cu_stream(),
             )
         };

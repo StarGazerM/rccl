@@ -3,10 +3,11 @@
 [env]
 # The pinned stable compiler needs unstable rustc interfaces for cuda-oxide.
 RUSTC_BOOTSTRAP = "1"
-CUDA_HOME = { value = "/opt/nvidia/hpc_sdk/Linux_x86_64/25.5/cuda/12.9", force = false }
-CUDA_TOOLKIT_PATH = { value = "/opt/nvidia/hpc_sdk/Linux_x86_64/25.5/cuda/12.9", force = false }
-LIBNVVM_PATH = { value = "/opt/nvidia/hpc_sdk/Linux_x86_64/25.5/cuda/12.9/nvvm/lib64/libnvvm.so", force = false }
-CUDA_OXIDE_LIBDEVICE = { value = "/opt/nvidia/hpc_sdk/Linux_x86_64/25.5/cuda/12.9/nvvm/libdevice/libdevice.10.bc", force = false }
+CUDA_HOME = { value = "/opt/nvidia/hpc_sdk/Linux_x86_64/25.9/cuda/13.0", force = false }
+CUDA_TOOLKIT_PATH = { value = "/opt/nvidia/hpc_sdk/Linux_x86_64/25.9/cuda/13.0", force = false }
+LIBNVVM_PATH = { value = "/opt/nvidia/hpc_sdk/Linux_x86_64/25.9/cuda/13.0/nvvm/lib64/libnvvm.so", force = false }
+CUDA_OXIDE_LIBDEVICE = { value = "/opt/nvidia/hpc_sdk/Linux_x86_64/25.9/cuda/13.0/nvvm/libdevice/libdevice.10.bc", force = false }
+BINDGEN_EXTRA_CLANG_ARGS = { value = "-I/opt/nvidia/hpc_sdk/Linux_x86_64/25.9/math_libs/13.0/targets/x86_64-linux/include", force = false }
 LIBCLANG_PATH = { value = "/lib/x86_64-linux-gnu", force = false }
 # Keep cuda-oxide IR, PTX, and embedding objects out of the source tree.
 # Override per build when compiling concurrently with different configurations.
