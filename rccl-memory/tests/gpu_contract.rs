@@ -733,6 +733,56 @@ fn coalescing_pool_keeps_upstream_chunks_separate() -> Result<(), Box<dyn Error>
 }
 
 #[test]
+fn coalescing_pool_release_resets_geometric_growth() -> Result<(), Box<dyn Error>> {
+    let _guard = gpu_test_lock();
+    let Some(context) = context_or_skip() else {
+        return Ok(());
+    };
+    let stream = context.default_stream();
+    let mib = 1 << 20;
+    let pool = PoolMemoryResource::new(CudaAsyncMemoryResource::new(context.clone()), 0, 8 * mib)?;
+    let first = pool.allocate(Layout::from_size_align(mib, 256)?, &stream)?;
+    let temporary = pool.allocate(Layout::from_size_align(2 * mib, 256)?, &stream)?;
+    assert_eq!(pool.stats().pool_size, 3 * mib);
+    assert_eq!(pool.release_unused(&stream)?, 0);
+    unsafe { pool.deallocate(temporary, &stream)? };
+    assert_eq!(pool.release_unused(&stream)?, 2 * mib);
+    assert_eq!(pool.stats().allocated_bytes, mib);
+
+    // Reclaiming the second chunk must not make a tiny request allocate the
+    // old 4-MiB growth target while the first chunk remains live.
+    let tiny = Layout::from_size_align(256, 256)?;
+    let next = pool.allocate(tiny, &stream)?;
+    assert_eq!(pool.stats().pool_size, 2 * mib);
+    unsafe {
+        pool.deallocate(next, &stream)?;
+        pool.deallocate(first, &stream)?;
+    }
+    assert_eq!(pool.release_unused(&stream)?, 2 * mib);
+    assert_eq!(pool.stats().pool_size, 0);
+
+    // Empty-pool reuse stays bounded for both unlimited pools and maxima
+    // smaller than the default growth size.
+    for maximum in [0, mib / 4, 8 * mib] {
+        let pool = PoolMemoryResource::new(
+            CudaAsyncMemoryResource::new(context.clone()),
+            0,
+            maximum,
+        )?;
+        let expected = if maximum == 0 { mib } else { maximum.min(mib) };
+        for _ in 0..4 {
+            let block = pool.allocate(tiny, &stream)?;
+            assert_eq!(pool.stats().pool_size, expected);
+            unsafe { pool.deallocate(block, &stream)? };
+            assert_eq!(pool.release_unused(&stream)?, expected);
+            assert_eq!(pool.stats().pool_size, 0);
+        }
+    }
+    stream.synchronize()?;
+    Ok(())
+}
+
+#[test]
 fn coalescing_pool_reuses_after_deallocation_stream_is_destroyed() -> Result<(), Box<dyn Error>> {
     let _guard = gpu_test_lock();
     let Some(context) = context_or_skip() else {

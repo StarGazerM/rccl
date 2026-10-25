@@ -143,6 +143,9 @@ impl<U: DeviceAllocator> PoolMemoryResource<U> {
     ///
     /// Dependencies are inserted into `stream`; no device-wide synchronization
     /// is performed. Fragmented or partially allocated chunks remain pooled.
+    /// Reclaiming chunks also reduces the next growth target to the remaining
+    /// pool size (with a 1-MiB floor, bounded by the configured maximum). Repeated
+    /// allocate/release cycles therefore do not retain a historical growth target.
     pub fn release_unused(&self, stream: &CudaStream) -> Result<usize, MemoryError> {
         validate_stream(self.context(), stream)?;
         let stream_id = stream_id(stream)?;
@@ -173,6 +176,10 @@ impl<U: DeviceAllocator> PoolMemoryResource<U> {
             let _free = remove_free(&mut state, upstream_ptr).expect("free block checked above");
             let upstream_block = state.upstream_blocks.swap_remove(index);
             state.pool_size -= upstream_size;
+            state.next_growth = state
+                .next_growth
+                .min(state.pool_size.max(DEFAULT_GROWTH_SIZE))
+                .min(self.maximum_size);
             // The affine block token is consumed even when the upstream
             // resource reports a failure. The allocation may leak, but it
             // must not remain available for reuse without an ownership token.

@@ -42,6 +42,12 @@ machines without a CUDA device can still run `cargo test`.
 | `sam_headroom_memory_resource` | `SamHeadroomMemoryResource` | implemented | all-host headroom and host/device visibility tests; split-range pressure test pending |
 | `polymorphic_allocator` / Thrust allocator | Rust collection/CCCL interop traits | design pending | algorithm integration without copies |
 
+`PoolMemoryResource::release_unused` returns only wholly free upstream chunks,
+preserving recorded stream dependencies and leaving partially live chunks
+reserved. Reclamation also caps future geometric growth by the remaining pool
+size (with a 1-MiB floor, subject to the configured maximum), rather than keeping
+the historical high-water growth target across allocate/release cycles.
+
 ## Container parity
 
 | RMM container contract | Rust status |
