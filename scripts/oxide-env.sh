@@ -2,6 +2,7 @@
 # Source this file before invoking cargo-oxide. Explicit caller settings win;
 # otherwise prefer this development host's HPC SDK and then CUDA's conventional
 # system installation. Architecture selection remains a cargo-oxide input.
+export RUSTC_BOOTSTRAP=1
 if [ -z "${CUDA_HOME:-}" ]; then
   for rccl_cuda_root in \
     /opt/nvidia/hpc_sdk/Linux_x86_64/25.5/cuda/12.9 \

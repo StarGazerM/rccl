@@ -175,7 +175,7 @@ The CUDA compiler contract is intentionally single-source and checked:
 
 | Input | Required identity |
 |---|---|
-| Rust | `nightly-2026-08-28` from `rust-toolchain.toml` |
+| Rust | stable `1.99.1` from `rust-toolchain.toml`, with `RUSTC_BOOTSTRAP=1` |
 | cuda-oxide fork | `https://github.com/StarGazerM/cuda-oxide.git` |
 | cuda-oxide revision | `5f7c34fddadcf250f2e45d0cffe83a3d27f2bea3` |
 | default CUDA/NVVM/libdevice | NVIDIA HPC SDK 25.5, CUDA 12.9, as recorded in `.cargo/config.toml` |
@@ -192,6 +192,11 @@ The maintained monorepo exposes low-level SIMT memory operations under
 `cuda_core::simt::memory`; RCCL uses that namespace rather than the shared
 crate's Tile API. `CudaContext`, `CudaStream`, and dimensional launch
 configurations remain available at the `cuda_core` root.
+
+The setup script installs `cargo-oxide` from the monorepo's
+`cuda-oxide/crates/cargo-oxide` directory and runs setup from `cuda-oxide/`.
+Both `.cargo/config.toml` and `scripts/oxide-env.sh` enable `RUSTC_BOOTSTRAP=1`
+for the compiler's unstable rustc interfaces on the pinned stable toolchain.
 
 Generated LLVM IR, optimized IR, PTX and embedding objects go under
 `target/oxide-ir/` via `CUDA_OXIDE_PTX_DIR` in `.cargo/config.toml`. Cargo

@@ -49,10 +49,10 @@ expected_toolchain="$(toml_string channel "$rust_toolchain_file")"
 expected_origin="$(sh_assignment oxide_origin "$setup_script")"
 expected_commit="$(sh_assignment oxide_commit "$setup_script")"
 setup_toolchain="$(sh_assignment oxide_toolchain "$setup_script")"
-[[ "$expected_toolchain" =~ ^nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] ||
-  fail "invalid nightly pin in rust-toolchain.toml: $expected_toolchain"
+[[ "$expected_toolchain" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+  fail "invalid stable Rust pin in rust-toolchain.toml: $expected_toolchain"
 [[ "$setup_toolchain" == "$expected_toolchain" ]] ||
-  fail "mismatched nightly pin: rust-toolchain.toml=$expected_toolchain, setup-cuda-oxide.sh=$setup_toolchain"
+  fail "mismatched Rust pin: rust-toolchain.toml=$expected_toolchain, setup-cuda-oxide.sh=$setup_toolchain"
 [[ "$expected_origin" == 'https://github.com/StarGazerM/cuda-oxide.git' ]] ||
   fail "unexpected cuda-oxide origin in setup-cuda-oxide.sh: $expected_origin"
 [[ "$expected_commit" =~ ^[0-9a-f]{40}$ ]] ||

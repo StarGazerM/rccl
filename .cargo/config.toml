@@ -1,6 +1,8 @@
 # Local NVIDIA HPC SDK installation. Values are defaults and remain overridable
 # from the environment on machines with a conventional /usr/local/cuda layout.
 [env]
+# The pinned stable compiler needs unstable rustc interfaces for cuda-oxide.
+RUSTC_BOOTSTRAP = "1"
 CUDA_HOME = { value = "/opt/nvidia/hpc_sdk/Linux_x86_64/25.5/cuda/12.9", force = false }
 CUDA_TOOLKIT_PATH = { value = "/opt/nvidia/hpc_sdk/Linux_x86_64/25.5/cuda/12.9", force = false }
 LIBNVVM_PATH = { value = "/opt/nvidia/hpc_sdk/Linux_x86_64/25.5/cuda/12.9/nvvm/lib64/libnvvm.so", force = false }

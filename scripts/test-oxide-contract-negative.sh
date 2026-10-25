@@ -46,7 +46,7 @@ expect_rejection() {
 populate_fixture
 "$fixture/scripts/check-oxide-contract.sh" >/dev/null
 
-expected_commit=5f7c34fddadcf250f2e45d0cffe83a3d27f2bea3
+expected_commit="$(awk -F"'" '/^oxide_commit=/ { print $2; exit }' "$repo_root/scripts/setup-cuda-oxide.sh")"
 mismatched_commit=0000000000000000000000000000000000000000
 sed -i "s/$expected_commit/$mismatched_commit/g" "$fixture/rccl-cub/Cargo.toml"
 expect_rejection 'manifest pin mismatch' 'manifest pin mismatch in rccl-cub/Cargo.toml' \

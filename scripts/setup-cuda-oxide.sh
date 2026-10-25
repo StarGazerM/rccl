@@ -6,7 +6,7 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
 oxide_origin='https://github.com/StarGazerM/cuda-oxide.git'
 oxide_commit='5f7c34fddadcf250f2e45d0cffe83a3d27f2bea3'
-oxide_toolchain='nightly-2026-08-28'
+oxide_toolchain='1.99.1'
 oxide_checkout=${1:-"$repo_root/target/cuda-oxide-rccl"}
 
 if [ ! -d "$oxide_checkout/.git" ]; then
@@ -30,9 +30,9 @@ test "$(git -C "$oxide_checkout" rev-parse HEAD)" = "$oxide_commit"
 rustup toolchain install "$oxide_toolchain" --profile minimal \
   --component rust-src --component rustc-dev --component llvm-tools
 cargo +"$oxide_toolchain" install \
-  --path "$oxide_checkout/crates/cargo-oxide" --locked --force
+  --path "$oxide_checkout/cuda-oxide/crates/cargo-oxide" --locked --force
 (
-  cd "$oxide_checkout"
+  cd "$oxide_checkout/cuda-oxide"
   cargo +"$oxide_toolchain" oxide setup
 )
 
