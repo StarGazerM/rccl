@@ -11,6 +11,6 @@ readme = "README.md"
 include = ["src/**", "examples/**", "README.md", "RMM_PARITY.md", "LICENSE-*", "Cargo.toml"]
 
 [dependencies]
-cuda-core = { git = "https://github.com/StarGazerM/cuda-oxide.git", rev = "496c01bfc5df0dad510bc4ca76e2260d6f586b8f" }
-cuda-device = { git = "https://github.com/StarGazerM/cuda-oxide.git", rev = "496c01bfc5df0dad510bc4ca76e2260d6f586b8f" }
-cuda-host = { git = "https://github.com/StarGazerM/cuda-oxide.git", rev = "496c01bfc5df0dad510bc4ca76e2260d6f586b8f" }
+cuda-core = { git = "https://github.com/StarGazerM/cuda-oxide.git", rev = "e3ae5f081fbf3e515ab7031779a2bfe0bb1392ed" }
+cuda-device = { git = "https://github.com/StarGazerM/cuda-oxide.git", rev = "e3ae5f081fbf3e515ab7031779a2bfe0bb1392ed" }
+cuda-host = { git = "https://github.com/StarGazerM/cuda-oxide.git", rev = "e3ae5f081fbf3e515ab7031779a2bfe0bb1392ed" }
