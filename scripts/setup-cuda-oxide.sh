@@ -5,7 +5,7 @@ set -eu
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
 oxide_origin='https://github.com/StarGazerM/cuda-oxide.git'
-oxide_commit='d89093b8149b93c63324c5a0e687a097061f117c'
+oxide_commit='e7d4a63baac987e2094cc874aac31998d2cbf32a'
 oxide_toolchain='1.99.1'
 oxide_checkout=${1:-"$repo_root/target/cuda-oxide-rccl"}
 

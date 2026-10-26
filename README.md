@@ -177,7 +177,7 @@ The CUDA compiler contract is intentionally single-source and checked:
 |---|---|
 | Rust | stable `1.99.1` from `rust-toolchain.toml`, with `RUSTC_BOOTSTRAP=1` |
 | cuda-oxide fork | `https://github.com/StarGazerM/cuda-oxide.git` |
-| cuda-oxide revision | `d89093b8149b93c63324c5a0e687a097061f117c` on the maintained `mini-linq/main` fork branch; AOT preserves LLVM/PTX code generation, assembles with provenance-checked ptxas, and merges cross-crate inputs at build time without embedding compile-only inputs |
+| cuda-oxide revision | `e7d4a63baac987e2094cc874aac31998d2cbf32a` on the maintained `mini-linq/main` fork branch; AOT preserves LLVM/PTX code generation, assembles with provenance-checked ptxas, and merges cross-crate inputs at build time without embedding compile-only inputs |
 | default CUDA/NVVM/libdevice | NVIDIA HPC SDK 25.9, CUDA 13.0, as recorded in `.cargo/config.toml`; cuRAND headers are in the SDK's `math_libs/13.0` include directory |
 
 `scripts/setup-cuda-oxide.sh` is the only compiler setup flow. The pinned RCCL
