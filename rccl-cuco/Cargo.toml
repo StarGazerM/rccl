@@ -14,9 +14,9 @@ include = ["src/**", "examples/**", "README.md", "LICENSE-*", "Cargo.toml"]
 cuda-oxide-example = []
 
 [dependencies]
-cuda-core = { git = "https://github.com/StarGazerM/cuda-oxide.git", rev = "1c1c4210522089bc25cc32f4808b2a06e91ff9e4" }
-cuda-device = { git = "https://github.com/StarGazerM/cuda-oxide.git", rev = "1c1c4210522089bc25cc32f4808b2a06e91ff9e4" }
-cuda-host = { git = "https://github.com/StarGazerM/cuda-oxide.git", rev = "1c1c4210522089bc25cc32f4808b2a06e91ff9e4" }
+cuda-core = { git = "https://github.com/StarGazerM/cuda-oxide.git", rev = "299eda41b287642ef3323144d8fef8f16fe4fbe1" }
+cuda-device = { git = "https://github.com/StarGazerM/cuda-oxide.git", rev = "299eda41b287642ef3323144d8fef8f16fe4fbe1" }
+cuda-host = { git = "https://github.com/StarGazerM/cuda-oxide.git", rev = "299eda41b287642ef3323144d8fef8f16fe4fbe1" }
 rccl-memory = { path = "../rccl-memory" }
 rccl-cub = { path = "../rccl-cub" }
 
