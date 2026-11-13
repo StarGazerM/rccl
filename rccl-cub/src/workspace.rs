@@ -284,6 +284,114 @@ pub fn device_merge_sort_pairs_workspace<K: DeviceCopy, V: DeviceCopy>(
     ))
 }
 
+/// Allocate reusable workspace through the supplied stream-ordered allocator.
+pub fn device_radix_sort_keys_buffer_workspace_in<'stream, K: RadixKey, A: rccl_memory::DeviceAllocator + Clone>(
+    allocator: A, execution: &Launch<'stream, '_>, len: usize,
+) -> Result<DeviceRadixSortBufferWorkspace<rccl_memory::DeviceBuffer<'stream, u64, A>, rccl_memory::DeviceBuffer<'stream, i32, A>, rccl_memory::DeviceBuffer<'stream, i32, A>>, DeviceAlgorithmError> {
+    let (bins, lookback, counters) = radix_control_lengths(len, radix_keys_policy::<K>());
+    let bins = rccl_memory::DeviceBuffer::<u64, _>::zeroed_in(allocator.clone(), execution.stream(), bins)
+        .map_err(DeviceAlgorithmError::Memory)?;
+    let lookback = rccl_memory::DeviceBuffer::<i32, _>::zeroed_in(allocator.clone(), execution.stream(), lookback)
+        .map_err(DeviceAlgorithmError::Memory)?;
+    let counters = rccl_memory::DeviceBuffer::<i32, _>::zeroed_in(allocator.clone(), execution.stream(), counters)
+        .map_err(DeviceAlgorithmError::Memory)?;
+    Ok(DeviceRadixSortBufferWorkspace::__from_parts(bins, lookback, counters))
+}
+
+/// Allocate reusable workspace through the supplied stream-ordered allocator.
+pub fn device_radix_sort_pairs_buffer_workspace_in<'stream, K: RadixKey, V: RadixValue, A: rccl_memory::DeviceAllocator + Clone>(
+    allocator: A, execution: &Launch<'stream, '_>, len: usize,
+) -> Result<DeviceRadixSortBufferWorkspace<rccl_memory::DeviceBuffer<'stream, u64, A>, rccl_memory::DeviceBuffer<'stream, i32, A>, rccl_memory::DeviceBuffer<'stream, i32, A>>, DeviceAlgorithmError> {
+    let (bins, lookback, counters) = radix_control_lengths(len, radix_pairs_policy::<K, V>());
+    let bins = rccl_memory::DeviceBuffer::<u64, _>::zeroed_in(allocator.clone(), execution.stream(), bins)
+        .map_err(DeviceAlgorithmError::Memory)?;
+    let lookback = rccl_memory::DeviceBuffer::<i32, _>::zeroed_in(allocator.clone(), execution.stream(), lookback)
+        .map_err(DeviceAlgorithmError::Memory)?;
+    let counters = rccl_memory::DeviceBuffer::<i32, _>::zeroed_in(allocator.clone(), execution.stream(), counters)
+        .map_err(DeviceAlgorithmError::Memory)?;
+    Ok(DeviceRadixSortBufferWorkspace::__from_parts(bins, lookback, counters))
+}
+
+/// Allocate reusable workspace through the supplied stream-ordered allocator.
+pub fn device_radix_sort_keys_workspace_in<'stream, K: RadixKey, A: rccl_memory::DeviceAllocator + Clone>(
+    allocator: A, execution: &Launch<'stream, '_>, len: usize,
+) -> Result<DeviceRadixSortKeysWorkspace<K, rccl_memory::DeviceBuffer<'stream, K, A>, rccl_memory::DeviceBuffer<'stream, u64, A>, rccl_memory::DeviceBuffer<'stream, i32, A>, rccl_memory::DeviceBuffer<'stream, i32, A>>, DeviceAlgorithmError> {
+    let (bins, lookback, counters) = radix_control_lengths(len, radix_keys_policy::<K>());
+    let scratch_keys = rccl_memory::DeviceBuffer::<K, _>::zeroed_in(allocator.clone(), execution.stream(), len)
+        .map_err(DeviceAlgorithmError::Memory)?;
+    let bins = rccl_memory::DeviceBuffer::<u64, _>::zeroed_in(allocator.clone(), execution.stream(), bins)
+        .map_err(DeviceAlgorithmError::Memory)?;
+    let lookback = rccl_memory::DeviceBuffer::<i32, _>::zeroed_in(allocator.clone(), execution.stream(), lookback)
+        .map_err(DeviceAlgorithmError::Memory)?;
+    let counters = rccl_memory::DeviceBuffer::<i32, _>::zeroed_in(allocator.clone(), execution.stream(), counters)
+        .map_err(DeviceAlgorithmError::Memory)?;
+    Ok(DeviceRadixSortKeysWorkspace::__from_parts(scratch_keys, bins, lookback, counters))
+}
+
+/// Allocate reusable workspace through the supplied stream-ordered allocator.
+pub fn device_radix_sort_pairs_workspace_in<'stream, K: RadixKey, V: RadixValue, A: rccl_memory::DeviceAllocator + Clone>(
+    allocator: A, execution: &Launch<'stream, '_>, len: usize,
+) -> Result<DeviceRadixSortPairsWorkspace<K, V, rccl_memory::DeviceBuffer<'stream, K, A>, rccl_memory::DeviceBuffer<'stream, V, A>, rccl_memory::DeviceBuffer<'stream, u64, A>, rccl_memory::DeviceBuffer<'stream, i32, A>, rccl_memory::DeviceBuffer<'stream, i32, A>>, DeviceAlgorithmError> {
+    let (bins, lookback, counters) = radix_control_lengths(len, radix_pairs_policy::<K, V>());
+    let scratch_keys = rccl_memory::DeviceBuffer::<K, _>::zeroed_in(allocator.clone(), execution.stream(), len)
+        .map_err(DeviceAlgorithmError::Memory)?;
+    let scratch_values = rccl_memory::DeviceBuffer::<V, _>::zeroed_in(allocator.clone(), execution.stream(), len)
+        .map_err(DeviceAlgorithmError::Memory)?;
+    let bins = rccl_memory::DeviceBuffer::<u64, _>::zeroed_in(allocator.clone(), execution.stream(), bins)
+        .map_err(DeviceAlgorithmError::Memory)?;
+    let lookback = rccl_memory::DeviceBuffer::<i32, _>::zeroed_in(allocator.clone(), execution.stream(), lookback)
+        .map_err(DeviceAlgorithmError::Memory)?;
+    let counters = rccl_memory::DeviceBuffer::<i32, _>::zeroed_in(allocator.clone(), execution.stream(), counters)
+        .map_err(DeviceAlgorithmError::Memory)?;
+    Ok(DeviceRadixSortPairsWorkspace::__from_parts(scratch_keys, scratch_values, bins, lookback, counters))
+}
+
+/// Allocate reusable workspace through the supplied stream-ordered allocator.
+pub fn device_merge_workspace_in<'stream, K, A: rccl_memory::DeviceAllocator + Clone>(
+    allocator: A, execution: &Launch<'stream, '_>, first_len: usize, second_len: usize,
+) -> Result<DeviceMergeWorkspace<rccl_memory::DeviceBuffer<'stream, usize, A>>, DeviceAlgorithmError> {
+    let partitions = device_merge_partition_count::<K>(first_len, second_len)?;
+    let partitions = rccl_memory::DeviceBuffer::<usize, _>::zeroed_in(allocator.clone(), execution.stream(), partitions)
+        .map_err(DeviceAlgorithmError::Memory)?;
+    Ok(DeviceMergeWorkspace::__from_partitions(partitions))
+}
+
+/// Allocate reusable workspace through the supplied stream-ordered allocator.
+pub fn device_merge_pairs_workspace_in<'stream, K, V, A: rccl_memory::DeviceAllocator + Clone>(
+    allocator: A, execution: &Launch<'stream, '_>, first_len: usize, second_len: usize,
+) -> Result<DeviceMergeWorkspace<rccl_memory::DeviceBuffer<'stream, usize, A>>, DeviceAlgorithmError> {
+    let partitions = device_merge_pairs_partition_count::<K, V>(first_len, second_len)?;
+    let partitions = rccl_memory::DeviceBuffer::<usize, _>::zeroed_in(allocator.clone(), execution.stream(), partitions)
+        .map_err(DeviceAlgorithmError::Memory)?;
+    Ok(DeviceMergeWorkspace::__from_partitions(partitions))
+}
+
+/// Allocate reusable workspace through the supplied stream-ordered allocator.
+pub fn device_merge_sort_keys_workspace_in<'stream, K: DeviceCopy, A: rccl_memory::DeviceAllocator + Clone>(
+    allocator: A, execution: &Launch<'stream, '_>, len: usize,
+) -> Result<DeviceMergeSortKeysWorkspace<K, rccl_memory::DeviceBuffer<'stream, K, A>, rccl_memory::DeviceBuffer<'stream, usize, A>>, DeviceAlgorithmError> {
+    let partitions = device_merge_sort_partition_count::<K>(len)?;
+    let scratch_keys = rccl_memory::DeviceBuffer::<K, _>::zeroed_in(allocator.clone(), execution.stream(), len)
+        .map_err(DeviceAlgorithmError::Memory)?;
+    let partitions = rccl_memory::DeviceBuffer::<usize, _>::zeroed_in(allocator.clone(), execution.stream(), partitions)
+        .map_err(DeviceAlgorithmError::Memory)?;
+    Ok(DeviceMergeSortKeysWorkspace::__from_parts(scratch_keys, partitions))
+}
+
+/// Allocate reusable workspace through the supplied stream-ordered allocator.
+pub fn device_merge_sort_pairs_workspace_in<'stream, K: DeviceCopy, V: DeviceCopy, A: rccl_memory::DeviceAllocator + Clone>(
+    allocator: A, execution: &Launch<'stream, '_>, len: usize,
+) -> Result<DeviceMergeSortPairsWorkspace<K, V, rccl_memory::DeviceBuffer<'stream, K, A>, rccl_memory::DeviceBuffer<'stream, V, A>, rccl_memory::DeviceBuffer<'stream, usize, A>>, DeviceAlgorithmError> {
+    let partitions = device_merge_sort_partition_count::<K>(len)?;
+    let scratch_keys = rccl_memory::DeviceBuffer::<K, _>::zeroed_in(allocator.clone(), execution.stream(), len)
+        .map_err(DeviceAlgorithmError::Memory)?;
+    let scratch_values = rccl_memory::DeviceBuffer::<V, _>::zeroed_in(allocator.clone(), execution.stream(), len)
+        .map_err(DeviceAlgorithmError::Memory)?;
+    let partitions = rccl_memory::DeviceBuffer::<usize, _>::zeroed_in(allocator.clone(), execution.stream(), partitions)
+        .map_err(DeviceAlgorithmError::Memory)?;
+    Ok(DeviceMergeSortPairsWorkspace::__from_parts(scratch_keys, scratch_values, partitions))
+}
+
 #[doc(hidden)]
 pub fn device_set_workspace_counts<K, V>(
     stream: &cuda_core::CudaStream,
@@ -393,6 +501,16 @@ pub trait WorkspaceBuffer<T: DeviceCopy> {
 
 impl<T: DeviceCopy> WorkspaceBuffer<T> for DeviceBuffer<T> {
     type Range = DeviceBuffer<T>;
+
+    fn range_mut(&mut self) -> &mut Self::Range {
+        self
+    }
+}
+
+impl<T: DeviceCopy, A: rccl_memory::DeviceAllocator> WorkspaceBuffer<T>
+    for rccl_memory::DeviceBuffer<'_, T, A>
+{
+    type Range = Self;
 
     fn range_mut(&mut self) -> &mut Self::Range {
         self

@@ -96,6 +96,12 @@ pub use workspace::{
     device_merge_workspace as device_merge_keys_workspace, device_radix_sort_keys_buffer_workspace,
     device_radix_sort_keys_workspace as device_radix_sort_workspace,
     device_radix_sort_pairs_buffer_workspace, device_radix_sort_pairs_workspace,
+    device_merge_workspace_in as device_merge_keys_workspace_in,
+    device_merge_pairs_workspace_in, device_merge_sort_keys_workspace_in,
+    device_merge_sort_pairs_workspace_in, device_radix_sort_keys_buffer_workspace_in,
+    device_radix_sort_pairs_buffer_workspace_in,
+    device_radix_sort_keys_workspace_in as device_radix_sort_workspace_in,
+    device_radix_sort_pairs_workspace_in,
 };
 
 pub use {
