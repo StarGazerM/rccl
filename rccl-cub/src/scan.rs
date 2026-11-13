@@ -2,7 +2,6 @@
 
 use core::{marker::PhantomData, mem};
 
-use cuda_core::DeviceBuffer;
 use rccl_memory::{DeviceAllocator, TemporaryRegion, TemporaryValue, TemporaryWorkspace2};
 
 use crate::{DeviceAlgorithmError, block_scan::BlockScanValue, cuda::Launch};
@@ -363,7 +362,7 @@ where
 /// Inclusive wrapping prefix sum in place.
 pub fn device_inclusive_sum_in_place<A, T>(
     launch: &Launch<'_, '_>,
-    values: &mut DeviceBuffer<T>,
+    values: &mut impl cuda_host::KernelSliceArgMut<Elem = T>,
     workspace: &mut DeviceScanWorkspace<'_, A, T>,
 ) -> Result<()>
 where
@@ -382,7 +381,7 @@ where
 /// Exclusive wrapping prefix sum with zero identity in place.
 pub fn device_exclusive_sum_in_place<A, T>(
     launch: &Launch<'_, '_>,
-    values: &mut DeviceBuffer<T>,
+    values: &mut impl cuda_host::KernelSliceArgMut<Elem = T>,
     workspace: &mut DeviceScanWorkspace<'_, A, T>,
 ) -> Result<()>
 where

@@ -946,6 +946,36 @@ impl<T: DeviceCopy> LowerWriteRange for &mut DeviceBuffer<T> {
     }
 }
 
+impl<T: DeviceCopy, A: rccl_memory::DeviceAllocator> LowerReadRange
+    for &rccl_memory::DeviceBuffer<'_, T, A>
+{
+    type Device = rccl_cub::DeviceSliceRead<T>;
+    fn lower_read(&self) -> Self::Device {
+        rccl_cub::DeviceSliceRead::new(self.cu_deviceptr() as *const T)
+    }
+}
+
+impl<T: DeviceCopy, A: rccl_memory::DeviceAllocator> LowerReadRange
+    for &mut rccl_memory::DeviceBuffer<'_, T, A>
+{
+    type Device = rccl_cub::DeviceSliceWrite<T>;
+    fn lower_read(&self) -> Self::Device {
+        rccl_cub::DeviceSliceWrite::new(self.cu_deviceptr() as *mut T)
+    }
+}
+
+impl<T: DeviceCopy, A: rccl_memory::DeviceAllocator> LowerWriteRange
+    for &mut rccl_memory::DeviceBuffer<'_, T, A>
+{
+    type Device = rccl_cub::DeviceSliceWrite<T>;
+    fn lower_write(&self) -> Self::Device {
+        rccl_cub::DeviceSliceWrite::new(self.cu_deviceptr() as *mut T)
+    }
+    fn dense_write_pointer(&self) -> Option<*mut Self::Item> {
+        Some(self.cu_deviceptr() as *mut T)
+    }
+}
+
 impl<T> LowerReadRange for ArithmeticRange<T>
 where
     T: DeviceCopy

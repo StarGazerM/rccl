@@ -1,6 +1,5 @@
 //! Private scan/scatter orchestration for workload compaction.
 
-use cuda_core::DeviceBuffer;
 use rccl_memory::{DeviceAllocator, TemporaryWorkspace2};
 
 use crate::{
@@ -165,8 +164,8 @@ where
     }
 }
 
-fn validate_count(count: &DeviceBuffer<u64>) -> Result<(), DeviceAlgorithmError> {
-    if count.is_empty() {
+fn validate_count(count: &impl cuda_host::KernelSliceArg<Elem = u64>) -> Result<(), DeviceAlgorithmError> {
+    if count.len() == 0 {
         Err(DeviceAlgorithmError::WorkspaceTooSmall {
             role: "selected-count output",
             required: 1,
@@ -181,7 +180,7 @@ fn select_if_inner<A, Input, Output, Predicate, I>(
     launch: &Launch<'_, '_>,
     input: Input,
     output: Output,
-    selected_count: &mut DeviceBuffer<u64>,
+    selected_count: &mut impl cuda_host::KernelSliceArgMut<Elem = u64>,
     predicate: Predicate,
     len: usize,
     marks: &mut TemporaryWorkspace2<'_, A, I, I>,
@@ -210,7 +209,7 @@ pub fn device_select_if<A, Input, Output, Predicate>(
     launch: &Launch<'_, '_>,
     input: Input,
     output: Output,
-    selected_count: &mut DeviceBuffer<u64>,
+    selected_count: &mut impl cuda_host::KernelSliceArgMut<Elem = u64>,
     predicate: Predicate,
     len: usize,
     workspace: &mut CompactionWorkspace<'_, A>,
@@ -251,7 +250,7 @@ fn select_flagged_inner<A, Input, Flags, Output, I>(
     input: Input,
     selected: Flags,
     output: Output,
-    selected_count: &mut DeviceBuffer<u64>,
+    selected_count: &mut impl cuda_host::KernelSliceArgMut<Elem = u64>,
     len: usize,
     marks: &mut TemporaryWorkspace2<'_, A, I, I>,
     scan: &mut DeviceScanWorkspace<'_, A, I>,
@@ -280,7 +279,7 @@ pub fn device_select_flagged<A, Input, Flags, Output>(
     input: Input,
     selected: Flags,
     output: Output,
-    selected_count: &mut DeviceBuffer<u64>,
+    selected_count: &mut impl cuda_host::KernelSliceArgMut<Elem = u64>,
     len: usize,
     workspace: &mut CompactionWorkspace<'_, A>,
 ) -> Result<(), DeviceAlgorithmError>
@@ -319,7 +318,7 @@ fn unique_inner<A, Input, Output, Equivalent, I>(
     launch: &Launch<'_, '_>,
     input: Input,
     output: Output,
-    selected_count: &mut DeviceBuffer<u64>,
+    selected_count: &mut impl cuda_host::KernelSliceArgMut<Elem = u64>,
     equivalent: Equivalent,
     len: usize,
     marks: &mut TemporaryWorkspace2<'_, A, I, I>,
@@ -348,7 +347,7 @@ pub fn device_unique_copy_by<A, Input, Output, Equivalent>(
     launch: &Launch<'_, '_>,
     input: Input,
     output: Output,
-    selected_count: &mut DeviceBuffer<u64>,
+    selected_count: &mut impl cuda_host::KernelSliceArgMut<Elem = u64>,
     equivalent: Equivalent,
     len: usize,
     workspace: &mut CompactionWorkspace<'_, A>,
@@ -388,7 +387,7 @@ fn partition_inner<A, Input, Output, Predicate, I>(
     launch: &Launch<'_, '_>,
     input: Input,
     output: Output,
-    selected_count: &mut DeviceBuffer<u64>,
+    selected_count: &mut impl cuda_host::KernelSliceArgMut<Elem = u64>,
     predicate: Predicate,
     len: usize,
     marks: &mut TemporaryWorkspace2<'_, A, I, I>,
@@ -417,7 +416,7 @@ pub fn device_stable_partition_by<A, Input, Output, Predicate>(
     launch: &Launch<'_, '_>,
     input: Input,
     output: Output,
-    selected_count: &mut DeviceBuffer<u64>,
+    selected_count: &mut impl cuda_host::KernelSliceArgMut<Elem = u64>,
     predicate: Predicate,
     len: usize,
     workspace: &mut CompactionWorkspace<'_, A>,

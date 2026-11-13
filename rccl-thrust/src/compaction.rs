@@ -9,7 +9,7 @@ use crate::{
     range::{LowerReadRange, LowerWriteRange},
 };
 
-pub type PendingSelect<'borrow, 'stream, 'program, Input, Output, Predicate, A> = CudaCompletion<
+pub type PendingSelect<'borrow, 'stream, 'program, Input, Output, Predicate, A, Count = DeviceBuffer<u64>> = CudaCompletion<
     'borrow,
     (),
     DeviceAlgorithmError,
@@ -18,14 +18,14 @@ pub type PendingSelect<'borrow, 'stream, 'program, Input, Output, Predicate, A> 
         (
             Input,
             Output,
-            &'borrow mut DeviceBuffer<u64>,
+            &'borrow mut Count,
             Predicate,
             rccl_cub::thrust_integration::CompactionWorkspace<'stream, &'borrow A>,
         ),
     ),
 >;
 
-pub type PendingFlaggedSelect<'borrow, 'stream, 'program, Input, Flags, Output, A> = CudaCompletion<
+pub type PendingFlaggedSelect<'borrow, 'stream, 'program, Input, Flags, Output, A, Count = DeviceBuffer<u64>> = CudaCompletion<
     'borrow,
     (),
     DeviceAlgorithmError,
@@ -35,14 +35,14 @@ pub type PendingFlaggedSelect<'borrow, 'stream, 'program, Input, Flags, Output, 
             Input,
             Flags,
             Output,
-            &'borrow mut DeviceBuffer<u64>,
+            &'borrow mut Count,
             rccl_cub::thrust_integration::CompactionWorkspace<'stream, &'borrow A>,
         ),
     ),
 >;
 
-pub type PendingUnique<'borrow, 'stream, 'program, Input, Output, Equivalent, A> =
-    PendingSelect<'borrow, 'stream, 'program, Input, Output, Equivalent, A>;
+pub type PendingUnique<'borrow, 'stream, 'program, Input, Output, Equivalent, A, Count = DeviceBuffer<u64>> =
+    PendingSelect<'borrow, 'stream, 'program, Input, Output, Equivalent, A, Count>;
 
 pub type PendingInPlaceCompaction<'borrow, 'stream, 'program, Values, Scratch, Operation, A> =
     CudaCompletion<
@@ -61,8 +61,8 @@ pub type PendingInPlaceCompaction<'borrow, 'stream, 'program, Values, Scratch, O
         ),
     >;
 
-fn validate_count(count: &DeviceBuffer<u64>) -> Result<(), DeviceAlgorithmError> {
-    if count.is_empty() {
+fn validate_count(count: &impl cuda_host::KernelSliceArg<Elem = u64>) -> Result<(), DeviceAlgorithmError> {
+    if count.len() == 0 {
         Err(DeviceAlgorithmError::WorkspaceTooSmall {
             role: "selected-count output",
             required: 1,
@@ -166,14 +166,14 @@ where
 }
 
 /// Stably select values whose corresponding workload `u32` flag is nonzero.
-pub fn select_flagged_async<'borrow, 'stream, 'program, Input, Flags, Output, A>(
+pub fn select_flagged_async<'borrow, 'stream, 'program, Input, Flags, Output, A, Count>(
     execution: &'borrow Execution<'stream, 'program, A>,
     input: Input,
     selected: Flags,
     output: Output,
-    selected_count: &'borrow mut DeviceBuffer<u64>,
+    selected_count: &'borrow mut Count,
 ) -> Result<
-    PendingFlaggedSelect<'borrow, 'stream, 'program, Input, Flags, Output, A>,
+    PendingFlaggedSelect<'borrow, 'stream, 'program, Input, Flags, Output, A, Count>,
     DeviceAlgorithmError,
 >
 where
@@ -181,6 +181,7 @@ where
     Flags: LowerReadRange<Item = u32>,
     Output: LowerWriteRange<Item = Input::Item>,
     A: DeviceAllocator,
+    Count: cuda_host::KernelSliceArgMut<Elem = u64>,
 {
     let len = validate_output(&input, &output, "flagged-select output")?;
     let flag_len = rccl_cub::DeviceRange::len(&selected);
@@ -223,7 +224,7 @@ pub fn select_flagged<Input, Flags, Output, A>(
     input: Input,
     selected: Flags,
     output: Output,
-    selected_count: &mut DeviceBuffer<u64>,
+    selected_count: &mut impl cuda_host::KernelSliceArgMut<Elem = u64>,
 ) -> Result<(), DeviceAlgorithmError>
 where
     Input: LowerReadRange,
@@ -239,14 +240,14 @@ where
 /// Equivalence is intentionally explicit because SRDatalog deduplicates sorted
 /// rows by selected key columns while associated provenance follows the kept
 /// row. Non-adjacent equivalent items are not removed.
-pub fn unique_copy_by_async<'borrow, 'stream, 'program, Input, Output, Equivalent, A>(
+pub fn unique_copy_by_async<'borrow, 'stream, 'program, Input, Output, Equivalent, A, Count>(
     execution: &'borrow Execution<'stream, 'program, A>,
     input: Input,
     output: Output,
-    selected_count: &'borrow mut DeviceBuffer<u64>,
+    selected_count: &'borrow mut Count,
     equivalent: Equivalent,
 ) -> Result<
-    PendingUnique<'borrow, 'stream, 'program, Input, Output, Equivalent, A>,
+    PendingUnique<'borrow, 'stream, 'program, Input, Output, Equivalent, A, Count>,
     DeviceAlgorithmError,
 >
 where
@@ -254,6 +255,7 @@ where
     Output: LowerWriteRange<Item = Input::Item>,
     Equivalent: Fn(Input::Item, Input::Item) -> bool + Copy,
     A: DeviceAllocator,
+    Count: cuda_host::KernelSliceArgMut<Elem = u64>,
 {
     let len = validate_output(&input, &output, "unique-copy output")?;
     validate_count(selected_count)?;
@@ -284,7 +286,7 @@ pub fn unique_copy_by<Input, Output, Equivalent, A>(
     execution: &Execution<'_, '_, A>,
     input: Input,
     output: Output,
-    selected_count: &mut DeviceBuffer<u64>,
+    selected_count: &mut impl cuda_host::KernelSliceArgMut<Elem = u64>,
     equivalent: Equivalent,
 ) -> Result<(), DeviceAlgorithmError>
 where

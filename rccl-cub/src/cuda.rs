@@ -697,7 +697,7 @@ impl<'stream, 'program> Launch<'stream, 'program> {
         output: Output,
         flags: &Flags,
         positions: &Positions,
-        selected_count: &mut DeviceBuffer<u64>,
+        selected_count: &mut impl cuda_host::KernelSliceArgMut<Elem = u64>,
         len: usize,
     ) -> Result<(), cuda_core::LaunchContractError>
     where
@@ -731,7 +731,7 @@ impl<'stream, 'program> Launch<'stream, 'program> {
         output: Output,
         flags: &Flags,
         positions: &Positions,
-        selected_count: &mut DeviceBuffer<u64>,
+        selected_count: &mut impl cuda_host::KernelSliceArgMut<Elem = u64>,
         len: usize,
     ) -> Result<(), cuda_core::LaunchContractError>
     where

@@ -517,6 +517,16 @@ impl<T: DeviceCopy, A: rccl_memory::DeviceAllocator> WorkspaceBuffer<T>
     }
 }
 
+impl<'stream, T: DeviceCopy, A: rccl_memory::DeviceAllocator> WorkspaceBuffer<T>
+    for &mut rccl_memory::DeviceBuffer<'stream, T, A>
+{
+    type Range = rccl_memory::DeviceBuffer<'stream, T, A>;
+
+    fn range_mut(&mut self) -> &mut Self::Range {
+        self
+    }
+}
+
 /// A caller-owned buffer lent to one workspace, e.g. stream-ordered scratch
 /// the caller releases with `drop_async` after the operation.
 impl<T: DeviceCopy> WorkspaceBuffer<T> for &mut DeviceBuffer<T> {
