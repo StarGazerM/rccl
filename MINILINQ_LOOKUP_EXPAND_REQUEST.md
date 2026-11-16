@@ -242,3 +242,28 @@ Next performance work: establish exclusive-GPU timing for the remaining
 latency-bound cases before attributing their small differences to kernels.
 No threshold or benchmark semantics were relaxed. SM86 native behavior,
 packed/row performance and LE expansion remain unverified.
+
+### R2 primitive execution evidence (2026-11-16)
+
+`rccl-thrust/src/expand.rs` now provides ordinary synchronous/asynchronous
+stable pair expansion and fused wrapping-u64 interval sums over lowered ranges,
+plus explicit synchronous count publication. `ExpandWorkspace` is allocator-
+and stream-bound; the CUB `_in` constructor supports pooled temporary memory.
+The implementation reuses the existing u64 block scan and warp reduction.
+The fused path maps fixed 1024-row tasks to warps and maps short spans to lanes;
+the pair-output path performs output-parallel owner search, not merge-path.
+
+All endpoints are half-open. Reversed intervals, count overflow (within and
+between prefix tiles), output-capacity failures and value-range OOB are device
+faults observed at completion, with the same context-invalidating behavior as
+checked permutation ranges. Shape/workspace errors are host errors. Async calls
+do not read a host total. `count_ranges` is an explicit synchronization boundary.
+
+The `expand_ranges` example passes CPU-oracle cases at 0/1/31/32/33/255/256/257/
+65537 intervals, empty and overlapping ranges, lazy projections, strided outputs,
+completion drop, and one million-match interval plus 10,000 singletons.
+Its five isolated fault modes pass; memcheck reports 0 errors and racecheck
+reports 0 hazards. `cargo test -p rccl-thrust --doc` passes all 10 tests,
+including the expansion pending-output borrow rejection.
+The strict 1.001 reference and 1.10 skew-throughput gates remain unclaimed;
+R3/R5 end-to-end integration and SM86 execution remain separate work.

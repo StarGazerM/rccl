@@ -10,6 +10,8 @@ mod compaction_kernels;
 mod dispatch;
 mod double_buffer;
 mod error;
+mod expand;
+mod expand_kernels;
 mod grouped_reduction;
 mod histogram;
 mod histogram_backend;
@@ -49,6 +51,11 @@ pub use dispatch::{
 };
 pub use double_buffer::DoubleBuffer;
 pub use error::DeviceAlgorithmError;
+pub use expand::{ExpandWorkspace, expand_ranges_workspace_in};
+#[doc(hidden)]
+pub use expand::{device_prepare_ranges_in, device_expand_ranges_in, device_reduce_ranges_in};
+#[doc(hidden)]
+pub use range::DeviceAtomicAddU64;
 pub use histogram::{
     DeviceHistogram, DeviceHistogramLevels, DeviceHistogramLevelsView, DeviceHistogramWorkspace,
     HistogramLevels, HistogramRegion, HistogramScalar,

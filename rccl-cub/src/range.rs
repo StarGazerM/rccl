@@ -211,6 +211,24 @@ pub trait DeviceReadAt: Copy {
     /// `index` must be in the logical range and every referenced allocation
     /// must remain alive and immutable for the kernel operation.
     unsafe fn read_at(self, index: usize) -> Self::Item;
+
+    /// Wrapping sum of a strided projection into u64. Specialized encoded
+    /// ranges may override this to decode a cooperative vector directly.
+    ///
+    /// # Safety
+    /// `stride` is nonzero; every visited index and referenced allocation obeys
+    /// `read_at`'s contract. An override must preserve the same sum.
+    #[inline(always)]
+    unsafe fn sum_strided(self, mut begin: usize, end: usize, stride: usize) -> u64
+    where Self::Item: Into<u64> {
+        let mut sum = 0u64;
+        while begin < end {
+            sum = sum.wrapping_add(unsafe { self.read_at(begin) }.into());
+            if end - begin <= stride { break; }
+            begin += stride;
+        }
+        sum
+    }
 }
 
 /// Device-side indexed write used by the generated range algorithm kernels.
@@ -294,6 +312,22 @@ impl<T: Copy> DenseDeviceWriteAt for DeviceSliceWrite<T> {
     #[inline(always)]
     fn as_mut_ptr(self) -> *mut T {
         self.pointer
+    }
+}
+
+/// Lowered output supporting concurrent wrapping-u64 accumulation.
+#[doc(hidden)]
+pub trait DeviceAtomicAddU64: DeviceWriteAt<Item = u64> {
+    /// # Safety
+    /// The index is live and initialized; concurrent accesses use atomics.
+    unsafe fn add_at(self, index: usize, value: u64);
+}
+
+impl DeviceAtomicAddU64 for DeviceSliceWrite<u64> {
+    #[inline(always)]
+    unsafe fn add_at(self, index: usize, value: u64) {
+        use cuda_device::atomic::{AtomicOrdering, DeviceAtomicU64};
+        unsafe { DeviceAtomicU64::from_ptr(self.pointer.add(index)).fetch_add(value, AtomicOrdering::Relaxed); }
     }
 }
 
@@ -565,6 +599,13 @@ impl<R: DeviceWriteAt> DeviceWriteAt for DeviceOffset<R> {
     }
 }
 
+impl<R: DeviceAtomicAddU64> DeviceAtomicAddU64 for DeviceOffset<R> {
+    #[inline(always)]
+    unsafe fn add_at(self, index: usize, value: u64) {
+        unsafe { self.inner.add_at(self.offset + index, value); }
+    }
+}
+
 #[doc(hidden)]
 #[derive(Clone, Copy)]
 pub struct DeviceReverse<R> {
@@ -599,6 +640,13 @@ impl<R: DeviceWriteAt> DeviceWriteAt for DeviceReverse<R> {
     }
 }
 
+impl<R: DeviceAtomicAddU64> DeviceAtomicAddU64 for DeviceReverse<R> {
+    #[inline(always)]
+    unsafe fn add_at(self, index: usize, value: u64) {
+        unsafe { self.inner.add_at(self.len - 1 - index, value); }
+    }
+}
+
 #[doc(hidden)]
 #[derive(Clone, Copy)]
 pub struct DeviceStride<R> {
@@ -630,6 +678,13 @@ impl<R: DeviceWriteAt> DeviceWriteAt for DeviceStride<R> {
     unsafe fn write_at(self, index: usize, value: Self::Item) {
         // SAFETY: host validation proves this affine destination index.
         unsafe { self.inner.write_at(index * self.step, value) };
+    }
+}
+
+impl<R: DeviceAtomicAddU64> DeviceAtomicAddU64 for DeviceStride<R> {
+    #[inline(always)]
+    unsafe fn add_at(self, index: usize, value: u64) {
+        unsafe { self.inner.add_at(index * self.step, value); }
     }
 }
 

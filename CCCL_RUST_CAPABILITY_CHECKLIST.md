@@ -155,6 +155,10 @@ Nim/JIT API row is inferred from build artifacts or stale plans.
 - Radix DoubleBuffer input-selection correctness is covered by
   `device_radix_sort_alternating_probe` (SM89, 2026-11-16); this fixes stale
   histogram input after odd-pass buffer swaps, not the open throughput gates.
+- R2 checked pair expansion and fused wrapping-u64 interval sums are implemented
+  in `rccl-thrust/src/expand.rs`, with SM89 CPU-oracle, fault and sanitizer
+  evidence in `MINILINQ_LOOKUP_EXPAND_REQUEST.md`; strict throughput/skew gates
+  and external workload integration are not implied by those correctness tests.
 
 ## 7. Remove from roadmap
 

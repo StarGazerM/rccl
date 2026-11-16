@@ -57,6 +57,16 @@ The current executable vertical slices include:
   and key/value calls, including repeated odd-pass sorts after changing the
   current keys. `device_radix_sort_alternating_probe` checks both directions,
   u32/u64 keys, single/multi-tile boundaries, and stable value permutations.
+- Checked range expansion and fused wrapping-u64 interval sums:
+  `expand_ranges_workspace`, `count_ranges`, `expand_ranges_into[_async]`,
+  and `sum_ranges_into[_async]`. Workspaces use the execution allocator;
+  the CUB constructor also provides an explicit `_in` allocator form.
+  Expansion preserves probe-major row order and leaves unused capacity untouched.
+  Async calls retain endpoint/output/workspace borrows and read no host count.
+  Invalid device endpoints, overflow and capacity errors surface through
+  completion as CUDA faults, like checked permutation ranges.
+  `rccl-thrust --example expand_ranges` checks CPU oracles, million-row skew,
+  overlapping/empty ranges, affine outputs, and isolated error cases.
 
 The exact coverage ledger remains explicit about missing and partial CCCL
 surfaces. Passing tests for these slices is not described as full CUB or

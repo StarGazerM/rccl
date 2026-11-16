@@ -8,6 +8,7 @@ use rccl_memory::{CudaCompletion, MemoryError};
 use crate::{
     compaction_kernels, histogram_kernels, ordering_kernels, range_kernels, reduce_kernels,
     scan_kernels, set_kernels,
+    expand_kernels,
 };
 
 /// The fixed RCCL kernel set compiled for cargo-oxide's selected target.
@@ -23,6 +24,7 @@ pub(crate) struct KernelModules {
     reduce: reduce_kernels::ReduceModule,
     scan: scan_kernels::ScanModule,
     set: set_kernels::SetModule,
+    expand: expand_kernels::ExpandModule,
 }
 
 impl KernelModules {
@@ -35,6 +37,7 @@ impl KernelModules {
             reduce: reduce_kernels::load(context)?,
             scan: scan_kernels::load(context)?,
             set: set_kernels::load(context)?,
+            expand: expand_kernels::load(context)?,
         })
     }
 
@@ -62,6 +65,9 @@ impl KernelModules {
 
     pub(crate) fn set(&self) -> &set_kernels::SetModule {
         &self.set
+    }
+    pub(crate) fn expand(&self) -> &expand_kernels::ExpandModule {
+        &self.expand
     }
 }
 

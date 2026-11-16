@@ -8,6 +8,7 @@ mod backend;
 mod compaction;
 mod copy;
 mod error;
+mod expand;
 mod generation;
 mod grouped_reduction;
 mod histogram;
@@ -38,6 +39,10 @@ pub use copy::{
 };
 pub use cuda_core::DeviceCopy;
 pub use error::TransformError;
+pub use expand::{
+    PendingExpand, PendingRangeSum, count_ranges, expand_ranges_into,
+    expand_ranges_into_async, expand_ranges_workspace, sum_ranges_into, sum_ranges_into_async,
+};
 pub use generation::{
     DeviceGenerateExt, PendingFill, PendingRangeFill, PendingTabulate, SequenceValue, fill,
     fill_async, fill_range, fill_range_async, sequence, sequence_by, sequence_from, sequence_range,
