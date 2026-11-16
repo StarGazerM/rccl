@@ -229,6 +229,20 @@ pub trait DeviceReadAt: Copy {
         }
         sum
     }
+
+    /// One lane's partial of a cooperatively partitioned interval sum.
+    /// Unlike `sum_strided`, an encoded range may assign whole decode vectors
+    /// to subgroups; summing every lane's result must equal the interval sum.
+    ///
+    /// # Safety
+    /// All `lanes` invocations use the same valid `[begin, end)` interval,
+    /// distinct `lane` values in `0..lanes`, and live immutable allocations.
+    #[inline(always)]
+    unsafe fn sum_cooperative(self, begin: usize, end: usize, lane: usize, lanes: usize) -> u64
+    where Self::Item: Into<u64> {
+        if end - begin <= lane { return 0; }
+        unsafe { self.sum_strided(begin + lane, end, lanes) }
+    }
 }
 
 /// Device-side indexed write used by the generated range algorithm kernels.

@@ -277,6 +277,12 @@ independent bitstream oracle. `rccl-thrust --example interleaved_for` exercises
 GPU packing, lazy projection, round trips, completion drop and sorted search.
 No workload-independent performance advantage is promised.
 
+Fused interval reduction invokes `DeviceReadAt::sum_cooperative`: the default
+preserves the existing strided assignment, while encoded ranges may assign
+whole vectors to subgroups. Every lane contributes exactly one partial and
+their sum must cover the same interval exactly once. This changes only the
+intra-task partition, not checked range preparation or global task scheduling.
+
 ## Verification
 
 ```bash

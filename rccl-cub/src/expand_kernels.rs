@@ -185,12 +185,8 @@ mod device {
                     let source = unsafe { sources.read_at(i) };
                     let first = begin + (position - base);
                     let last = begin + (finish - base);
-                    let sum = if last - first > lane as u64 {
-                        unsafe {
-                            source.sum_strided((first + lane as u64) as usize, last as usize, 32)
-                        }
-                    } else {
-                        0
+                    let sum = unsafe {
+                        source.sum_cooperative(first as usize, last as usize, lane as usize, 32)
                     };
                     let sum = crate::warp_reduce::<u64, 32>(sum, 32, |a, b| a.wrapping_add(b));
                     if lane == 0 {

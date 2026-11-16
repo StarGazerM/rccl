@@ -57,3 +57,18 @@ fn interleaved_for_cpu_oracle() {
         }
     }
 }
+
+#[test]
+fn cooperative_sum_default_preserves_interval() {
+    let values: Vec<_> = (0..1040u64).map(|x| x.wrapping_mul(0x9e3779b97f4a7c15)).collect();
+    let range = DeviceSliceRead::new(values.as_ptr());
+    for (begin, end) in [(0, 0), (0, 1), (1, 31), (7, 1030)] {
+        let expected = values[begin..end].iter().fold(0u64, |s, &v| s.wrapping_add(v));
+        for lanes in [1, 2, 4, 8, 32, 256] {
+            let actual = (0..lanes).fold(0u64, |sum, lane| {
+                sum.wrapping_add(unsafe { range.sum_cooperative(begin, end, lane, lanes) })
+            });
+            assert_eq!(actual, expected);
+        }
+    }
+}
