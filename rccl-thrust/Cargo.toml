@@ -175,3 +175,9 @@ name = "expand_ranges"
 path = "examples/expand_ranges.rs"
 test = false
 required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "interleaved_for"
+path = "examples/interleaved_for.rs"
+test = false
+required-features = ["cuda-oxide-example"]

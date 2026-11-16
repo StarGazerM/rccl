@@ -12,6 +12,7 @@ mod expand;
 mod generation;
 mod grouped_reduction;
 mod histogram;
+mod interleaved_for;
 mod lexicographic;
 mod merge;
 mod ordering;
@@ -43,6 +44,8 @@ pub use expand::{
     PendingExpand, PendingRangeSum, count_ranges, expand_ranges_into,
     expand_ranges_into_async, expand_ranges_workspace, sum_ranges_into, sum_ranges_into_async,
 };
+pub use interleaved_for::{InterleavedForRange, PendingForPack, pack_for_into, pack_for_into_async, pack_for_workspace};
+pub use rccl_cub::{ForFrame, ForWorkspace, pack_for_workspace_in};
 pub use generation::{
     DeviceGenerateExt, PendingFill, PendingRangeFill, PendingTabulate, SequenceValue, fill,
     fill_async, fill_range, fill_range_async, sequence, sequence_by, sequence_from, sequence_range,

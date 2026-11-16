@@ -9,6 +9,7 @@ use crate::{
     compaction_kernels, histogram_kernels, ordering_kernels, range_kernels, reduce_kernels,
     scan_kernels, set_kernels,
     expand_kernels,
+    for_kernels,
 };
 
 /// The fixed RCCL kernel set compiled for cargo-oxide's selected target.
@@ -25,6 +26,7 @@ pub(crate) struct KernelModules {
     scan: scan_kernels::ScanModule,
     set: set_kernels::SetModule,
     expand: expand_kernels::ExpandModule,
+    for_pack: for_kernels::ForModule,
 }
 
 impl KernelModules {
@@ -38,6 +40,7 @@ impl KernelModules {
             scan: scan_kernels::load(context)?,
             set: set_kernels::load(context)?,
             expand: expand_kernels::load(context)?,
+            for_pack: for_kernels::load(context)?,
         })
     }
 
@@ -68,6 +71,9 @@ impl KernelModules {
     }
     pub(crate) fn expand(&self) -> &expand_kernels::ExpandModule {
         &self.expand
+    }
+    pub(crate) fn for_pack(&self) -> &for_kernels::ForModule {
+        &self.for_pack
     }
 }
 

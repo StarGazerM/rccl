@@ -12,6 +12,11 @@ mod double_buffer;
 mod error;
 mod expand;
 mod expand_kernels;
+mod interleaved_for;
+mod for_pack;
+mod for_kernels;
+#[cfg(test)]
+mod for_tests;
 mod grouped_reduction;
 mod histogram;
 mod histogram_backend;
@@ -52,6 +57,8 @@ pub use dispatch::{
 pub use double_buffer::DoubleBuffer;
 pub use error::DeviceAlgorithmError;
 pub use expand::{ExpandWorkspace, expand_ranges_workspace_in};
+pub use interleaved_for::{ForFrame, ForColumn, DeviceInterleavedForRange, for_words, pack_for_word};
+pub use for_pack::{ForWorkspace, pack_for_workspace_in, device_pack_for_into_in};
 #[doc(hidden)]
 pub use expand::{device_prepare_ranges_in, device_expand_ranges_in, device_reduce_ranges_in};
 #[doc(hidden)]

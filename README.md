@@ -250,6 +250,33 @@ behind `cuda-oxide-example` for `sm_86`. This is explicitly compile-only
 evidence: it neither executes the binaries nor establishes SM86 correctness or
 performance.
 
+## Interleaved frame-of-reference columns
+
+`rccl_thrust::InterleavedForRange` is a borrowed, O(1)-indexed u64 column
+adaptor accepted by the existing transform, copy, reduction and sorted-search
+algorithms. `pack_for_into` / `pack_for_into_async` consume arbitrary lowered
+u64 ranges and write caller-owned u32 payload and `ForFrame` ranges.
+`pack_for_workspace` uses the execution allocator; `pack_for_workspace_in`
+accepts an explicit allocator and stream-bound launch. Async completion retains
+the input, output and workspace borrows. `words_to_host` explicitly publishes
+the used payload length; no total readback occurs in the async pack operation.
+Insufficient device payload capacity traps before payload writes, consistent
+with checked expansion. A device fault can invalidate the CUDA context.
+
+Widths 0..32 use round-robin lane streams with interleaved u32 words; widths
+33..64 explicitly use a wide row-major column representation. Lane counts are
+powers of two through 32, with at most 32 rows per lane. A partial final block
+pads the final word of each lane; no sentinel word is read. `ForColumn::visit_lane`
+dispatches width outside 32 const-generic steps and immediately invokes its
+consumer for each selected value. Random access does not require tile decode.
+The unsafe view constructor requires initialized, matching packer-produced
+frames and bounds-valid payload offsets; it does not download metadata.
+
+CPU tests compare every width 0..64 and every partial block length against an
+independent bitstream oracle. `rccl-thrust --example interleaved_for` exercises
+GPU packing, lazy projection, round trips, completion drop and sorted search.
+No workload-independent performance advantage is promised.
+
 ## Verification
 
 ```bash
