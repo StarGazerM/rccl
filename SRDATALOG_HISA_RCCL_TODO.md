@@ -1,6 +1,6 @@
 # SRDatalog and HISA Rust GPU Migration TODO
 
-Last reviewed: 2026-10-14
+Last reviewed: 2026-11-16
 
 This is the canonical workload-driven tracker for replacing the CUDA C++,
 Thrust, CUB, and cuCollections layer used by SRDatalog and HISA with Rust RCCL
@@ -185,6 +185,7 @@ not rewrite the evidence log or checkbox state.
 | 2026-10-14 | Lookup-expand preparation and local IR storage | No existing acceptance checkbox changed; LE implementation/performance remain open | Corrected the MiniLinq request's row/key assumptions, specified search/expansion contracts, staged R1/R2 then packed-key/dedup integration, and defined equal-work reference and skew gates. Configured workspace-relative `CUDA_OXIDE_PTX_DIR=target/oxide-ir` without compiler changes. `cargo oxide build --arch sm_86 --features cuda-oxide-example -- --release --package rccl-thrust --example constant_iterator` succeeded; observed IR/PTX and embedding objects under the configured directory, and the built example reported `pinned CCCL constant_iterator example: PASS`. This is an artifact-placement/runtime smoke, not LE or SM86-native performance evidence. |
 | 2026-10-14 | R1 sorted search | Primitive implemented; integration/performance acceptance remains open | Added natural/comparator sync/async lower/upper/equal-range APIs and generic range kernels. Nine doctests passed; SM89 CPU-oracle example, memcheck (0 errors), racecheck (0 hazards), and isolated async range-OOB propagation passed. Initial seven-round pinned-Thrust comparison failed 23/36 cases; desktop graphics were active, so results are diagnostic rather than exclusive-GPU parity evidence. Both benchmark kernels use 22 registers with zero stack/spills. Raw results: `target/sorted-search-performance.fp3XXV`; details and remaining limitations: `MINILINQ_LOOKUP_EXPAND_REQUEST.md`. |
 | 2026-10-14 | R1 search performance correction | No acceptance checkbox changed; exclusive-GPU parity remains open | Applied two-item/256-thread search tiles and full-domain upper search in fused equal-range. Expanded tile-boundary oracle, memcheck, racecheck and async fault smoke passed; 48 direct production-PTX forced-small-grid cases verified grid-stride tails. Seven-round local comparison at `target/sorted-search-performance.HKcOaZ` reduced failing cases from 23/36 to 12/36; large lower/upper/equal ratios are 0.972–1.003 / 0.988–1.000 / 0.810–0.950. Remaining failures are 11 small bound cases and large descending-uniform lower bound. Desktop graphics preclude exclusive-GPU parity evidence. Updated kernels use 24/28 registers with zero stack/spills. |
+| 2026-11-16 | Radix alternating-buffer histogram correctness | No broad performance checkbox changed | Histogram selection now follows the same DoubleBuffer input as scatter in keys-only and pair paths. The focused SM89 CPU-oracle probe passes u32/u64 keys, ascending/descending order, stable pairs and 2304/2305/4864/4865/8193-row boundaries with changed current keys between odd-pass sorts. |
 
 ## Supporting references
 

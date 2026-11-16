@@ -152,6 +152,9 @@ Nim/JIT API row is inferred from build artifacts or stale plans.
 - Ordering merge/merge-sort/radix/set throughput and register/occupancy parity.
 - Broader reduction and arbitrary-record sorting performance.
 - Multi-stream and allocator/resource propagation tuning outside correctness.
+- Radix DoubleBuffer input-selection correctness is covered by
+  `device_radix_sort_alternating_probe` (SM89, 2026-11-16); this fixes stale
+  histogram input after odd-pass buffer swaps, not the open throughput gates.
 
 ## 7. Remove from roadmap
 

@@ -53,6 +53,10 @@ The current executable vertical slices include:
   full-domain equal-range searches reduced the local failing cases from
   23/36 to 12/36; all equal-range cases now pass the numerical gate.
   This does not establish exclusive-GPU parity or implement range expansion.
+- Radix DoubleBuffer histograms honor the selected input for both keys-only
+  and key/value calls, including repeated odd-pass sorts after changing the
+  current keys. `device_radix_sort_alternating_probe` checks both directions,
+  u32/u64 keys, single/multi-tile boundaries, and stable value permutations.
 
 The exact coverage ledger remains explicit about missing and partial CCCL
 surfaces. Passing tests for these slices is not described as full CUB or

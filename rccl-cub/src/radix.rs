@@ -425,6 +425,27 @@ where
     Ok(())
 }
 
+// Histogram and scatter must observe the same logical DoubleBuffer input.
+fn launch_histogram<K, M, Keys, Bins, const PASSES: usize, const DESC: bool>(
+    module: &M,
+    stream: &CudaStream,
+    keys: &Keys,
+    bins: &mut Bins,
+    bits: &core::ops::Range<u32>,
+) -> Result<(), DeviceAlgorithmError>
+where
+    K: RadixKey,
+    M: RadixKernel<K, DESC>,
+    Keys: KernelSliceArg<Elem = K>,
+    Bins: KernelSliceArgMut<Elem = u64>,
+{
+    if PASSES == 4 {
+        module.launch_radix_histogram_4::<_, _, 16>(stream, keys, bins, bits.start, bits.end)
+    } else {
+        module.launch_radix_histogram_8::<_, _, 16>(stream, keys, bins, bits.start, bits.end)
+    }
+}
+
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn device_radix_sort_keys_buffer<
@@ -499,22 +520,10 @@ where
     validate_controls(&*bins, &*lookback, &*counters, passes, blocks)?;
     module.launch_radix_init(stream, counters, bins, passes)?;
     debug_assert_eq!(policy.passes, PASSES);
-    if PASSES == 4 {
-        module.launch_radix_histogram_4::<_, _, 16>(
-            stream,
-            &**buffers.first(),
-            bins,
-            bit_range.start,
-            bit_range.end,
-        )?;
+    if buffers.current_is_first() {
+        launch_histogram::<K, _, _, _, PASSES, DESC>(module, stream, &**buffers.first(), bins, &bit_range)?;
     } else {
-        module.launch_radix_histogram_8::<_, _, 16>(
-            stream,
-            &**buffers.first(),
-            bins,
-            bit_range.start,
-            bit_range.end,
-        )?;
+        launch_histogram::<K, _, _, _, PASSES, DESC>(module, stream, &**buffers.second(), bins, &bit_range)?;
     }
     module.launch_radix_exclusive_sum::<_, PASSES>(stream, bins, passes)?;
 
@@ -713,22 +722,10 @@ where
     validate_controls(&*bins, &*lookback, &*counters, passes, blocks)?;
     module.launch_radix_init(stream, counters, bins, passes)?;
     debug_assert_eq!(policy.passes, PASSES);
-    if PASSES == 4 {
-        module.launch_radix_histogram_4::<_, _, 16>(
-            stream,
-            &*buffers.first().0,
-            bins,
-            bit_range.start,
-            bit_range.end,
-        )?;
+    if buffers.current_is_first() {
+        launch_histogram::<K, _, _, _, PASSES, DESC>(module, stream, &*buffers.first().0, bins, &bit_range)?;
     } else {
-        module.launch_radix_histogram_8::<_, _, 16>(
-            stream,
-            &*buffers.first().0,
-            bins,
-            bit_range.start,
-            bit_range.end,
-        )?;
+        launch_histogram::<K, _, _, _, PASSES, DESC>(module, stream, &*buffers.second().0, bins, &bit_range)?;
     }
     module.launch_radix_exclusive_sum::<_, PASSES>(stream, bins, passes)?;
 

@@ -175,3 +175,9 @@ name = "block_scan_probe"
 path = "examples/block_scan_probe.rs"
 test = false
 required-features = ["cuda-oxide-example"]
+
+[[example]]
+name = "device_radix_sort_alternating_probe"
+path = "examples/device_radix_sort_alternating_probe.rs"
+test = false
+required-features = ["cuda-oxide-example"]
