@@ -15,10 +15,11 @@ pub struct ForFrame {
 
 /// Storage required for a column, including its partial lane-word tail.
 /// Widths 33..64 use an explicit wide, row-major representation.
+/// `lanes` must be a nonzero power of two.
 #[inline(always)]
 pub const fn for_words(rows: u32, lanes: u32, bits: u32) -> u64 {
     if bits > 32 { (rows as u64 * bits as u64).div_ceil(32) }
-    else { lanes as u64 * ((rows.div_ceil(lanes) as u64 * bits as u64).div_ceil(32)) }
+    else { lanes as u64 * ((((rows as u64 + lanes as u64 - 1) >> lanes.trailing_zeros()) * bits as u64).div_ceil(32)) }
 }
 
 /// Borrowed column decoder; the owner retains its allocation through execution.
@@ -32,8 +33,9 @@ pub struct ForColumn {
 }
 impl ForColumn {
     /// # Safety
-    /// `row < rows`, width is at most 64, lanes is nonzero, and payload contains
-    /// `for_words(rows, lanes, bits)` initialized words and remains immutable.
+    /// `row < rows <= lanes * 32`, width is at most 64, lanes is a nonzero
+    /// power of two, and payload contains `for_words(rows, lanes, bits)`
+    /// initialized words and remains immutable.
     #[inline(always)]
     pub unsafe fn read(self, row: u32) -> u64 {
         if self.bits == 0 { return self.base; }
@@ -50,8 +52,8 @@ impl ForColumn {
             }
             return self.base + (value & (u64::MAX >> (64 - self.bits)));
         }
-        let bit = (row / self.lanes) * self.bits;
-        let word = (bit / 32) * self.lanes + row % self.lanes;
+        let bit = (row >> self.lanes.trailing_zeros()) * self.bits;
+        let word = (bit / 32) * self.lanes + (row & (self.lanes - 1));
         let shift = bit % 32;
         let mut value = unsafe { *self.payload.add(word as usize) } >> shift;
         if shift != 0 && self.bits > 32 - shift {
@@ -116,7 +118,7 @@ impl ForColumn {
 pub unsafe fn pack_for_word<R: DeviceReadAt<Item = u64>>(input: R, rows: u32, lanes: u32, base: u64, bits: u32, word: u32) -> u32 {
     if bits == 0 { return 0; }
     let (lane, first_bit, row_stride) = if bits <= 32 {
-        (word % lanes, (word / lanes) as u64 * 32, lanes)
+        (word & (lanes - 1), (word >> lanes.trailing_zeros()) as u64 * 32, lanes)
     } else { (0, word as u64 * 32, 1) };
     let mut step = first_bit / bits as u64;
     let mut result = 0u32;
@@ -148,7 +150,7 @@ impl<P: DeviceReadAt<Item = u32>, F: DeviceReadAt<Item = ForFrame>> DeviceReadAt
         let row = (index % self.block_rows as usize) as u32;
         if frame.bits == 0 { return frame.base; }
         let (bit, lane, step) = if frame.bits <= 32 {
-            ((row / self.lanes) as u64 * frame.bits as u64, row % self.lanes, self.lanes)
+            ((row >> self.lanes.trailing_zeros()) as u64 * frame.bits as u64, row & (self.lanes - 1), self.lanes)
         } else { (row as u64 * frame.bits as u64, 0, 1) };
         let word = frame.offset + (bit / 32) * step as u64 + lane as u64;
         let shift = (bit % 32) as u32;
