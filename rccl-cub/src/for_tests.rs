@@ -38,6 +38,7 @@ fn interleaved_for_cpu_oracle() {
                     assert_eq!(sequential, values);
                     for r in 0..rows {
                         assert_eq!(unsafe { column.read(r) }, values[r as usize]);
+                        assert_eq!(unsafe { column.read_step(r / lanes, r % lanes) }, values[r as usize]);
                         assert_eq!(unsafe { range.read_at(r as usize) }, values[r as usize]);
                     }
                     // Partial intervals and stride selection must not decode

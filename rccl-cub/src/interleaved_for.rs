@@ -62,50 +62,58 @@ impl ForColumn {
         self.base + (value & (u32::MAX >> (32 - self.bits))) as u64
     }
 
+    /// Compact step-uniform extraction for a warp-owned interleaved tile.
+    /// # Safety
+    /// `step * lanes + lane` obeys `read`'s contract.
     #[inline(always)]
-    unsafe fn step<const WIDTH: u32, const STEP: u32, F: FnMut(u32, u64)>(self, lane: u32, begin: u32, end: u32, stride: u32, consume: &mut F) {
-        let row = STEP * self.lanes + lane;
-        if row >= begin && row < end && (row - begin) % stride == 0 {
-            let value = if WIDTH == 0 { 0 } else {
-                let word = ((STEP * WIDTH) / 32) * self.lanes + lane;
-                let shift = (STEP * WIDTH) % 32;
-                let mut value = unsafe { *self.payload.add(word as usize) } >> shift;
-                if shift != 0 && WIDTH > 32 - shift {
-                    value |= unsafe { *self.payload.add((word + self.lanes) as usize) } << (32 - shift);
-                }
-                value & (u32::MAX >> (32 - WIDTH))
-            };
-            consume(row, self.base + value as u64);
-        }
+    pub unsafe fn read_step(self, step: u32, lane: u32) -> u64 {
+        if self.bits == 0 { return self.base; }
+        if self.bits > 32 { return unsafe { self.read(step * self.lanes + lane) }; }
+        let bit = step * self.bits;
+        let word = bit >> 5;
+        let shift = bit & 31;
+        let lane_words = ((((self.rows + self.lanes - 1) >> self.lanes.trailing_zeros()) * self.bits) + 31) >> 5;
+        let lo = unsafe { *self.payload.add((word * self.lanes + lane) as usize) };
+        let hi = unsafe { *self.payload.add(((word + 1).min(lane_words - 1) * self.lanes + lane) as usize) };
+        let residual = ((((hi as u64) << 32 | lo as u64) >> shift) as u32) & (u32::MAX >> (32 - self.bits));
+        self.base + residual as u64
     }
 
-    #[inline(always)]
-    unsafe fn visit_width<const WIDTH: u32, F: FnMut(u32, u64)>(self, lane: u32, begin: u32, end: u32, stride: u32, consume: &mut F) {
-        // Explicit const-generic steps: no per-thread decoded vector, and every
-        // shift/mask/straddle is a compile-time constant after width dispatch.
-        macro_rules! steps { ($($s:literal),*) => { $(unsafe { self.step::<WIDTH, $s, F>(lane, begin, end, stride, consume) };)* }; }
-        steps!(0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31);
-    }
-
-    /// Visit one independent lane, consuming each value immediately. Width is
-    /// dispatched once outside the unrolled 32-step decoder. A subgroup must
-    /// supply consecutive lane IDs for consecutive/coalesced word accesses.
+    /// Visit one independent lane, consuming each value immediately. The
+    /// compact loop keeps width, base and mask invariant; bit positions and
+    /// shifts are step-uniform across the consecutive lanes of a subgroup.
     /// # Safety
     /// Same allocation contract as `read`; `lane < lanes`, `stride > 0`,
     /// `begin <= end <= rows <= lanes * 32`.
     #[inline(always)]
     pub unsafe fn visit_lane<F: FnMut(u32, u64)>(self, lane: u32, begin: u32, end: u32, stride: u32, mut consume: F) {
-        macro_rules! widths { ($($w:literal),*) => { match self.bits {
-            $($w => unsafe { self.visit_width::<$w, F>(lane, begin, end, stride, &mut consume) },)*
-            _ => {
-                let mut row = lane;
-                while row < end {
-                    if row >= begin && (row - begin) % stride == 0 { consume(row, unsafe { self.read(row) }); }
-                    row += self.lanes;
-                }
+        if begin == end { return; }
+        let lane_shift = self.lanes.trailing_zeros();
+        let mut step = begin >> lane_shift;
+        let stop = (end + self.lanes - 1) >> lane_shift;
+        if self.bits == 0 {
+            while step < stop {
+                let row = step * self.lanes + lane;
+                if row >= begin && row < end && (row - begin) % stride == 0 { consume(row, self.base); }
+                step += 1;
             }
-        } }; }
-        widths!(0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32);
+            return;
+        }
+        if self.bits > 32 {
+            while step < stop {
+                let row = step * self.lanes + lane;
+                if row >= begin && row < end && (row - begin) % stride == 0 { consume(row, unsafe { self.read(row) }); }
+                step += 1;
+            }
+            return;
+        }
+        while step < stop {
+            let row = step * self.lanes + lane;
+            if row >= begin && row < end && (row - begin) % stride == 0 {
+                consume(row, unsafe { self.read_step(step, lane) });
+            }
+            step += 1;
+        }
     }
 }
 

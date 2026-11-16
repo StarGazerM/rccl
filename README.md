@@ -267,8 +267,8 @@ Widths 0..32 use round-robin lane streams with interleaved u32 words; widths
 33..64 explicitly use a wide row-major column representation. Lane counts are
 powers of two through 32, with at most 32 rows per lane. A partial final block
 pads the final word of each lane; no sentinel word is read. `ForColumn::visit_lane`
-dispatches width outside 32 const-generic steps and immediately invokes its
-consumer for each selected value. Random access does not require tile decode.
+uses a compact, step-uniform lane loop and immediately invokes its consumer
+for each selected value. Random access does not require tile decode.
 Power-of-two lane geometry uses masks and shifts for random-access addressing,
 not per-value integer division.
 The unsafe view constructor requires initialized, matching packer-produced
