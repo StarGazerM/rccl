@@ -405,9 +405,8 @@ where
             actual: bins.len(),
         });
     }
-    // Lookback slots are addressed `block * 256 + digit` for the blocks of this
-    // sort and the whole buffer is zeroed before every pass, so a workspace
-    // sized for a longer input serves any shorter one.
+    // The agents address block * 256 + digit. Only these slots must be
+    // reset before a pass, even when reusing a larger cached workspace.
     if lookback.len() < blocks * 256 {
         return Err(DeviceAlgorithmError::WorkspaceTooSmall {
             role: "radix lookback",
@@ -528,7 +527,7 @@ where
     module.launch_radix_exclusive_sum::<_, PASSES>(stream, bins, passes)?;
 
     for pass in 0..passes {
-        crate::__private::ZeroRadixLookback::zero_radix_lookback(&mut *lookback, stream)?;
+        crate::__private::ZeroRadixLookback::zero_radix_lookback(&mut *lookback, stream, blocks * 256)?;
         let current_bit = bit_range.start + (pass * 8) as u32;
         let num_bits = (bit_range.end - current_bit).min(8);
         let current_is_first = buffers.current_is_first();
@@ -730,7 +729,7 @@ where
     module.launch_radix_exclusive_sum::<_, PASSES>(stream, bins, passes)?;
 
     for pass in 0..passes {
-        crate::__private::ZeroRadixLookback::zero_radix_lookback(&mut *lookback, stream)?;
+        crate::__private::ZeroRadixLookback::zero_radix_lookback(&mut *lookback, stream, blocks * 256)?;
         let current_bit = bit_range.start + (pass * 8) as u32;
         let num_bits = (bit_range.end - current_bit).min(8);
         let current_is_first = buffers.current_is_first();

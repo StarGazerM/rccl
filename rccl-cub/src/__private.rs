@@ -93,39 +93,31 @@ pub trait ZeroRadixLookback {
     fn zero_radix_lookback(
         &mut self,
         stream: &cuda_core::CudaStream,
+        words: usize,
     ) -> Result<(), crate::DeviceAlgorithmError>;
 }
 
-impl ZeroRadixLookback for cuda_core::DeviceBuffer<i32> {
+impl<B: rccl_memory::ContiguousDeviceRangeMut<i32>> ZeroRadixLookback for B {
     fn zero_radix_lookback(
         &mut self,
         stream: &cuda_core::CudaStream,
+        words: usize,
     ) -> Result<(), crate::DeviceAlgorithmError> {
-        self.zero_async(stream)
-            .map_err(crate::DeviceAlgorithmError::Driver)
-    }
-}
-
-impl<A: rccl_memory::DeviceAllocator> ZeroRadixLookback for rccl_memory::DeviceBuffer<'_, i32, A> {
-    fn zero_radix_lookback(
-        &mut self,
-        stream: &cuda_core::CudaStream,
-    ) -> Result<(), crate::DeviceAlgorithmError> {
-        rccl_memory::ContiguousDeviceRange::ensure_usable_on(self, stream)
-            .map_err(crate::DeviceAlgorithmError::Memory)?;
-        self.zero_async()
-            .map_err(crate::DeviceAlgorithmError::Memory)
-    }
-}
-
-impl ZeroRadixLookback for rccl_memory::TemporaryRegion<'_, i32> {
-    fn zero_radix_lookback(
-        &mut self,
-        stream: &cuda_core::CudaStream,
-    ) -> Result<(), crate::DeviceAlgorithmError> {
-        rccl_memory::ContiguousDeviceRange::ensure_usable_on(self, stream)
-            .map_err(crate::DeviceAlgorithmError::Memory)?;
-        self.zero_async()
-            .map_err(crate::DeviceAlgorithmError::Memory)
+        self.ensure_usable_on(stream).map_err(crate::DeviceAlgorithmError::Memory)?;
+        if words > self.len() {
+            return Err(crate::DeviceAlgorithmError::WorkspaceTooSmall {
+                role: "radix lookback", required: words, actual: self.len(),
+            });
+        }
+        let bytes = words.checked_mul(size_of::<i32>()).ok_or(crate::DeviceAlgorithmError::SizeOverflow)?;
+        if bytes != 0 {
+            // SAFETY: the mutable range covers this checked prefix of i32
+            // protocol words; zero is the unpublished state for every slot.
+            unsafe {
+                cuda_core::simt::memory::memset_d8_async(self.cu_deviceptr(), 0, bytes, stream.cu_stream())
+                    .map_err(crate::DeviceAlgorithmError::Driver)?;
+            }
+        }
+        Ok(())
     }
 }
